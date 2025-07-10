@@ -1,0 +1,17 @@
+[Unit]
+Description=discord musicbot startup script
+After=network.target
+
+[Service]
+Type=simple
+User=YOURNAME
+WorkingDirectory=EXAMPLE
+ExecStart=EXAMPLE/venv/bin/python EXAMPLE/main.py
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=append:EXAMPLE/output.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# stop.sh – gracefully stop the bot
+PID_FILE="botti.pid"
+
+if [[ ! -f "$PID_FILE" ]]; then
+  echo "no pid file – bot not running?"
+  exit 1
+fi
+
+PID=$(cat "$PID_FILE")
+if kill -0 "$PID" 2>/dev/null; then
+  echo "stopping bot (pid $PID)…"
+  kill "$PID"
+  # optional: wait up to 10s
+  for i in {1..10}; do
+    if kill -0 "$PID" 2>/dev/null; then
+      sleep 1
+    else
+      break
+    fi
+  done
+else
+  echo "process $PID not found."
+fi
+
+rm -f "$PID_FILE"
+echo "done."

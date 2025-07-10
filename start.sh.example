@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# start.sh – launch the bot if it isn't already running
+# place this file in the project root and `chmod +x start.sh`
+
+PID_FILE="botti.pid"
+LOG_FILE="output.log"
+VENV_DIR="venv"
+PY="$VENV_DIR/bin/python"
+
+# make sure venv exists
+if [[ ! -x "$PY" ]]; then
+  echo "virtual-env not found – run:  python3 -m venv $VENV_DIR && source $VENV_DIR/bin/activate && pip install -r requirements.txt"
+  exit 1
+fi
+
+# already running?
+if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+  echo "bot already running (pid $(cat "$PID_FILE")). nothing to do."
+  exit 0
+fi
+
+echo "starting bot…"
+nohup "$PY" main.py >>"$LOG_FILE" 2>&1 &
+echo $! >"$PID_FILE"
+echo "launched with pid $!"
