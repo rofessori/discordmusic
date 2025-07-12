@@ -26,7 +26,7 @@ cp .env.example .env   # ← edit .env with your values
 python main.py
 ```
 
-## configuration
+## setting up
 
 copy `.env.example` to `.env` and fill the following (replace with your real tokens and ids):
 
@@ -74,34 +74,7 @@ admin_username=
   - `/backup_teekkari_quotes`
   - `/random_quote`
 
----
-
-## how it works
-
-1. **command handling**  
-   uses `discord.py` with slash commands synced to your guild.
-
-2. **youtube fetch & playback**  
-   - non-url input triggers a quick web search via `urllib` + regex.
-   - `yt-dlp` extracts metadata and either **streams** or **downloads & plays**.
-   - audio piped into discord with `ffmpegpcmaudio` (with automatic reconnect).
-
-3. **caching & cleanup**  
-   - downloads saved as `<extractor>-<id>-<title>.<ext>`.
-   - `downloads.json` tracks file paths and timestamps.
-   - deletes files older than 1 hour at startup and schedules deletion 10 minutes after playback.
-
-4. **queue & controls**  
-   - maintains fifo `queue`.
-   - “now playing” message adds ◀️⏸️▶️ reactions for skip/pause/resume.
-
-5. **quotes system**  
-   - `quotes.py` writes messages from your designated channel (`quotes_id`) into `quotes.txt`.
-   - `/random_quote` returns a random line; `/backup_teekkari_quotes` rebuilds the file.
-
----
-
-## tips & troubleshooting
+## troubleshooting
 
 - **view logs**:  
   ```bash
