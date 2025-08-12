@@ -609,11 +609,22 @@ async def play(ctx, *, url: str):
     """Plays a YouTube video's audio by URL or search term."""
     await ctx.response.defer()
     if not client.currently_playing:
-        # If not already playing, join voice if not in a channel
-        if client.current_voice_channel is None:
-            client.current_voice_channel = await ctx.user.voice.channel.connect()
-            client.song_history = []  # reset history for new session
-            await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
+        # Ensure we're connected to a voice channel before creating the player
+        voice = client.current_voice_channel or ctx.guild.voice_client
+        if voice is None or not voice.is_connected():
+            if ctx.user.voice and ctx.user.voice.channel:
+                try:
+                    voice = await ctx.user.voice.channel.connect()
+                    client.current_voice_channel = voice
+                    client.song_history = []  # reset history for new session
+                    await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
+                except Exception as e:
+                    logger.error(f"Voice connection failed: {e}")
+                    await ctx.followup.send("Couldn't join voice channel.")
+                    return
+            else:
+                await ctx.followup.send("You need to join a voice channel first.")
+                return
         try:
             track = await fetch_track(url, requested_by=ctx.user)
             # If admin needs to confirm a large download
@@ -648,7 +659,7 @@ async def play(ctx, *, url: str):
                 player = discord.PCMVolumeTransformer(source, volume=client.volume)
             else:
                 player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True)
-            ctx.guild.voice_client.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, ctx.channel))
+            voice.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, ctx.channel))
             client.current_track_id = track['id']
             client.currently_playing = True
             client.last_track_info = client.current_track_info
@@ -691,10 +702,21 @@ async def playtop(ctx, *, query: str):
     await ctx.response.defer()
     if not client.currently_playing:
         # Nothing playing, so this will play immediately (similar to /play when queue empty)
-        if client.current_voice_channel is None:
-            client.current_voice_channel = await ctx.user.voice.channel.connect()
-            client.song_history = []
-            await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
+        voice = client.current_voice_channel or ctx.guild.voice_client
+        if voice is None or not voice.is_connected():
+            if ctx.user.voice and ctx.user.voice.channel:
+                try:
+                    voice = await ctx.user.voice.channel.connect()
+                    client.current_voice_channel = voice
+                    client.song_history = []
+                    await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
+                except Exception as e:
+                    logger.error(f"Voice connection failed: {e}")
+                    await ctx.followup.send("Couldn't join voice channel.")
+                    return
+            else:
+                await ctx.followup.send("You need to join a voice channel first.")
+                return
         try:
             track = await fetch_track(query, requested_by=ctx.user)
             if track.get('needs_confirm'):
@@ -707,7 +729,7 @@ async def playtop(ctx, *, query: str):
                 player = discord.PCMVolumeTransformer(source, volume=client.volume)
             else:
                 player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True)
-            ctx.guild.voice_client.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, ctx.channel))
+            voice.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, ctx.channel))
             client.current_track_id = track['id']
             client.currently_playing = True
             client.last_track_info = client.current_track_info
