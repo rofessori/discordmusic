@@ -1120,7 +1120,10 @@ async def help(ctx):
 async def on_app_command_error(ctx, error):
     # Global error handler for app commands
     logger.exception(f"Error in /{ctx.command.name}: {error}")
-    await ctx.respond("💥 Oops, something went wrong. Please check the bot logs for details.")
+    if ctx.response.is_done():
+        await ctx.followup.send("💥  Oops, something went wrong. Please check the bot logs for details.")
+    else:
+        await ctx.response.send_message("💥  Oops, something went wrong. Please check the bot logs for details.")
 
 if __name__ == "__main__":
     client.run(os.environ["BOT_TOKEN"])
