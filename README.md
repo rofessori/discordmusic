@@ -97,6 +97,15 @@ tail -f output.log
   ```bash
   rm -rf venv
   python3 -m venv venv
+  source venv/bin/activate
+  pip install --upgrade -r requirements.txt
+  ```
+
+- **voice joins then instantly leaves with websocket 4006**:  
+  this is a known failure with older `discord.py` voice handshakes. update the venv with:
+  ```bash
+  source venv/bin/activate
+  pip install --upgrade -r requirements.txt
   ```
 
 - **ffmpeg not installed**:  

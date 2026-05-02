@@ -1,13 +1,24 @@
-import os
 import re
 import random
+from pathlib import Path
+
+QUOTES_FILE = Path("quotes.txt")
+
+
+def _ensure_quotes_file():
+    """Guarantee that quotes.txt exists so incremental writes do not fail."""
+    if not QUOTES_FILE.exists():
+        QUOTES_FILE.touch()
 
 
 def saveQuotes(quotes):
-    with open("quotes.txt", "w", errors="surrogateescape") as file:
+    _ensure_quotes_file()
+    with QUOTES_FILE.open("w", errors="surrogateescape") as file:
         author = None
 
         for quote in quotes:
+            if not quote:
+                continue
 
             first_char_ascii = ord(quote[0])
             if first_char_ascii == 45 or first_char_ascii == 8226:  # Quote starts with "-" or "•"
@@ -29,12 +40,16 @@ def saveQuotes(quotes):
 
 
 def saveSingleQuote(quote):
-    with open("quotes.txt", "r+", errors="surrogateescape") as file:
+    _ensure_quotes_file()
+    if not quote:
+        return
+    with QUOTES_FILE.open("r+", errors="surrogateescape") as file:
         saved_quotes = file.readlines()
 
         first_char_ascii = ord(quote[0])
         if first_char_ascii == 45 or first_char_ascii == 8226:  # Quote starts with "-" or "•"
-            quote_to_save = re.sub(r'(\n)+', " ", f"{saved_quotes.pop(0)} {quote}")
+            leading = saved_quotes.pop(0) if saved_quotes else ""
+            quote_to_save = re.sub(r'(\n)+', " ", f"{leading} {quote}")
 
         else:
             quote_to_save = re.sub(r'(\n)+', " ", f"{quote}")
@@ -48,6 +63,8 @@ def saveSingleQuote(quote):
 
 
 def getRandomQuote():
-    lines = open("quotes.txt", "r", errors="surrogateescape").read().splitlines()
-    quote = random.choice(lines)
-    return quote
+    _ensure_quotes_file()
+    lines = QUOTES_FILE.read_text(errors="surrogateescape").splitlines()
+    if not lines:
+        return "No quotes saved yet."
+    return random.choice(lines)

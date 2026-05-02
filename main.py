@@ -10,6 +10,10 @@ import urllib.parse, urllib.request, re
 import time
 import json
 import logging
+import shutil
+import sys
+import importlib.util
+from dataclasses import dataclass
 
 # Setup logging (default to INFO level; can be toggled to DEBUG via /togglelog)
 logging.basicConfig(level=logging.INFO)
@@ -50,6 +54,7 @@ try:
         json.dump(downloaded, f)
 except Exception as e:
     logger.error(f"Could not save downloads file: {e}")
+CLEANED_DOWNLOADS = len(expired_ids)
 
 # Setup YouTube-DL (yt_dlp) options
 ytdl_options = {
@@ -78,22 +83,138 @@ ffmpeg_options = {
 # Load bot and guild tokens from .env file
 load_dotenv()
 
+def get_env_value(*names, default=None, required=True):
+    """Return the first populated environment variable from the provided names."""
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    if default is not None:
+        return default
+    if required:
+        raise RuntimeError(f"Missing required environment variable. Provide one of: {', '.join(names)}")
+    return None
+
+def coerce_int(value, label):
+    """Convert environment values that should be integers and raise a helpful error."""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        raise RuntimeError(f"{label} must be a numeric Discord snowflake.") from None
+
 # Initialize constants and global state
 queue = []  # list of track dicts for upcoming songs
-voice_clients = {}
 youtube_base_url = 'https://www.youtube.com/'
 youtube_base_url_2 = 'https://youtu.be/'
 youtube_results_url = youtube_base_url + 'results?'
 youtube_watch_url = youtube_base_url + 'watch?v='
 
-MY_GUILD = discord.Object(os.environ["MY_GUILD"])
-QUOTES_ID = int(os.environ["QUOTES_ID"])
+BOT_TOKEN = get_env_value("BOT_TOKEN", "bot_token")
+MY_GUILD_ID = coerce_int(get_env_value("MY_GUILD", "my_guild"), "MY_GUILD")
+MY_GUILD = discord.Object(id=MY_GUILD_ID)
+QUOTES_ID = coerce_int(get_env_value("QUOTES_ID", "quotes_id"), "QUOTES_ID")
 
 # Admin configuration (role and specific user allowed commands like reboot etc. + extra info privileges ;))
-ADMIN_ROLE_NAME = os.getenv("ADMIN_ROLE_NAME", "Bottiadmin")
-ADMIN_USER_ID   = os.getenv("ADMIN_USER_ID")
-ADMIN_USER_ID   = int(ADMIN_USER_ID) if ADMIN_USER_ID else None
-ADMIN_USERNAME  = os.getenv("ADMIN_USERNAME") 
+ADMIN_ROLE_NAME = get_env_value("ADMIN_ROLE_NAME", "admin_role_name", default="Bottiadmin", required=False)
+ADMIN_USER_ID   = get_env_value("ADMIN_USER_ID", "admin_user_id", required=False)
+ADMIN_USER_ID   = coerce_int(ADMIN_USER_ID, "ADMIN_USER_ID") if ADMIN_USER_ID else None
+ADMIN_USERNAME  = get_env_value("ADMIN_USERNAME", "admin_username", required=False)
+
+TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{27,}$")
+MIN_DISCORD_PY_VERSION = (2, 6, 0)
+
+def parse_version(version: str) -> tuple:
+    """Parse a package version into numeric parts for simple minimum checks."""
+    parts = [int(part) for part in re.findall(r"\d+", version)[:3]]
+    return tuple(parts + [0] * (3 - len(parts)))
+
+@dataclass
+class StartupReport:
+    errors: list
+    warnings: list
+    notes: list
+
+    def format_lines(self):
+        lines = []
+        if self.errors:
+            lines.append("Startup blockers:")
+            lines.extend(f"  ✖ {msg}" for msg in self.errors)
+        if self.warnings:
+            lines.append("Startup warnings:")
+            lines.extend(f"  ⚠ {msg}" for msg in self.warnings)
+        if self.notes:
+            lines.append("Startup notes:")
+            lines.extend(f"  • {msg}" for msg in self.notes)
+        return lines or ["Startup diagnostics: no issues detected."]
+
+    def has_blockers(self):
+        return bool(self.errors)
+
+def run_startup_diagnostics() -> StartupReport:
+    report = StartupReport(errors=[], warnings=[], notes=[])
+    discord_version = getattr(discord, "__version__", "0")
+    if parse_version(discord_version) < MIN_DISCORD_PY_VERSION:
+        report.errors.append(
+            "discord.py "
+            f"{discord_version} has a known Discord voice websocket 4006 bug. "
+            "Run `pip install --upgrade -r requirements.txt` in the venv."
+        )
+    else:
+        report.notes.append(f"discord.py {discord_version} available.")
+
+    if importlib.util.find_spec("davey") is None:
+        report.errors.append(
+            "davey is missing. Run `pip install --upgrade -r requirements.txt` "
+            "to install the Discord voice encryption dependency."
+        )
+
+    env_file = os.path.join(BASE_DIR, ".env")
+    if not os.path.isfile(env_file):
+        report.warnings.append(".env not found. Defaults or environment overrides will be used.")
+    else:
+        report.notes.append(".env loaded successfully.")
+
+    if not TOKEN_PATTERN.match(BOT_TOKEN):
+        report.warnings.append("BOT_TOKEN format looks unusual. Verify it was copied after the last reset.")
+
+    ffmpeg_path = shutil.which("ffmpeg")
+    if not ffmpeg_path:
+        report.warnings.append("ffmpeg executable not found in PATH. Audio playback will fail until it is installed.")
+    else:
+        report.notes.append(f"ffmpeg located at {ffmpeg_path}.")
+
+    try:
+        os.makedirs(BASE_DIR, exist_ok=True)
+        with open(downloads_file, "a"):
+            pass
+    except OSError as exc:
+        report.errors.append(f"Cannot write downloads cache at {downloads_file}: {exc}")
+
+    try:
+        if hasattr(quotes, "_ensure_quotes_file"):
+            quotes._ensure_quotes_file()
+        if quotes.QUOTES_FILE.exists():
+            if quotes.QUOTES_FILE.stat().st_size == 0:
+                report.warnings.append("quotes.txt is empty. Run /backup_teekkari_quotes to seed it.")
+            else:
+                report.notes.append("quotes.txt available.")
+    except Exception as exc:
+        report.errors.append(f"Cannot access quotes.txt: {exc}")
+
+    try:
+        usage = shutil.disk_usage(BASE_DIR)
+        free_mb = usage.free // (1024 * 1024)
+        if free_mb < 200:
+            report.warnings.append(f"Only {free_mb} MB free on disk; downloads may fail.")
+        else:
+            report.notes.append(f"Disk free: {free_mb} MB.")
+    except Exception as exc:
+        report.warnings.append(f"Disk usage check failed: {exc}")
+
+    if CLEANED_DOWNLOADS:
+        report.notes.append(f"Pruned {CLEANED_DOWNLOADS} expired download(s) on startup.")
+
+    return report
 
 def is_user_admin(user) -> bool:
     """Check if the given user has admin privileges (role or specific user)."""
@@ -104,32 +225,13 @@ def is_user_admin(user) -> bool:
         if role.name == ADMIN_ROLE_NAME:
             return True
     # 2) optional user-based check (only if you set ADMIN_USER_ID/USERNAME)
-    if hasattr(user, "id") and hasattr(user, "name"):
-        if user.id == ADMIN_USER_ID and user.name == ADMIN_USERNAME:
-            return True
-    if ADMIN_USER_ID and user.id == ADMIN_USER_ID:
+    user_id = getattr(user, "id", None)
+    username = getattr(user, "name", None)
+    if ADMIN_USER_ID and user_id == ADMIN_USER_ID:
         return True
-    if ADMIN_USERNAME and user.name == ADMIN_USERNAME:
+    if ADMIN_USERNAME and username == ADMIN_USERNAME:
         return True
     return False
-
-def is_user_admin(user) -> bool:
-     """Check if the given user has admin privileges (role or specific user)."""
-     if user is None:
-         return False
-     # 1) role-based check
-     for role in getattr(user, "roles", []):
-         if role.name == ADMIN_ROLE_NAME:
-             return True
-     # 2) optional user‐based check (only if you set ADMIN_USER_ID/USERNAME)
-     if hasattr(user, "id") and hasattr(user, "name"):
-         if user.id == ADMIN_USER_ID and user.name == ADMIN_USERNAME:
-             return True
-     if ADMIN_USER_ID and user.id == ADMIN_USER_ID:
-         return True
-     if ADMIN_USERNAME and user.name == ADMIN_USERNAME:
-         return True
-     return False
 
 class YTDLSource(discord.PCMVolumeTransformer):
     """
@@ -194,7 +296,30 @@ class Client(discord.Client):
 # Intents setup (enable message content for slash commands to work properly)
 intents = discord.Intents.default()
 intents.message_content = True
+intents.voice_states = True
 client = Client(intents=intents)
+startup_report = run_startup_diagnostics()
+client.startup_report = startup_report
+for line in startup_report.format_lines():
+    logger.info(line)
+if startup_report.has_blockers():
+    raise SystemExit("Startup aborted due to blocking configuration errors.")
+
+def build_runtime_status():
+    mode = "download" if client.download_mode else "stream"
+    current = client.current_track_info.get('title', 'Unknown title') if client.current_track_info else "Idle"
+    lines = [
+        f"Runtime mode: {mode}",
+        f"Queue length: {len(queue)}",
+        f"Song history entries: {len(client.song_history)}",
+        f"Currently playing: {current}",
+        f"Log level: {logging.getLevelName(logger.level)}",
+    ]
+    diag = getattr(client, "startup_report", None)
+    if diag and diag.warnings:
+        lines.append("Outstanding warnings:")
+        lines.extend(f"- {warn}" for warn in diag.warnings)
+    return "\n".join(lines)
 
 async def fetch_track(query: str, requested_by=None):
     """
@@ -434,7 +559,9 @@ async def play_next_channel(channel):
 
 @client.event
 async def on_ready():
+    await client.change_presence(activity=discord.Game(name="/help for commands"))
     logger.info(f"{client.user} on käynnistynyt.")
+    logger.info(build_runtime_status())
     try:
         synced = await client.tree.sync(guild=MY_GUILD)
         logger.info(f"Synced {len(synced)} command(s)")
@@ -443,10 +570,11 @@ async def on_ready():
 
 @client.event
 async def on_voice_state_update(member, before, after):
-    # If the bot (IgorBot) is disconnected from voice, reset the current voice channel reference
-    if member.bot and member.name == "IgorBot":
-        if after.channel is None:
-            client.current_voice_channel = None
+    # If the bot client leaves voice entirely, reset tracking state
+    bot_id = getattr(client.user, "id", None)
+    if bot_id and member.id == bot_id and after.channel is None:
+        client.current_voice_channel = None
+        client.currently_playing = False
 
 @client.event
 async def on_message(msg):
@@ -506,6 +634,9 @@ async def on_reaction_add(reaction, user):
             logger.warning(f"Failed to remove user reaction: {e}")
 
 async def save_all_channel_messages(channel):
+    if channel is None:
+        logger.warning("Quotes backup requested but quotes channel is not available.")
+        return
     messages = [message.content async for message in channel.history(limit=None)]
     quotes.saveQuotes(messages)
 
@@ -1071,6 +1202,9 @@ async def restorequeue(ctx):
 async def backup_teekkari_quotes(ctx):
     """Backs up all quotes from the Teekkari quotes channel."""
     channel = client.get_channel(QUOTES_ID)
+    if channel is None:
+        await ctx.response.send_message("Quotes channel is not accessible. Check QUOTES_ID.", ephemeral=True)
+        return
     await save_all_channel_messages(channel)
     await ctx.response.send_message("Quotes backup completed.")
     logger.info("Teekkari quotes backed up by command.")
@@ -1109,12 +1243,21 @@ async def help(ctx):
         "/togglelog – Toggle verbose logging on/off.",
         "/toggledownload – Toggle between download mode and streaming mode.",
         "/reboot – Reboot the bot (asks for confirmation).",
+        "/status – Show runtime diagnostics (admins only).",
         "",
         "**Fun/Other Commands:**",
         "/backup_teekkari_quotes – Backup all quotes from the Teekkari quotes channel.",
         "/random_quote – Get a random Teekkari quote."
     ]
     await ctx.response.send_message("\n".join(help_lines))
+
+@client.tree.command()
+async def status(ctx):
+    """Displays runtime diagnostics (admin only)."""
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    await ctx.response.send_message(build_runtime_status(), ephemeral=True)
 
 @client.tree.error
 async def on_app_command_error(ctx, error):
@@ -1126,4 +1269,4 @@ async def on_app_command_error(ctx, error):
         await ctx.response.send_message("💥  Oops, something went wrong. Please check the bot logs for details.")
 
 if __name__ == "__main__":
-    client.run(os.environ["BOT_TOKEN"])
+    client.run(BOT_TOKEN)

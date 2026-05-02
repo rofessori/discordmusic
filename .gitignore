@@ -20,3 +20,5 @@ bugjournal.md
 *.zip
 
 venv
+
+.tool-versions
