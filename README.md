@@ -4,6 +4,11 @@ a discord music bot for playing audio from any youtube video in your server’s 
 
 also has commands for handling, saving, and displaying quotes from a specific channel.
 
+## docs
+
+- [Features](FEATURES.md) - man-page style overview of the bot, playback tech, queue behavior, and restore flow.
+- [Commands](COMMANDS.md) - clean command reference with every slash command and now-playing reaction.
+
 ---
 
 ## requirements
