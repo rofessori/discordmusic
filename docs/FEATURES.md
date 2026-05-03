@@ -40,6 +40,8 @@ the queue is an in-memory list of upcoming track dictionaries. `/play` starts pl
 
 when a track ends or is skipped, the bot pops the next queued track and starts it. session history is also kept so `/getqueue` can show whether requested songs are playing, queued, played, or removed. non-admin queueing is capped to limit public-server abuse.
 
+admins can enable `/autoleave` so that if the bot is alone in voice for the configured delay, it saves the current song plus upcoming queue to `last_session_queue.tmp.json`, disconnects, and reports that the session can be started again with `/play:last`. the saved session is restored by running `/play` with `last`, `play:last`, or `/play:last` as the value.
+
 ## playlists
 
 playlists are stored locally under `playlists/<safe-name>-<playlistid>/metadata.json`. each playlist has an 8-character url-safe id, name, generated timestamp, lock state, visibility, owner discord id/name, manager user ids, and ordered track entries.

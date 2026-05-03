@@ -59,6 +59,7 @@ DOWNLOAD_DELETE_DELAY_SECONDS=600
 - **slash commands**:
   - `/join`
   - `/play <youtube url|query|playlist:name>`
+  - `/play:last`
   - `/playtop <query>`
   - `/enqueue <query|playlist:name>` (alias: `/q`)
   - `/queue [links]` (alias: `/queuelist`)
@@ -97,6 +98,7 @@ DOWNLOAD_DELETE_DELAY_SECONDS=600
 - **admin-only**:
   - `/purgequeue`
   - `/playlist predownload <playlist>` (disabled unless `PLAYLIST_PREDOWNLOAD_ENABLED=true`)
+  - `/autoleave <enabled> [delay_seconds]`
   - `/setdeletetime <seconds>`
   - `/togglelog`
   - `/toggledownload`

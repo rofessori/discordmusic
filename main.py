@@ -35,6 +35,7 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 songs_dir = BASE_DIR
 os.makedirs(songs_dir, exist_ok=True)
 downloads_file = os.path.join(songs_dir, "downloads.json")
+LAST_SESSION_QUEUE_FILE = os.path.join(BASE_DIR, "last_session_queue.tmp.json")
 PLAYLISTS_DIR = os.path.join(BASE_DIR, "playlists")
 PLAYLIST_BLACKBOX_FILE = os.path.join(BASE_DIR, "playlists-blackbox.json")
 PLAYLIST_PAGE_SIZE = 6
@@ -204,6 +205,9 @@ MAX_QUEUE_LENGTH = 50
 MIN_FREE_DOWNLOAD_MB = 512
 DOWNLOAD_DELETE_DELAY_MIN_SECONDS = 0
 DOWNLOAD_DELETE_DELAY_MAX_SECONDS = 86400
+AUTO_LEAVE_DEFAULT_DELAY_SECONDS = 10
+AUTO_LEAVE_MIN_DELAY_SECONDS = 5
+AUTO_LEAVE_MAX_DELAY_SECONDS = 3600
 
 BOT_TOKEN = get_env_value("BOT_TOKEN", "bot_token")
 MY_GUILD_ID = coerce_int(get_env_value("MY_GUILD", "my_guild"), "MY_GUILD")
@@ -598,6 +602,10 @@ class Client(discord.Client):
         self.log_verbose = False               # True = DEBUG logging on
         self.queue_links_disabled = False
         self.download_delete_delay_seconds = DEFAULT_DOWNLOAD_DELETE_DELAY_SECONDS
+        self.auto_leave_enabled = False
+        self.auto_leave_delay_seconds = AUTO_LEAVE_DEFAULT_DELAY_SECONDS
+        self.auto_leave_task = None
+        self.auto_leave_disconnect_in_progress = False
         # Queue and history tracking
         self.song_history = []                # list of all tracks requested in current session
         self.queue_backup = None              # backup of last cleared queue (for restore)
@@ -645,6 +653,7 @@ def build_runtime_status():
         f"- log level: `{logging.getLevelName(logger.level)}`",
         f"- queue links: `{'disabled' if client.queue_links_disabled else 'enabled'}`",
         f"- song delete delay: `{client.download_delete_delay_seconds}s`",
+        f"- auto leave: `{'enabled' if client.auto_leave_enabled else 'disabled'}` (`{client.auto_leave_delay_seconds}s`)",
     ]
     latest_suggestion = format_suggestion_record(client.suggestion_history[-1]) if client.suggestion_history else None
     lines.append("")
@@ -740,7 +749,10 @@ def format_suggestion_record(record: SuggestionRecord, *, include_url=True) -> s
     else:
         lines.append(f"- suggestion: `{raw_value}`")
     if include_url and record.url:
-        lines.append(f"- url: {record.url}")
+        if client.queue_links_disabled:
+            lines.append(f"- url:\n```text\n{record.url}\n```")
+        else:
+            lines.append(f"- url: {record.url}")
     return "\n".join(lines)
 
 def format_command_record(record: CommandRecord) -> str:
@@ -771,6 +783,192 @@ def build_status_message(view: str = "latest") -> str:
             lines.extend(format_command_record(record) for record in client.recent_commands[-5:])
         return "\n".join(lines)
     return build_runtime_status()
+
+def voice_channel_human_members(channel) -> list:
+    return [
+        member for member in getattr(channel, "members", [])
+        if not getattr(member, "bot", False)
+    ]
+
+def bot_is_alone_in_voice(channel) -> bool:
+    if channel is None:
+        return False
+    return len(voice_channel_human_members(channel)) == 0
+
+def cancel_auto_leave_task(reason: str = ""):
+    task = getattr(client, "auto_leave_task", None)
+    if task and not task.done():
+        task.cancel()
+        logger.info(f"Cancelled auto-leave task{f' ({reason})' if reason else ''}.")
+    client.auto_leave_task = None
+
+def current_playback_recovery_tracks() -> list:
+    tracks = []
+    if client.current_track_info:
+        tracks.append(dict(client.current_track_info))
+    tracks.extend(dict(track) for track in queue)
+    return tracks
+
+def save_last_session_recovery(voice_channel=None) -> int:
+    tracks = current_playback_recovery_tracks()
+    if not tracks:
+        return 0
+    text_channel = None
+    if client.current_track_message:
+        text_channel = getattr(client.current_track_message, "channel", None)
+    payload = {
+        "timestamp": time.time(),
+        "voice_channel_id": getattr(voice_channel, "id", None),
+        "voice_channel_name": getattr(voice_channel, "name", None),
+        "text_channel_id": getattr(text_channel, "id", None),
+        "tracks": tracks,
+    }
+    write_json_atomic(LAST_SESSION_QUEUE_FILE, payload)
+    logger.info(f"Saved last session recovery with {len(tracks)} track(s) to {LAST_SESSION_QUEUE_FILE}.")
+    return len(tracks)
+
+def load_last_session_recovery() -> Optional[dict]:
+    if not os.path.isfile(LAST_SESSION_QUEUE_FILE):
+        return None
+    try:
+        with open(LAST_SESSION_QUEUE_FILE, "r") as f:
+            payload = json.load(f)
+        tracks = payload.get("tracks", [])
+        if not isinstance(tracks, list) or not tracks:
+            return None
+        payload["tracks"] = tracks
+        return payload
+    except Exception as exc:
+        logger.error(f"Failed to load last session recovery file: {exc}")
+        return None
+
+def remove_last_session_recovery():
+    try:
+        if os.path.isfile(LAST_SESSION_QUEUE_FILE):
+            os.remove(LAST_SESSION_QUEUE_FILE)
+            logger.info("Removed last session recovery file after successful restore.")
+    except Exception as exc:
+        logger.warning(f"Failed to remove last session recovery file: {exc}")
+
+def is_play_last_query(value: str) -> bool:
+    return str(value or "").strip().lower() in {"last", "play:last", "/play:last"}
+
+async def play_saved_track_now(voice, channel, track: dict):
+    if not track.get("webpage_url") and track.get("id"):
+        track["webpage_url"] = youtube_watch_url + str(track.get("id"))
+    if track.get('file') and is_safe_download_path(track['file'], str(track.get("id") or "")):
+        source = discord.FFmpegPCMAudio(track['file'], options='-vn')
+        player = discord.PCMVolumeTransformer(source, volume=client.volume)
+    else:
+        player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True)
+    voice.play(player, after=lambda e, vid=track.get('id'): after_played_track(e, vid, channel))
+    client.current_track_id = track.get('id')
+    client.currently_playing = True
+    client.last_track_info = client.current_track_info
+    client.current_track_info = track
+    if track not in client.song_history:
+        client.song_history.append(track)
+    await publish_now_playing(channel, track)
+
+async def restore_last_session(ctx) -> bool:
+    payload = load_last_session_recovery()
+    if not payload:
+        await ctx.followup.send("No saved last session is available.")
+        return False
+    if client.currently_playing:
+        await ctx.followup.send("Something is already playing. Stop playback before using `/play:last`.")
+        return False
+    if not ctx.user.voice or not ctx.user.voice.channel:
+        await ctx.followup.send("You need to join a voice channel first.")
+        return False
+    tracks = [track for track in payload.get("tracks", []) if track.get("webpage_url") or track.get("id")]
+    if not tracks:
+        await ctx.followup.send("The saved last session has no playable tracks.")
+        return False
+    voice = client.current_voice_channel or ctx.guild.voice_client
+    if voice is None or not voice.is_connected():
+        try:
+            voice = await ctx.user.voice.channel.connect()
+            client.current_voice_channel = voice
+            cancel_auto_leave_task("play last joined voice")
+            client.song_history = []
+            await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
+        except Exception as exc:
+            logger.error(f"Voice connection failed during /play last: {exc}")
+            await ctx.followup.send("Couldn't join voice channel.")
+            return False
+    else:
+        client.current_voice_channel = voice
+        if not await require_voice_control(ctx, "restore last session"):
+            return False
+    first_track = dict(tracks[0])
+    queue[:] = [dict(track) for track in tracks[1:]]
+    try:
+        await play_saved_track_now(voice, ctx.channel, first_track)
+    except Exception as exc:
+        logger.error(f"Failed to restore last session playback: {exc}")
+        await ctx.followup.send("Failed to restore the saved last session.")
+        return False
+    remove_last_session_recovery()
+    await ctx.followup.send(f"Restored last session with {len(tracks)} track(s).")
+    logger.info(f"Restored last session through /play:last with {len(tracks)} track(s).")
+    return True
+
+async def perform_auto_leave_if_still_alone(voice_channel):
+    try:
+        await asyncio.sleep(client.auto_leave_delay_seconds)
+        if not client.auto_leave_enabled:
+            return
+        if asyncio.current_task() is not client.auto_leave_task:
+            return
+        voice = client.current_voice_channel
+        if voice is None or not voice.is_connected() or getattr(voice, "channel", None) != voice_channel:
+            return
+        if not bot_is_alone_in_voice(voice_channel):
+            return
+        notify_channel = getattr(client.current_track_message, "channel", None)
+        saved_count = save_last_session_recovery(voice_channel)
+        if not saved_count:
+            logger.info("Auto-leave found no current song or queue to save.")
+        client.auto_leave_disconnect_in_progress = True
+        try:
+            if voice.is_playing() or voice.is_paused():
+                voice.stop()
+            queue.clear()
+            client.currently_playing = False
+            client.current_track_id = None
+            client.current_track_info = None
+            client.current_track_message_show_queue = False
+            await voice.disconnect()
+            if notify_channel and saved_count:
+                try:
+                    await notify_channel.send(
+                        f"Left voice because nobody was listening. Saved {saved_count} song(s); start again with `/play:last`."
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to send auto-leave recovery message: {exc}")
+            logger.info(f"Auto-left voice channel {getattr(voice_channel, 'name', voice_channel)} after being alone.")
+        finally:
+            client.auto_leave_disconnect_in_progress = False
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        logger.error(f"Auto-leave task failed: {exc}")
+    finally:
+        if asyncio.current_task() is client.auto_leave_task:
+            client.auto_leave_task = None
+
+def schedule_auto_leave_if_needed(channel):
+    if not client.auto_leave_enabled or channel is None:
+        return
+    if not bot_is_alone_in_voice(channel):
+        cancel_auto_leave_task("user present")
+        return
+    task = getattr(client, "auto_leave_task", None)
+    if task and not task.done():
+        return
+    client.auto_leave_task = asyncio.create_task(perform_auto_leave_if_still_alone(channel))
+    logger.info(f"Scheduled auto-leave in {client.auto_leave_delay_seconds}s for channel {getattr(channel, 'name', channel)}.")
 
 def generate_playlist_id() -> str:
     return base64.urlsafe_b64encode(secrets.token_bytes(6)).decode("ascii").rstrip("=")
@@ -1459,11 +1657,10 @@ def compact_help_message() -> str:
     return "\n".join([
         "**music bot help**",
         "/play <youtube url or search> - play or queue music",
+        "/play:last - restore last auto-saved session",
+        "/playtop <query> - add next",
         "/enqueue <query> (alias /q) - add to queue",
         "/queue - show queue",
-        "/playlist list - browse playlists",
-        "/playlist new - guided playlist creation",
-        "/help topic:playlists - playlist help",
         "/help - react 📖 for full help",
     ])
 
@@ -1472,6 +1669,7 @@ def expanded_help_message() -> str:
         "**music playback**",
         "/join - Join your voice channel.",
         "/play <YouTube URL, search, or playlist:name> - Play now or queue.",
+        "/play:last - Restore the last auto-saved voice session.",
         "/playtop <query> - Play a song next.",
         "/enqueue <query or playlist:name> (alias: /q) - Add to queue.",
         "/queue [links] (alias: /queuelist) - Show upcoming songs.",
@@ -1496,7 +1694,7 @@ def expanded_help_message() -> str:
         "/playlist lock <playlist> <locked> - Lock or unlock edits.",
         "",
         "**admin / other**",
-        "/clear_queue, /restorequeue, /purgequeue, /setdeletetime, /togglelog, /toggledownload, /disablelinks, /reboot, /status",
+        "/clear_queue, /restorequeue, /purgequeue, /autoleave, /setdeletetime, /togglelog, /toggledownload, /disablelinks, /reboot, /status",
         "/backup_teekkari_quotes, /random_quote",
     ])
 
@@ -1834,6 +2032,7 @@ async def ensure_voice_for_playback(ctx):
             try:
                 voice = await ctx.user.voice.channel.connect()
                 client.current_voice_channel = voice
+                cancel_auto_leave_task("playback joined voice")
                 client.song_history = []
                 await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
             except Exception as e:
@@ -2216,6 +2415,10 @@ def after_played_track(error, video_id, channel):
         client.deletion_tasks[video_id] = task
         logger.info(f"Scheduled downloaded song cleanup for {video_id} in {delete_delay}s.")
 
+    if client.auto_leave_disconnect_in_progress:
+        logger.info("Playback callback suppressed because auto-leave is disconnecting.")
+        return
+
     # Proceed to the next track in queue
     asyncio.run_coroutine_threadsafe(play_next_channel(channel), client.loop)
 
@@ -2270,8 +2473,19 @@ async def on_voice_state_update(member, before, after):
     # If the bot client leaves voice entirely, reset tracking state
     bot_id = getattr(client.user, "id", None)
     if bot_id and member.id == bot_id and after.channel is None:
+        if not client.auto_leave_disconnect_in_progress:
+            cancel_auto_leave_task("bot disconnected")
         client.current_voice_channel = None
         client.currently_playing = False
+        client.auto_leave_disconnect_in_progress = False
+        return
+    voice = client.current_voice_channel
+    voice_channel = getattr(voice, "channel", None)
+    if voice and voice.is_connected() and voice_channel:
+        if bot_is_alone_in_voice(voice_channel):
+            schedule_auto_leave_if_needed(voice_channel)
+        else:
+            cancel_auto_leave_task("voice channel occupied")
 
 @client.event
 async def on_message(msg):
@@ -2304,12 +2518,13 @@ async def on_reaction_add(reaction, user):
         return
     if client.help_message_id and reaction.message.id == client.help_message_id and str(reaction.emoji) == HELP_EXPAND_REACTION:
         try:
-            client.help_expanded = True
-            await reaction.message.edit(content=expanded_help_message())
+            client.help_expanded = not client.help_expanded
+            await reaction.message.edit(content=expanded_help_message() if client.help_expanded else compact_help_message())
             await reaction.message.remove_reaction(reaction.emoji, user)
-            logger.info(f"Expanded help message {reaction.message.id}.")
+            state = "expanded" if client.help_expanded else "compacted"
+            logger.info(f"{state.title()} help message {reaction.message.id}.")
         except Exception as exc:
-            logger.warning(f"Failed to expand help message: {exc}")
+            logger.warning(f"Failed to toggle help message: {exc}")
         return
     # Music control reactions on the "Now Playing" message
     if client.current_track_message and reaction.message.id == client.current_track_message.id:
@@ -2376,6 +2591,7 @@ async def join(ctx):
     if ctx.user.voice:
         try:
             client.current_voice_channel = await ctx.user.voice.channel.connect()
+            cancel_auto_leave_task("joined voice")
             # Reset session history when joining a new voice channel
             client.song_history = []
             await ctx.response.send_message(f"Joined voice channel {ctx.user.voice.channel.name}")
@@ -2466,6 +2682,9 @@ async def play(ctx, *, url: str):
     """Plays a YouTube video's audio by URL or search term."""
     record_command(ctx)
     await ctx.response.defer()
+    if is_play_last_query(url):
+        await restore_last_session(ctx)
+        return
     playlist = resolve_playlist_reference(url, ctx.user)
     if playlist:
         await play_playlist_now(ctx, playlist, "play")
@@ -2478,6 +2697,7 @@ async def play(ctx, *, url: str):
                 try:
                     voice = await ctx.user.voice.channel.connect()
                     client.current_voice_channel = voice
+                    cancel_auto_leave_task("play joined voice")
                     client.song_history = []  # reset history for new session
                     await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
                 except Exception as e:
@@ -2574,6 +2794,7 @@ async def playtop(ctx, *, query: str):
                 try:
                     voice = await ctx.user.voice.channel.connect()
                     client.current_voice_channel = voice
+                    cancel_auto_leave_task("playtop joined voice")
                     client.song_history = []
                     await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
                 except Exception as e:
@@ -3270,6 +3491,49 @@ async def setdeletetime(ctx, seconds: int):
         f"({getattr(ctx.user, 'id', 0)}): {old_seconds}s -> {seconds}s"
     )
 
+@app_commands.describe(
+    enabled="Turn auto-leave on or off",
+    delay_seconds="Seconds the bot must be alone before leaving (default 10)",
+)
+@client.tree.command()
+async def autoleave(ctx, enabled: bool, delay_seconds: Optional[int] = None):
+    """Toggles leaving voice when the bot is alone (admin only)."""
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        logger.warning(
+            f"Denied /autoleave by {user_display(ctx.user)} "
+            f"({getattr(ctx.user, 'id', 0)}): admin required."
+        )
+        return
+    if delay_seconds is None:
+        delay_seconds = client.auto_leave_delay_seconds or AUTO_LEAVE_DEFAULT_DELAY_SECONDS
+    if delay_seconds < AUTO_LEAVE_MIN_DELAY_SECONDS or delay_seconds > AUTO_LEAVE_MAX_DELAY_SECONDS:
+        await ctx.response.send_message(
+            f"Auto-leave delay must be between {AUTO_LEAVE_MIN_DELAY_SECONDS} and {AUTO_LEAVE_MAX_DELAY_SECONDS} seconds.",
+            ephemeral=True,
+        )
+        return
+    client.auto_leave_enabled = enabled
+    client.auto_leave_delay_seconds = delay_seconds
+    if not enabled:
+        cancel_auto_leave_task("auto-leave disabled")
+        await ctx.response.send_message("Auto-leave is disabled.", ephemeral=True)
+        logger.info(f"Auto-leave disabled by {user_display(ctx.user)} ({getattr(ctx.user, 'id', 0)}).")
+        return
+    voice = client.current_voice_channel or ctx.guild.voice_client
+    if voice and voice.is_connected():
+        client.current_voice_channel = voice
+        schedule_auto_leave_if_needed(getattr(voice, "channel", None))
+    await ctx.response.send_message(
+        f"Auto-leave is enabled. If the bot is alone for {delay_seconds} second(s), it will save the current song and queue, then disconnect. Restore with `/play last`.",
+        ephemeral=True,
+    )
+    logger.info(
+        f"Auto-leave enabled by {user_display(ctx.user)} "
+        f"({getattr(ctx.user, 'id', 0)}) with delay={delay_seconds}s."
+    )
+
 @client.tree.command()
 async def volume(ctx, level: int):
     """Sets the audio playback volume (1-100)."""
@@ -3333,6 +3597,7 @@ async def stop(ctx):
     if not await require_voice_control(ctx, "stop playback"):
         return
     if client.current_voice_channel:
+        cancel_auto_leave_task("stop command")
         try:
             ctx.guild.voice_client.stop()
         except Exception as e:

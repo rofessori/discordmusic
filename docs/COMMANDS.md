@@ -8,6 +8,7 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | --- | --- |
 | `/join` | join the voice channel you are currently in. |
 | `/play <youtube url, search, or playlist:name>` | play a youtube result or playlist immediately, or add it to the queue if something is already playing. raw non-youtube urls are rejected. |
+| `/play:last` | restore the last auto-saved voice session after auto-leave. in Discord slash options this is entered as `/play` with `last`, `play:last`, or `/play:last` as the value. |
 | `/playtop <query>` | add a track to the front of the queue so it plays next. if nothing is playing, it starts immediately. |
 | `/enqueue <query or playlist:name>` | add a track or playlist to the end of the queue. |
 | `/q <query or playlist:name>` | alias for `/enqueue`. |
@@ -73,6 +74,7 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/togglelog` | toggle verbose debug logging. admin only. |
 | `/toggledownload` | switch between download-and-play mode and stream-only mode. admin only. |
 | `/disablelinks` | toggle whether queue-style displays are allowed to show youtube links. admin only. |
+| `/autoleave <enabled> [delay_seconds]` | when enabled, save the current song and queue and leave if the bot is alone in voice for the configured delay. admin only. |
 | `/setdeletetime <seconds>` | set how long downloaded song files wait after playback before delayed cleanup deletes them. admin only. |
 | `/reboot` | save the queue, ask for confirmation, disconnect, and exit the bot process. admin only. |
 | `/status [view]` | show runtime diagnostics, the full suggestion session, or the last five commands. admin only. |
