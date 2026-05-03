@@ -67,6 +67,7 @@ Queue reaction completed work:
 - `ADMIN_USERNAME` is ignored at runtime; use `ADMIN_USER_ID` or `ADMIN_ROLE_NAME` for admin privileges.
 - `/purgequeue` is admin-only. Non-admin playback controls and now-playing reactions require the user to be in the same voice channel as the bot.
 - Download cleanup must use `remove_download_file()`, which validates that the path is a tracked YouTube media file inside the bot directory before removal.
+- Downloaded song delayed cleanup defaults to `DOWNLOAD_DELETE_DELAY_SECONDS=600` and can be adjusted at runtime by admins with `/setdeletetime <seconds>`. The runtime command affects future cleanup schedules; already scheduled deletion tasks keep their original timer.
 - Keep `aiohttp>=3.13.4,<4.0` and `python-dotenv>=1.2.2,<2.0` in `requirements.txt` to satisfy the 2026 DoS/symlink security advisories without moving to aiohttp 4 prereleases.
 
 ## 2026-05-03 Playlist System Plan
@@ -91,6 +92,15 @@ Projectwide bugcheck follow-up:
 - Permanent playlist deletion must only report success after `safe_remove_playlist_folder()` returns true.
 - If `playlists-blackbox.json` is malformed or no longer a JSON list, preserve it and log an error instead of overwriting it with a fresh list.
 - A locked playlist should not treat managers as direct editors for admin-foreign confirmation bypass decisions; only the owner remains a direct editor while locked.
+
+## 2026-05-03 Playlist UX Redesign Notes
+- `/playlist new` with no arguments starts a guided playlist creation session scoped by guild, channel, and user. The session asks for a name, accepts YouTube URLs, supports `done`/`finish`/`valmis`/`loppu`/`stop`, supports `cancel`/`peru`/`abort`, expires after five minutes of inactivity, and saves only when the user finishes.
+- `/playlist new <name> currentqueue` imports the upcoming queue into a new playlist. `/playlist new <name> jono` is the Finnish alias for the same import mode. Queue import skips entries that have neither a URL nor video id and refuses to create an empty playlist.
+- Playlist creation should reject empty, too-long, path-unsafe, or duplicate names before writing storage. Do not silently overwrite an existing playlist.
+- `/playlist show`, `/playlist play`, `/playlist delete`, and `/playlist rename` are user-friendly aliases/direct commands layered on the existing storage and permission model.
+- `/playlist add` supports `current`, `queue`, and `url` sources. URL additions must go through the existing YouTube-only extraction path and should not store unresolved arbitrary URLs.
+- `/playlist fill current <playlist>` bulk-adds upcoming queue songs to a playlist and skips songs already present in that playlist by YouTube id or URL. It should not include the currently playing song unless that song is also in the upcoming queue.
+- Playlist help pages are served through slash options: `/help topic:playlists` for the quick-start page and `/help topic:playlist command:<subcommand>` for manpage-style pages. Slash commands cannot literally parse `/help playlist new` without redesigning the command shape.
 
 ## 2026-05-03 Setup Assistant TUI Plan & Notes
 Plan implemented for `setup_assistant.py`:

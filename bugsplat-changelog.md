@@ -1,4 +1,8 @@
 ## 2026-05-03
+- Added admin `/setdeletetime <seconds>` and `DOWNLOAD_DELETE_DELAY_SECONDS` so downloaded song cleanup delay is configurable instead of hardwired to 600 seconds.
+- Added `/playlist fill current <playlist>` to bulk-add queued songs that are not already in the target playlist, with duplicate and missing-metadata skips reported to the user.
+- Redesigned playlist creation UX: `/playlist new` now starts a guided name-and-youtube-url flow with cancel/finish words and timeout cleanup, `/playlist new <name> currentqueue` imports the upcoming queue, and `/playlist new <name> jono` is supported as the Finnish queue-import alias.
+- Added playlist usability commands and help coverage: `/playlist show`, `/playlist play`, `/playlist delete`, `/playlist rename`, URL-based `/playlist add`, `/help topic:playlists`, and manpage-style `/help topic:playlist command:<subcommand>` pages for every playlist subcommand.
 - Fixed CodeQL clear-text storage alert in `setup_assistant.py` by removing the repo-root systemd service preview file and copying generated service content through a private temporary file that is deleted after install.
 - Fixed the setup assistant role flow so admin role name is the default path in both guided and quick setup, with admin role id kept as an optional add-on instead of being prompted first.
 - Rebuilt `setup_assistant.py` into a resumable stdlib terminal setup wizard with safe secret handling, quick/guided modes, placeholder-only `.env.example` generation, optional dependency/screen/systemd automation, optional `QUOTES_ID=0`, and stable `ADMIN_ROLE_ID` support.
