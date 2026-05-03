@@ -7,6 +7,7 @@ import asyncio
 import yt_dlp
 from dotenv import load_dotenv
 import urllib.parse, re
+import ipaddress
 import time
 import json
 import logging
@@ -14,10 +15,16 @@ import shutil
 import sys
 import importlib.util
 from dataclasses import dataclass
+from typing import Optional
 
 # Setup logging (default to INFO level; can be toggled to DEBUG via /togglelog)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+SAFE_MEDIA_EXTENSIONS = {
+    ".aac", ".flac", ".m4a", ".mka", ".mkv", ".mp3", ".mp4", ".ogg",
+    ".opus", ".wav", ".webm",
+}
 
 # Ensure songs directory exists and load downloaded songs metadata
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +32,55 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 songs_dir = BASE_DIR
 os.makedirs(songs_dir, exist_ok=True)
 downloads_file = os.path.join(songs_dir, "downloads.json")
+
+def is_safe_download_path(file_path: str, video_id: Optional[str] = None) -> bool:
+    """Only allow deletion of yt-dlp media files created in this checkout."""
+    if not file_path:
+        return False
+    try:
+        real_base = os.path.realpath(songs_dir)
+        real_path = os.path.realpath(file_path)
+        if os.path.commonpath([real_base, real_path]) != real_base:
+            return False
+        if not os.path.isfile(real_path):
+            return False
+        filename = os.path.basename(real_path)
+        stem, ext = os.path.splitext(filename)
+        if ext.lower() not in SAFE_MEDIA_EXTENSIONS:
+            return False
+        if not filename.startswith("youtube-"):
+            return False
+        if video_id and f"-{video_id}-" not in f"-{stem}-":
+            return False
+        return True
+    except (OSError, ValueError):
+        return False
+
+def remove_download_file(file_path: str, *, video_id: Optional[str] = None, reason: str = "") -> bool:
+    """Remove a tracked media file only after path validation."""
+    if not file_path:
+        return False
+    if not is_safe_download_path(file_path, video_id):
+        logger.warning(
+            f"Skipped unsafe download deletion path for {video_id or 'unknown'} "
+            f"during {reason or 'cleanup'}: {file_path}"
+        )
+        return False
+    try:
+        os.remove(file_path)
+        logger.info(f"Removed downloaded media file during {reason or 'cleanup'}: {file_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Error removing downloaded media file {file_path}: {e}")
+        return False
+
+def save_downloads_metadata(context: str):
+    try:
+        with open(downloads_file, 'w') as f:
+            json.dump(downloaded, f)
+    except Exception as e:
+        logger.error(f"Failed to save downloads metadata after {context}: {e}")
+
 downloaded = {}
 if os.path.isfile(downloads_file):
     try:
@@ -40,21 +96,12 @@ expired_ids = []
 for vid, info in list(downloaded.items()):
     if current_time - info.get('timestamp', 0) > 3600:
         file_path = info.get('filepath')
-        if file_path and os.path.isfile(file_path):
-            try:
-                os.remove(file_path)
-                logger.info(f"Removed expired file: {file_path}")
-            except Exception as e:
-                logger.error(f"Error removing file {file_path}: {e}")
+        remove_download_file(file_path, video_id=vid, reason="startup expiry")
         expired_ids.append(vid)
 for vid in expired_ids:
     downloaded.pop(vid, None)
 # Save updated downloads info after cleanup
-try:
-    with open(downloads_file, 'w') as f:
-        json.dump(downloaded, f)
-except Exception as e:
-    logger.error(f"Could not save downloads file: {e}")
+save_downloads_metadata("startup cleanup")
 CLEANED_DOWNLOADS = len(expired_ids)
 
 # Setup YouTube-DL (yt_dlp) options
@@ -119,6 +166,8 @@ youtube_watch_url = youtube_base_url + 'watch?v='
 QUEUE_REACTION = "📜"
 CONTROL_REACTIONS = ("◀️", "⏸️", "▶️", QUEUE_REACTION)
 DISCORD_MESSAGE_SAFE_LIMIT = 1900
+MAX_QUEUE_LENGTH = 50
+MIN_FREE_DOWNLOAD_MB = 512
 
 BOT_TOKEN = get_env_value("BOT_TOKEN", "bot_token")
 MY_GUILD_ID = coerce_int(get_env_value("MY_GUILD", "my_guild"), "MY_GUILD")
@@ -142,9 +191,10 @@ def parse_youtube_video_id(query: str):
     except Exception:
         return None
     netloc = parsed.netloc.lower()
-    if netloc.endswith("youtu.be"):
+    host = (parsed.hostname or netloc).lower().rstrip(".")
+    if host == "youtu.be":
         return parsed.path.lstrip("/") or None
-    if "youtube.com" not in netloc:
+    if host != "youtube.com" and not host.endswith(".youtube.com"):
         return None
     qs = urllib.parse.parse_qs(parsed.query)
     if qs.get("v"):
@@ -156,10 +206,60 @@ def parse_youtube_video_id(query: str):
 
 def normalize_youtube_query(query: str):
     """Normalize YouTube URLs for caching; leave search text for yt-dlp's ytsearch1."""
+    query = validate_media_query(query)
     video_id = parse_youtube_video_id(query)
     if video_id:
         return youtube_watch_url + video_id, video_id
     return query, None
+
+def is_youtube_host(hostname: str) -> bool:
+    host = hostname.lower().rstrip(".")
+    return host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
+
+def is_private_or_local_host(hostname: str) -> bool:
+    host = hostname.strip("[]").lower().rstrip(".")
+    if host in {"localhost", "ip6-localhost", "ip6-loopback"}:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+def validate_media_query(query: str) -> str:
+    """Allow YouTube URLs and search text, but reject arbitrary user-controlled URLs."""
+    query = str(query or "").strip()
+    if not query:
+        raise ValueError("Provide a YouTube URL or search term.")
+    try:
+        parsed = urllib.parse.urlparse(query)
+    except Exception:
+        return query
+
+    scheme = parsed.scheme.lower()
+    hostname = parsed.hostname or ""
+    if parsed.netloc or scheme in {"http", "https", "file", "ftp", "ftps"}:
+        if scheme and scheme not in {"http", "https"}:
+            raise ValueError("Only YouTube URLs or search terms are supported.")
+        if not hostname:
+            raise ValueError("Only YouTube URLs or search terms are supported.")
+        if is_private_or_local_host(hostname):
+            logger.warning(f"Rejected private/local media URL host from user input: {hostname}")
+            raise ValueError("Local or private network URLs are not allowed.")
+        if not is_youtube_host(hostname):
+            logger.warning(f"Rejected non-YouTube media URL host from user input: {hostname}")
+            raise ValueError("Only YouTube URLs or search terms are supported.")
+    elif scheme and re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", query) and not re.match(r"^[^:]{1,30}:\s", query):
+        logger.warning(f"Rejected non-HTTP media URL scheme from user input: {scheme}")
+        raise ValueError("Only YouTube URLs or search terms are supported.")
+    return query
 
 def parse_version(version: str) -> tuple:
     """Parse a package version into numeric parts for simple minimum checks."""
@@ -250,6 +350,11 @@ def run_startup_diagnostics() -> StartupReport:
             "to install the Discord voice encryption dependency."
         )
 
+    if ADMIN_USERNAME:
+        report.warnings.append(
+            "ADMIN_USERNAME is configured but ignored for security. Use ADMIN_USER_ID or ADMIN_ROLE_NAME."
+        )
+
     env_file = os.path.join(BASE_DIR, ".env")
     if not os.path.isfile(env_file):
         report.warnings.append(".env not found. Defaults or environment overrides will be used.")
@@ -306,13 +411,54 @@ def is_user_admin(user) -> bool:
     for role in getattr(user, "roles", []):
         if role.name == ADMIN_ROLE_NAME:
             return True
-    # 2) optional user-based check (only if you set ADMIN_USER_ID/USERNAME)
+    # 2) optional user-based check (only if you set ADMIN_USER_ID)
     user_id = getattr(user, "id", None)
-    username = getattr(user, "name", None)
     if ADMIN_USER_ID and user_id == ADMIN_USER_ID:
         return True
-    if ADMIN_USERNAME and username == ADMIN_USERNAME:
+    return False
+
+def user_in_bot_voice_channel(user) -> bool:
+    bot_channel = getattr(client.current_voice_channel, "channel", None)
+    user_channel = getattr(getattr(user, "voice", None), "channel", None)
+    return bool(
+        bot_channel
+        and user_channel
+        and getattr(bot_channel, "id", None) == getattr(user_channel, "id", None)
+    )
+
+def can_control_voice(user) -> bool:
+    if is_user_admin(user):
         return True
+    if client.current_voice_channel is None:
+        return True
+    return user_in_bot_voice_channel(user)
+
+async def require_voice_control(ctx, action: str = "control playback") -> bool:
+    if can_control_voice(ctx.user):
+        return True
+    logger.warning(
+        f"Denied /{command_name(ctx)} by {user_display(ctx.user)} "
+        f"({getattr(ctx.user, 'id', 0)}): user is not in the bot voice channel."
+    )
+    await safe_interaction_send(
+        ctx,
+        f"You must be in the bot's voice channel to {action}.",
+        ephemeral=True,
+    )
+    return False
+
+async def require_queue_room(ctx) -> bool:
+    if is_user_admin(ctx.user) or len(queue) < MAX_QUEUE_LENGTH:
+        return True
+    logger.warning(
+        f"Denied /{command_name(ctx)} by {user_display(ctx.user)} "
+        f"({getattr(ctx.user, 'id', 0)}): queue length limit {MAX_QUEUE_LENGTH} reached."
+    )
+    await safe_interaction_send(
+        ctx,
+        f"Queue limit reached ({MAX_QUEUE_LENGTH} songs). Ask an admin to clear the queue.",
+        ephemeral=True,
+    )
     return False
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -430,7 +576,8 @@ def format_timestamp(timestamp: float) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
 
 def truncate_text(value, max_chars: int = 180) -> str:
-    text = str(value)
+    text = re.sub(r"[\r\n\t]+", " ", str(value))
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
     if len(text) <= max_chars:
         return text
     return text[:max_chars - 3] + "..."
@@ -666,6 +813,14 @@ async def toggle_now_playing_queue(message):
     except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
         logger.warning(f"Failed to toggle queue section on now-playing message {message.id}: {exc}")
 
+def enough_disk_for_download() -> bool:
+    try:
+        usage = shutil.disk_usage(BASE_DIR)
+        return usage.free >= MIN_FREE_DOWNLOAD_MB * 1024 * 1024
+    except Exception as exc:
+        logger.warning(f"Disk usage check failed before download: {exc}")
+        return True
+
 async def fetch_track(query: str, requested_by=None):
     """
     Fetches YouTube track info for the given query (URL or search term).
@@ -683,7 +838,7 @@ async def fetch_track(query: str, requested_by=None):
         file_path = info.get('filepath')
         title = info.get('title', 'Unknown title')
         page_url = youtube_watch_url + video_id
-        if file_path and os.path.isfile(file_path):
+        if file_path and is_safe_download_path(file_path, video_id):
             logger.debug(f"Using cached file for {video_id}: {title}")
             return {'id': video_id, 'title': title, 'webpage_url': page_url, 'file': file_path}
         else:
@@ -706,6 +861,8 @@ async def fetch_track(query: str, requested_by=None):
         video_id = data.get('id')
         title = data.get('title', 'Unknown title')
         page_url = data.get('webpage_url', video_url)
+        if not video_id:
+            raise Exception("Resolved track is missing a YouTube video id.")
         duration = data.get('duration', 0) or 0  # duration in seconds
         filesize = data.get('filesize') or data.get('filesize_approx') or 0
         if filesize == 0:
@@ -732,7 +889,7 @@ async def fetch_track(query: str, requested_by=None):
             total = 0
             for vid, info in downloaded.items():
                 fp = info.get('filepath')
-                if fp and os.path.isfile(fp):
+                if fp and is_safe_download_path(fp, vid):
                     try:
                         total += os.path.getsize(fp)
                     except Exception:
@@ -742,6 +899,8 @@ async def fetch_track(query: str, requested_by=None):
 
         # If in download mode, enforce file size and total disk usage limits
         if client.download_mode:
+            if not enough_disk_for_download():
+                raise Exception(f"Less than {MIN_FREE_DOWNLOAD_MB}MB free on disk; download refused.")
             new_total = total_bytes + (filesize or 0)
             if new_total > TOTAL_LIMIT_NORMAL and not is_user_admin(requested_by):
                 raise Exception("Total download cache size limit exceeded (normal user).")
@@ -773,13 +932,11 @@ async def fetch_track(query: str, requested_by=None):
         if 'entries' in data_full:
             data_full = data_full['entries'][0]
         file_path = ytdl.prepare_filename(data_full)
+        if not is_safe_download_path(file_path, video_id):
+            raise Exception("Downloaded file path failed safety validation.")
         # Cache the downloaded file info
         downloaded[video_id] = {'title': title, 'filepath': file_path, 'timestamp': time.time()}
-        try:
-            with open(downloads_file, 'w') as f:
-                json.dump(downloaded, f)
-        except Exception as e:
-            logger.error(f"Failed to update downloads file: {e}")
+        save_downloads_metadata("track download")
         logger.info(f"Downloaded '{title}' ({video_id}) to {file_path}")
         return {'id': video_id, 'title': title, 'webpage_url': page_url, 'file': file_path}
     except Exception as e:
@@ -803,18 +960,9 @@ def after_played_track(error, video_id, channel):
             info = downloaded.get(video_id)
             if info:
                 file_path = info.get('filepath')
-                if file_path and os.path.isfile(file_path):
-                    try:
-                        os.remove(file_path)
-                        logger.info(f"Removed file {file_path} after 600s delay")
-                    except Exception as e:
-                        logger.error(f"Error removing file {file_path}: {e}")
+                remove_download_file(file_path, video_id=video_id, reason="delayed playback cleanup")
                 downloaded.pop(video_id, None)
-                try:
-                    with open(downloads_file, 'w') as f:
-                        json.dump(downloaded, f)
-                except Exception as e:
-                    logger.error(f"Failed to update downloads file: {e}")
+                save_downloads_metadata("delayed playback cleanup")
             # Remove this task from tracking
             client.deletion_tasks.pop(video_id, None)
         # If a deletion task is already scheduled for this video, cancel it
@@ -911,6 +1059,16 @@ async def on_reaction_add(reaction, user):
         return  # ignore the bot's own reactions
     # Music control reactions on the "Now Playing" message
     if client.current_track_message and reaction.message.id == client.current_track_message.id:
+        if not can_control_voice(user):
+            logger.warning(
+                f"Denied now-playing reaction {reaction.emoji} by {user_display(user)} "
+                f"({getattr(user, 'id', 0)}): user is not in the bot voice channel."
+            )
+            try:
+                await reaction.message.remove_reaction(reaction.emoji, user)
+            except Exception as e:
+                logger.warning(f"Failed to remove denied user reaction: {e}")
+            return
         emoji = str(reaction.emoji)
         if emoji == QUEUE_REACTION:
             await toggle_now_playing_queue(reaction.message)
@@ -975,6 +1133,8 @@ async def join(ctx):
 async def clear_queue(ctx):
     """Clears the current song queue, with option to delete downloaded files."""
     record_command(ctx)
+    if not await require_voice_control(ctx, "clear the queue"):
+        return
     if len(queue) == 0:
         await ctx.response.send_message("There is no queue to clear")
         logger.info("User tried to clear queue, there is no queue to clear.")
@@ -1016,18 +1176,10 @@ async def clear_queue(ctx):
                         # Do not delete the file of the currently playing track, if any
                         continue
                     file_path = info.get('filepath')
-                    if file_path and os.path.isfile(file_path):
-                        try:
-                            os.remove(file_path)
-                            count += 1
-                        except Exception as e:
-                            logger.error(f"Error deleting file {file_path}: {e}")
+                    if remove_download_file(file_path, video_id=vid, reason="admin clear_queue"):
+                        count += 1
                     downloaded.pop(vid, None)
-                try:
-                    with open(downloads_file, 'w') as f:
-                        json.dump(downloaded, f)
-                except Exception as e:
-                    logger.error(f"Failed to save downloads file after deletion: {e}")
+                save_downloads_metadata("admin clear_queue deletion")
                 await ctx.followup.send(f"Queue cleared and {count} files deleted from disk.")
                 logger.info(f"Queue cleared by admin (deleted {count} files from disk).")
             else:
@@ -1042,6 +1194,8 @@ async def clear_queue(ctx):
 async def skip(ctx):
     """Skips the currently playing track."""
     record_command(ctx)
+    if not await require_voice_control(ctx, "skip tracks"):
+        return
     if client.current_voice_channel and client.current_voice_channel.is_connected() and (client.current_voice_channel.is_playing() or client.current_voice_channel.is_paused()):
         client.current_voice_channel.stop()
         await ctx.response.send_message("Skipped the current track")
@@ -1072,6 +1226,10 @@ async def play(ctx, *, url: str):
                     return
             else:
                 await ctx.followup.send("You need to join a voice channel first.")
+                return
+        else:
+            client.current_voice_channel = voice
+            if not await require_voice_control(ctx, "start playback"):
                 return
         try:
             suggestion = record_suggestion(ctx, "play", url)
@@ -1126,6 +1284,8 @@ async def play(ctx, *, url: str):
             await ctx.followup.send("Failed to play the requested track.")
     else:
         # If something is already playing, add the requested song to the queue
+        if not await require_queue_room(ctx):
+            return
         try:
             suggestion = record_suggestion(ctx, "play", url)
             track = await fetch_track(url, requested_by=ctx.user)
@@ -1166,6 +1326,10 @@ async def playtop(ctx, *, query: str):
             else:
                 await ctx.followup.send("You need to join a voice channel first.")
                 return
+        else:
+            client.current_voice_channel = voice
+            if not await require_voice_control(ctx, "start playback"):
+                return
         try:
             suggestion = record_suggestion(ctx, "playtop", query)
             track = await fetch_track(query, requested_by=ctx.user)
@@ -1198,6 +1362,8 @@ async def playtop(ctx, *, query: str):
             await ctx.followup.send("Failed to play the track.")
     else:
         # If currently playing, queue this track to be next
+        if not await require_queue_room(ctx):
+            return
         try:
             suggestion = record_suggestion(ctx, "playtop", query)
             track = await fetch_track(query, requested_by=ctx.user)
@@ -1217,6 +1383,8 @@ async def playtop(ctx, *, query: str):
 async def enqueue_track(ctx, query: str, command_name: str = "enqueue"):
     record_command(ctx)
     await ctx.response.defer()
+    if not await require_queue_room(ctx):
+        return
     try:
         suggestion = record_suggestion(ctx, command_name, query)
         track = await fetch_track(query, requested_by=ctx.user)
@@ -1248,6 +1416,8 @@ async def q_cmd(ctx, *, query: str):
 async def queue_first(ctx, position: int, command_name: str):
     """Move a queued track to the front so it plays next."""
     record_command(ctx)
+    if not await require_voice_control(ctx, "reorder the queue"):
+        return
     if position < 1:
         await ctx.response.send_message("Queue positions start at 1.")
         logger.info(f"/{command_name} rejected invalid queue position {position}.")
@@ -1329,31 +1499,31 @@ async def queuelist(ctx, links: bool = False):
 async def purgequeue(ctx):
     """Removes all downloaded song files from disk, but keeps the queue intact."""
     record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        logger.warning(
+            f"Denied /purgequeue by {user_display(ctx.user)} "
+            f"({getattr(ctx.user, 'id', 0)}): admin required."
+        )
+        return
     count = 0
     current_id = client.current_track_id
     for vid, info in list(downloaded.items()):
         if vid == current_id:
             continue  # skip current playing track's file
         file_path = info.get('filepath')
-        if file_path and os.path.isfile(file_path):
-            try:
-                os.remove(file_path)
-                count += 1
-                logger.debug(f"Deleted file {file_path}")
-            except Exception as e:
-                logger.error(f"Error deleting file {file_path}: {e}")
+        if remove_download_file(file_path, video_id=vid, reason="purgequeue"):
+            count += 1
         downloaded.pop(vid, None)
-    try:
-        with open(downloads_file, 'w') as f:
-            json.dump(downloaded, f)
-    except Exception as e:
-        logger.error(f"Failed to save downloads file after purge: {e}")
+    save_downloads_metadata("purgequeue")
     await ctx.response.send_message(f"Purged {count} files from disk.")
 
 @client.tree.command()
 async def volume(ctx, level: int):
     """Sets the audio playback volume (1-100)."""
     record_command(ctx)
+    if not await require_voice_control(ctx, "change volume"):
+        return
     if level < 1 or level > 100:
         await ctx.response.send_message("Volume must be between 1 and 100.")
         return
@@ -1370,6 +1540,8 @@ async def volume(ctx, level: int):
 async def pause(ctx):
     """Pauses the current audio."""
     record_command(ctx)
+    if not await require_voice_control(ctx, "pause playback"):
+        return
     if client.current_voice_channel is None:
         logger.info("Pause command issued, but bot is not in a voice channel.")
         await ctx.response.send_message("Not currently in a voice channel")
@@ -1387,6 +1559,8 @@ async def pause(ctx):
 async def resume(ctx):
     """Resumes the current audio if paused."""
     record_command(ctx)
+    if not await require_voice_control(ctx, "resume playback"):
+        return
     if client.current_voice_channel is None:
         logger.info("Resume command issued, but bot is not in a voice channel.")
         await ctx.response.send_message("Not currently in a voice channel")
@@ -1404,6 +1578,8 @@ async def resume(ctx):
 async def stop(ctx):
     """Stops playback and disconnects the bot from the voice channel."""
     record_command(ctx)
+    if not await require_voice_control(ctx, "stop playback"):
+        return
     if client.current_voice_channel:
         try:
             ctx.guild.voice_client.stop()
@@ -1645,23 +1821,23 @@ async def help(ctx):
     help_lines = [
         "**Music Playback Commands:**",
         "/join – Join your voice channel.",
-        "/play <URL or search> – Play a song (or add to queue if something is already playing).",
+        "/play <YouTube URL or search> – Play a song (or add to queue if something is already playing).",
         "/playtop <query> – Play a song next (skip ahead of the queue).",
         "/enqueue <query> – Add a song to the queue (alias: /q).",
         "/queue [links] (alias: /queuelist) – Show the upcoming songs in the queue.",
         "/queuefirst <position> (alias: /qfirst) – Move a queued song to play next.",
         "React 📜 on now-playing – Toggle the queue above the now-playing message.",
-        "/skip – Skip the current track.",
-        "/stop – Stop playback and disconnect the bot.",
-        "/pause – Pause the current playing audio.",
-        "/resume – Resume the paused audio.",
-        "/volume <1-100> – Set playback volume.",
+        "/skip – Skip the current track (same voice channel or admin).",
+        "/stop – Stop playback and disconnect the bot (same voice channel or admin).",
+        "/pause – Pause the current playing audio (same voice channel or admin).",
+        "/resume – Resume the paused audio (same voice channel or admin).",
+        "/volume <1-100> – Set playback volume (same voice channel or admin).",
         "/now (alias: /nytsoi) – Show the currently playing song.",
         "/getqueue – List all songs requested this session and their status.",
         "",
         "**Queue Management Commands:**",
-        "/clear_queue – Clear the song queue (admins will be prompted to delete files).",
-        "/purgequeue – Delete all downloaded song files (except the currently playing one).",
+        "/clear_queue – Clear the song queue (same voice channel or admin; admins can delete files).",
+        "/purgequeue – Delete downloaded song files (admin only, except the current file).",
         "/restorequeue – Restore the last cleared or saved queue (admin only, within 10 min).",
         "",
         "**Admin Commands:**",

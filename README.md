@@ -6,8 +6,8 @@ also has commands for handling, saving, and displaying quotes from a specific ch
 
 ## docs
 
-- [Features](FEATURES.md) - man-page style overview of the bot, playback tech, queue behavior, and restore flow.
-- [Commands](COMMANDS.md) - clean command reference with every slash command and now-playing reaction.
+- [Features](docs/FEATURES.md) - man-page style overview of the bot, playback tech, queue behavior, and restore flow.
+- [Commands](docs/COMMANDS.md) - clean command reference with every slash command and now-playing reaction.
 
 ---
 
@@ -46,7 +46,6 @@ quotes_id=your_quotes_channel_id
 admin_role_name=bottiadmin
 # optional admin user override:
 admin_user_id=
-admin_username=
 ```
 
 ---
@@ -55,7 +54,7 @@ admin_username=
 
 - **slash commands**:
   - `/join`
-  - `/play <url|query>`
+  - `/play <youtube url|query>`
   - `/playtop <query>`
   - `/enqueue <query>` (alias: `/q`)
   - `/queue [links]` (alias: `/queuelist`)
@@ -70,10 +69,10 @@ admin_username=
 
 - **queue management**:
   - `/clear_queue`
-  - `/purgequeue`
   - `/restorequeue`
 
 - **admin-only**:
+  - `/purgequeue`
   - `/togglelog`
   - `/toggledownload`
   - `/disablelinks`
@@ -102,6 +101,12 @@ tail -f output.log
 
 - **youtube “confirm you're not a bot” error**:  
   update yt-dlp with `pip install --upgrade -r requirements.txt` and make sure `deno` or `node` is on `PATH`. if YouTube still blocks your server IP, export YouTube cookies to `cookies.txt` and set `YTDLP_COOKIEFILE=cookies.txt` in `.env`.
+
+- **dependabot alerts for aiohttp or python-dotenv**:
+  run `pip install --upgrade -r requirements.txt`. the requirements require `aiohttp>=3.13.4,<4.0` for the 2026 aiohttp DoS fixes and `python-dotenv>=1.2.2,<2.0` for the `.env` symlink rewrite fix.
+
+- **non-youtube urls rejected**:
+  public users can provide youtube links or normal search text. raw non-youtube URLs, local URLs, and private-network URLs are rejected before `yt-dlp` runs to reduce SSRF and local-network probing risk.
 
 - **startup warning: no deno or node executable found in path**:
   install Deno on the host and make sure the bot process can find it:

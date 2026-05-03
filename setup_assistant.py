@@ -32,7 +32,6 @@ FIELD_ORDER = [
     ("quotes_id", False),
     ("admin_role_name", False),
     ("admin_user_id", False),
-    ("admin_username", False),
 ]
 
 
@@ -132,10 +131,6 @@ def collect_values(defaults: dict[str, str]) -> dict[str, str]:
             values["admin_user_id"] = admin_id
             break
         print("  If provided, the admin user ID must be numeric.")
-
-    # Optional admin username
-    admin_user_default = defaults.get("admin_username") or defaults.get("ADMIN_USERNAME") or ""
-    values["admin_username"] = prompt_input("Specific admin username (optional)", default=admin_user_default)
 
     return values
 

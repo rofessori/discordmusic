@@ -22,7 +22,7 @@ There is no automated suite yet; validate behavior manually on a staging guild. 
 Recent commits are short, imperative sentences (e.g., `Handle missing voice client before playback`). Follow that style, group related edits in one commit, and mention relevant issue numbers in the body. PRs should describe user-facing changes, list bot commands touched, outline manual test steps, and attach screenshots/log excerpts when altering slash-command UX. Include notes about migration needs (new env vars, files) so deployers can react before merging.
 
 ## Security & Configuration Tips
-Never commit `.env`, tokens, or `quotes.txt` contents—use `.gitignore`. Rotate discord tokens after sharing test bots and revoke invite links when done. When enabling download mode, ensure disk clean-up logic stays intact and document any new directories or cache knobs in this guide.
+Never commit `.env`, tokens, or `quotes.txt` contents—use `.gitignore`. Rotate discord tokens after sharing test bots and revoke invite links when done. When enabling download mode, ensure disk clean-up logic stays intact and document any new directories or cache knobs in this guide. Public media input must stay limited to YouTube URLs or search text; do not pass arbitrary user-provided URLs to `yt-dlp`. Admin checks should use the configured role or numeric Discord user ID, not mutable usernames. File deletion for downloaded media must go through the safe deletion helper so corrupted metadata cannot delete unrelated files.
 
 ## 2026-05-03 Queue Jump & Now Playing Notes
 Focused current-state analysis before the change:
@@ -61,3 +61,10 @@ Queue reaction completed work:
 - `/status` is admin-only and now supports `view:latest`, `view:session`, and `view:commands`; keep new status data compact enough for one Discord message.
 - `/queue` and `/queuelist` accept `links:true` to include YouTube URLs. `/disablelinks` is an admin session toggle that hides URLs from queue-style displays, including the `📜` now-playing queue section.
 - `/now` and `/nytsoi` should stay compact: title plus video id only, never the full YouTube URL.
+
+## 2026-05-03 Security Hardening Notes
+- User media input is intentionally YouTube-only for raw URLs, while normal search text still works. Reject non-YouTube URLs before `yt-dlp` sees them to reduce SSRF and local-network probing risk.
+- `ADMIN_USERNAME` is ignored at runtime; use `ADMIN_USER_ID` or `ADMIN_ROLE_NAME` for admin privileges.
+- `/purgequeue` is admin-only. Non-admin playback controls and now-playing reactions require the user to be in the same voice channel as the bot.
+- Download cleanup must use `remove_download_file()`, which validates that the path is a tracked YouTube media file inside the bot directory before removal.
+- Keep `aiohttp>=3.13.4,<4.0` and `python-dotenv>=1.2.2,<2.0` in `requirements.txt` to satisfy the 2026 DoS/symlink security advisories without moving to aiohttp 4 prereleases.
