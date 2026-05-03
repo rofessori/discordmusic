@@ -836,8 +836,8 @@ def load_last_session_recovery() -> Optional[dict]:
         tracks = payload.get("tracks", [])
         if not isinstance(tracks, list) or not tracks:
             return None
-    payload["tracks"] = tracks
-    return payload
+        payload["tracks"] = tracks
+        return payload
     except Exception as exc:
         logger.error(f"Failed to load last session recovery file: {exc}")
         return None
