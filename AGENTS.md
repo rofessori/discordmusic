@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Core runtime logic lives in `main.py`, which wires Discord intents, audio queueing, and yt-dlp downloads. Quote persistence is isolated in `quotes.py`, producing `quotes.txt` at runtime. Runtime artifacts such as `downloads.json`, `queue_backup.json`, and `queue_backup.tmp` live at the repo root; keep them out of commits unless they are fixtures. Environment secrets belong in `.env` (copy from `.env.example`). Deployment helpers live in `start.sh.example`, `stop.sh.example`, and `bot.service.example` for systemd setups.
+Core runtime logic lives in `main.py`, which wires Discord intents, audio queueing, and yt-dlp downloads. Quote persistence is isolated in `quotes.py`, producing `quotes.txt` at runtime. Runtime artifacts such as `downloads.json`, `queue_backup.json`, and `queue_backup.tmp` live at the repo root; keep them out of commits unless they are fixtures. Environment secrets belong in `.env`; if `.env` already exists, do not add or recreate an `.env.example` template unless the user explicitly asks for one. Deployment helpers live in `start.sh.example`, `stop.sh.example`, and `bot.service.example` for systemd setups.
 
 ## Build, Test, and Development Commands
 Use a virtualenv to keep yt-dlp, discord.py, and PyNaCl pinned:
