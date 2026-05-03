@@ -1,6 +1,7 @@
 /.env
 /.env.backup
 /setup.tmp
+/last_session_queue.tmp.json
 /.idea
 /__pycache__
 
