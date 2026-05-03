@@ -1,4 +1,5 @@
 ## 2026-05-03
+- Fixed CodeQL clear-text storage alert in `setup_assistant.py` by removing the repo-root systemd service preview file and copying generated service content through a private temporary file that is deleted after install.
 - Fixed the setup assistant role flow so admin role name is the default path in both guided and quick setup, with admin role id kept as an optional add-on instead of being prompted first.
 - Rebuilt `setup_assistant.py` into a resumable stdlib terminal setup wizard with safe secret handling, quick/guided modes, placeholder-only `.env.example` generation, optional dependency/screen/systemd automation, optional `QUOTES_ID=0`, and stable `ADMIN_ROLE_ID` support.
 - Fixed playlist edge cases found during a projectwide bug/security/UX pass: `/playlist move` now replies correctly after admin confirmation prompts, immediate playlist deletion only reports success after the safe folder-removal check passes, malformed `playlists-blackbox.json` files are preserved instead of overwritten, expired delete tasks are cleaned up, and locked playlist managers no longer bypass foreign-admin confirmation logic.

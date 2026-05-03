@@ -103,6 +103,7 @@ Plan implemented for `setup_assistant.py`:
 - Keep the bot runtime tolerant of optional quotes by allowing `QUOTES_ID=0`. Admin role setup should prefer `ADMIN_ROLE_NAME=Bottiadmin` as the default user-facing path and keep `ADMIN_ROLE_ID` as an optional stable-id add-on.
 
 Setup security checks:
-- Do not commit `.env`, `.env.backup`, `setup.tmp`, or generated local service files.
+- Do not commit `.env`, `.env.backup`, or `setup.tmp`.
+- Do not write generated systemd service previews into the repository. Render the preview in memory and, if installing, copy it through a private temporary file that is deleted afterwards.
 - Do not use `ADMIN_USERNAME` for privileges; it is only a setup note and remains ignored by the bot runtime.
 - The systemd service generator should point at the repo's venv Python and append stdout/stderr to `output.log`.

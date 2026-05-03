@@ -27,7 +27,6 @@ ENV_PATH = ROOT / ".env"
 ENV_TEMPLATE_PATH = ROOT / ".env.example"
 ENV_BACKUP_PATH = ROOT / ".env.backup"
 STATE_PATH = ROOT / "setup.tmp"
-LOCAL_SERVICE_PATH = ROOT / "discordmusicbot.service.local"
 
 DEV_PORTAL_URL = "https://discord.com/developers/applications"
 DEVMODE_GUIDE_URL = "https://support.discord.com/hc/en-us/articles/206346498"
@@ -290,7 +289,30 @@ def render_systemd_service(service_user: str, workdir: Path) -> str:
     ).strip() + "\n"
 
 
-def build_systemd_install_commands(local_service: Path = LOCAL_SERVICE_PATH) -> list[list[str]]:
+def write_private_temp_service(content: str) -> Path:
+    """Keep generated service previews out of the repo and private until sudo copies them."""
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        prefix="discordmusicbot-",
+        suffix=".service",
+        delete=False,
+    )
+    temp_path = Path(handle.name)
+    try:
+        handle.write(content)
+        handle.close()
+        os.chmod(temp_path, 0o600)
+        return temp_path
+    except Exception:
+        handle.close()
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def build_systemd_install_commands(local_service: Path) -> list[list[str]]:
     destination = f"/etc/systemd/system/{SERVICE_NAME}"
     return [
         ["sudo", "cp", str(local_service), destination],
@@ -712,19 +734,30 @@ class SetupAssistant:
             allow_blank=False,
         )
         workdir = Path(workdir_text).expanduser().resolve()
-        LOCAL_SERVICE_PATH.write_text(render_systemd_service(service_user, workdir))
-        print(f"Wrote local service preview: {LOCAL_SERVICE_PATH}")
-        commands = build_systemd_install_commands()
-        print("The assistant can run:")
-        for command in commands:
-            print(f"  {command_text(command)}")
+        service_content = render_systemd_service(service_user, workdir)
+        print("Service preview:")
+        print(color("-" * 62, "36"))
+        print(service_content.rstrip())
+        print(color("-" * 62, "36"))
+        print("The assistant will copy this through a private temporary file if you confirm.")
         if self.ask_yes_no("Install and start the systemd service now?", default=False):
-            for command in commands:
-                if not self.run_command(command):
-                    print("Systemd setup stopped. The local service file was left in place.")
-                    return
-            print(color("Systemd service installed and started.", "32"))
-            self.wait_continue()
+            temp_service = write_private_temp_service(service_content)
+            try:
+                commands = build_systemd_install_commands(temp_service)
+                print("The assistant will run:")
+                for command in commands:
+                    print(f"  {command_text(command)}")
+                for command in commands:
+                    if not self.run_command(command):
+                        print("Systemd setup stopped. The temporary service file was removed.")
+                        return
+                print(color("Systemd service installed and started.", "32"))
+                self.wait_continue()
+            finally:
+                try:
+                    temp_service.unlink()
+                except OSError:
+                    pass
 
     def finish(self) -> None:
         remove_state()
@@ -788,7 +821,18 @@ def self_test() -> None:
     assert render_env_example().find("ADMIN_ROLE_NAME") < render_env_example().find("ADMIN_ROLE_ID")
     assert build_venv_commands()[0][-3:] == ["-m", "venv", "venv"]
     assert build_screen_start_command()[:4] == ["screen", "-S", "bot", "-dm"]
-    assert SERVICE_NAME in build_systemd_install_commands()[2]
+    service_text = render_systemd_service("botuser", Path("/srv/discordmusic"))
+    assert "BOT_TOKEN" not in service_text
+    assert "MY_GUILD" not in service_text
+    assert "QUOTES_ID" not in service_text
+    temp_service = write_private_temp_service(service_text)
+    try:
+        assert temp_service.stat().st_mode & 0o777 == 0o600
+        commands = build_systemd_install_commands(temp_service)
+        assert commands[0][2] == str(temp_service)
+        assert SERVICE_NAME in commands[2]
+    finally:
+        temp_service.unlink()
     print("setup assistant self-test passed")
 
 
