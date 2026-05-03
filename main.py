@@ -820,7 +820,8 @@ def append_playlist_blackbox_event(action: str, playlist: dict, actor=None):
             with open(PLAYLIST_BLACKBOX_FILE, "r") as f:
                 events = json.load(f)
             if not isinstance(events, list):
-                events = []
+                logger.error("Playlist blackbox file is not a JSON list; preserving it without appending.")
+                return
         else:
             events = []
         events.append(event)
@@ -837,7 +838,9 @@ def parse_playlist_flags(flags: Optional[str]) -> set:
 
 def direct_playlist_editor(user, playlist: dict) -> bool:
     uid = user_id_value(user)
-    return uid == playlist_owner_id(playlist) or uid in playlist_manager_ids(playlist)
+    if uid == playlist_owner_id(playlist):
+        return True
+    return not playlist.get("locked") and uid in playlist_manager_ids(playlist)
 
 def admin_editing_foreign_playlist(user, playlist: dict) -> bool:
     return is_user_admin(user) and not direct_playlist_editor(user, playlist)
@@ -918,6 +921,7 @@ async def schedule_playlist_purge(playlist_id: str, delete_after: float):
     playlist = resolve_playlist_reference(playlist_id, require_visible=False, include_deleted=True)
     if playlist and playlist.get("deleted") and playlist.get("delete_after", 0) <= time.time():
         safe_remove_playlist_folder(playlist)
+    client.playlist_delete_tasks.pop(playlist_id, None)
 
 def is_playlist_public(playlist: dict) -> bool:
     return playlist.get("visibility") == "public"
@@ -2375,9 +2379,11 @@ async def playlist_remove(ctx, playlist: str, flags: Optional[str] = None):
         ):
             await safe_interaction_send(ctx, "Playlist removal cancelled.", ephemeral=True)
             return
-    append_playlist_blackbox_event("removed-now" if remove_now else "removed", target, ctx.user)
     if remove_now:
-        safe_remove_playlist_folder(target)
+        if not safe_remove_playlist_folder(target):
+            await safe_interaction_send(ctx, "Playlist removal failed. Check output.log.", ephemeral=True)
+            return
+        append_playlist_blackbox_event("removed-now", target, ctx.user)
         await safe_interaction_send(ctx, "Playlist removed permanently.")
         logger.info(f"Playlist removed immediately: {target.get('name')} ({target.get('id')})")
         return
@@ -2389,6 +2395,7 @@ async def playlist_remove(ctx, playlist: str, flags: Optional[str] = None):
     target["deleted_by_user_id"] = user_id_value(ctx.user)
     target["deleted_by_discord_name"] = user_display(ctx.user)
     save_playlist(target)
+    append_playlist_blackbox_event("removed", target, ctx.user)
     if target.get("id") in client.playlist_delete_tasks:
         client.playlist_delete_tasks[target["id"]].cancel()
     client.playlist_delete_tasks[target["id"]] = asyncio.create_task(schedule_playlist_purge(target["id"], delete_after))
@@ -2481,12 +2488,12 @@ async def playlist_move(ctx, playlist: str, from_position: int, to_position: int
         return
     tracks = target.get("tracks", [])
     if from_position < 1 or from_position > len(tracks) or to_position < 1 or to_position > len(tracks):
-        await ctx.response.send_message("Song positions must exist in the playlist.", ephemeral=True)
+        await safe_interaction_send(ctx, "Song positions must exist in the playlist.", ephemeral=True)
         return
     track = tracks.pop(from_position - 1)
     tracks.insert(to_position - 1, track)
     save_playlist(target)
-    await ctx.response.send_message(f"Moved **{discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))}** to position {to_position}.")
+    await safe_interaction_send(ctx, f"Moved **{discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))}** to position {to_position}.")
 
 @app_commands.describe(playlist="Playlist name, id, or playlist:name", locked="Whether managers are blocked from editing")
 @playlist_group.command(name="lock", description="Lock or unlock a playlist.")

@@ -85,3 +85,9 @@ Queue reaction completed work:
 - Admins can edit, remove, or move songs in another user's playlist, but must confirm unless `-force` is present. Owners/managers may pass `-force`; it is accepted and ignored without extra user-facing noise.
 - Admin-only `-now` on `/playlist remove` deletes the playlist folder immediately. `/playlist remove <name> -now -force` skips confirmation; normal users cannot use `-now`.
 - `playlists-blackbox.json` in the repository root is an append-only JSON audit list for playlist create/remove/rescue events. Entries should include playlist name/id, owner, managers, actor, and YouTube link list; do not delete or rewrite old entries.
+
+Projectwide bugcheck follow-up:
+- Playlist mutation commands that may show a confirmation prompt must answer through `safe_interaction_send()` after the prompt, because the original slash-command response may already be consumed.
+- Permanent playlist deletion must only report success after `safe_remove_playlist_folder()` returns true.
+- If `playlists-blackbox.json` is malformed or no longer a JSON list, preserve it and log an error instead of overwriting it with a fresh list.
+- A locked playlist should not treat managers as direct editors for admin-foreign confirmation bypass decisions; only the owner remains a direct editor while locked.
