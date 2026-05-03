@@ -201,9 +201,11 @@ MIN_FREE_DOWNLOAD_MB = 512
 BOT_TOKEN = get_env_value("BOT_TOKEN", "bot_token")
 MY_GUILD_ID = coerce_int(get_env_value("MY_GUILD", "my_guild"), "MY_GUILD")
 MY_GUILD = discord.Object(id=MY_GUILD_ID)
-QUOTES_ID = coerce_int(get_env_value("QUOTES_ID", "quotes_id"), "QUOTES_ID")
+QUOTES_ID = coerce_int(get_env_value("QUOTES_ID", "quotes_id", default="0", required=False), "QUOTES_ID")
 
 # Admin configuration (role and specific user allowed commands like reboot etc. + extra info privileges ;))
+ADMIN_ROLE_ID   = get_env_value("ADMIN_ROLE_ID", "admin_role_id", required=False)
+ADMIN_ROLE_ID   = coerce_int(ADMIN_ROLE_ID, "ADMIN_ROLE_ID") if ADMIN_ROLE_ID else None
 ADMIN_ROLE_NAME = get_env_value("ADMIN_ROLE_NAME", "admin_role_name", default="Bottiadmin", required=False)
 ADMIN_USER_ID   = get_env_value("ADMIN_USER_ID", "admin_user_id", required=False)
 ADMIN_USER_ID   = coerce_int(ADMIN_USER_ID, "ADMIN_USER_ID") if ADMIN_USER_ID else None
@@ -384,7 +386,7 @@ def run_startup_diagnostics() -> StartupReport:
 
     if ADMIN_USERNAME:
         report.warnings.append(
-            "ADMIN_USERNAME is configured but ignored for security. Use ADMIN_USER_ID or ADMIN_ROLE_NAME."
+            "ADMIN_USERNAME is configured but ignored for security. Use ADMIN_USER_ID, ADMIN_ROLE_ID, or ADMIN_ROLE_NAME."
         )
 
     env_file = os.path.join(BASE_DIR, ".env")
@@ -419,16 +421,19 @@ def run_startup_diagnostics() -> StartupReport:
     except OSError as exc:
         report.errors.append(f"Cannot write playlist storage at {PLAYLISTS_DIR}: {exc}")
 
-    try:
-        if hasattr(quotes, "_ensure_quotes_file"):
-            quotes._ensure_quotes_file()
-        if quotes.QUOTES_FILE.exists():
-            if quotes.QUOTES_FILE.stat().st_size == 0:
-                report.warnings.append("quotes.txt is empty. Run /backup_teekkari_quotes to seed it.")
-            else:
-                report.notes.append("quotes.txt available.")
-    except Exception as exc:
-        report.errors.append(f"Cannot access quotes.txt: {exc}")
+    if QUOTES_ID == 0:
+        report.notes.append("Quotes channel disabled with QUOTES_ID=0.")
+    else:
+        try:
+            if hasattr(quotes, "_ensure_quotes_file"):
+                quotes._ensure_quotes_file()
+            if quotes.QUOTES_FILE.exists():
+                if quotes.QUOTES_FILE.stat().st_size == 0:
+                    report.warnings.append("quotes.txt is empty. Run /backup_teekkari_quotes to seed it.")
+                else:
+                    report.notes.append("quotes.txt available.")
+        except Exception as exc:
+            report.errors.append(f"Cannot access quotes.txt: {exc}")
 
     try:
         usage = shutil.disk_usage(BASE_DIR)
@@ -451,6 +456,8 @@ def is_user_admin(user) -> bool:
         return False
     # 1) role-based check
     for role in getattr(user, "roles", []):
+        if ADMIN_ROLE_ID and getattr(role, "id", None) == ADMIN_ROLE_ID:
+            return True
         if role.name == ADMIN_ROLE_NAME:
             return True
     # 2) optional user-based check (only if you set ADMIN_USER_ID)
@@ -2839,6 +2846,9 @@ async def backup_teekkari_quotes(ctx):
     """Backs up all quotes from the Teekkari quotes channel."""
     record_command(ctx)
     await ctx.response.defer(thinking=True)
+    if QUOTES_ID == 0:
+        await safe_interaction_send(ctx, "Quotes backup is disabled because QUOTES_ID=0.")
+        return
     channel = client.get_channel(QUOTES_ID)
     if channel is None:
         await safe_interaction_send(ctx, "Quotes channel is not accessible. Check QUOTES_ID.")

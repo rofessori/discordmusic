@@ -91,3 +91,18 @@ Projectwide bugcheck follow-up:
 - Permanent playlist deletion must only report success after `safe_remove_playlist_folder()` returns true.
 - If `playlists-blackbox.json` is malformed or no longer a JSON list, preserve it and log an error instead of overwriting it with a fresh list.
 - A locked playlist should not treat managers as direct editors for admin-foreign confirmation bypass decisions; only the owner remains a direct editor while locked.
+
+## 2026-05-03 Setup Assistant TUI Plan & Notes
+Plan implemented for `setup_assistant.py`:
+- Replace the basic prompt script with a stdlib-only colored terminal assistant that works before dependencies are installed.
+- Support guided setup and quick advanced setup. Guided setup explains the Discord Developer Portal, bot token, user id, role id/name, optional username note, optional quotes channel id, server id, OAuth2 invite permissions, dependency install, `screen`, and optional systemd service.
+- Save progress to `setup.tmp` after each meaningful step and keep that file mode `0600` because it can contain the bot token. F1 or `:save` saves and exits; F2, `:quit`, or `:nosave` exits without saved progress.
+- Write real secrets only to `.env`. `.env.example` is generated or refreshed with placeholders only, never with the actual bot token.
+- Use subprocess argument lists for setup commands, not `shell=True`; show each command before running it and ask before package install, bot start, or systemd install.
+- Detect `screen` install commands for Debian/Ubuntu, Fedora/RHEL, Arch, and macOS/Homebrew. Let `sudo` prompt normally when needed.
+- Keep the bot runtime tolerant of optional quotes by allowing `QUOTES_ID=0`, and prefer stable `ADMIN_ROLE_ID` with `ADMIN_ROLE_NAME` as fallback.
+
+Setup security checks:
+- Do not commit `.env`, `.env.backup`, `setup.tmp`, or generated local service files.
+- Do not use `ADMIN_USERNAME` for privileges; it is only a setup note and remains ignored by the bot runtime.
+- The systemd service generator should point at the repo's venv Python and append stdout/stderr to `output.log`.
