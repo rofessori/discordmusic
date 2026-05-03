@@ -6,7 +6,7 @@ import os
 import asyncio
 import yt_dlp
 from dotenv import load_dotenv
-import urllib.parse, urllib.request, re
+import urllib.parse, re
 import time
 import json
 import logging
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 # Ensure songs directory exists and load downloaded songs metadata
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 songs_dir = BASE_DIR
 os.makedirs(songs_dir, exist_ok=True)
 downloads_file = os.path.join(songs_dir, "downloads.json")
@@ -58,20 +59,31 @@ CLEANED_DOWNLOADS = len(expired_ids)
 
 # Setup YouTube-DL (yt_dlp) options
 ytdl_options = {
-    'format': 'bestaudio/best',
+    'format': 'bestaudio[protocol^=http]/bestaudio/best[protocol^=http]/best',
     'outtmpl': os.path.join(songs_dir, '%(extractor)s-%(id)s-%(title)s.%(ext)s'),
     'restrictfilenames': True,
     'noplaylist': True,
     'nocheckcertificate': True,
+    'check_formats': False,
     'logtostderr': False,
     'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
+    'no_warnings': False,
+    'default_search': 'ytsearch1',
     'source_address': '0.0.0.0',  # bind to IPv4
-    'ignoreerrors': 'Do not stop on download errors.',
-    'verbose': True,
+    'ignoreerrors': False,
+    'verbose': False,
     'logger': logger
 }
+YTDLP_JS_RUNTIMES = {'deno': {}}
+node_path = shutil.which("node")
+if node_path:
+    YTDLP_JS_RUNTIMES['node'] = {'path': node_path}
+ytdl_options['js_runtimes'] = YTDLP_JS_RUNTIMES
+YTDLP_COOKIEFILE = os.getenv("YTDLP_COOKIEFILE") or os.getenv("ytdlp_cookiefile")
+if YTDLP_COOKIEFILE:
+    if not os.path.isabs(YTDLP_COOKIEFILE):
+        YTDLP_COOKIEFILE = os.path.join(BASE_DIR, YTDLP_COOKIEFILE)
+    ytdl_options['cookiefile'] = YTDLP_COOKIEFILE
 ytdl = yt_dlp.YoutubeDL(ytdl_options)
 
 # Setup ffmpeg options for Discord audio
@@ -79,9 +91,6 @@ ffmpeg_options = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn'
 }
-
-# Load bot and guild tokens from .env file
-load_dotenv()
 
 def get_env_value(*names, default=None, required=True):
     """Return the first populated environment variable from the provided names."""
@@ -106,7 +115,6 @@ def coerce_int(value, label):
 queue = []  # list of track dicts for upcoming songs
 youtube_base_url = 'https://www.youtube.com/'
 youtube_base_url_2 = 'https://youtu.be/'
-youtube_results_url = youtube_base_url + 'results?'
 youtube_watch_url = youtube_base_url + 'watch?v='
 
 BOT_TOKEN = get_env_value("BOT_TOKEN", "bot_token")
@@ -122,6 +130,33 @@ ADMIN_USERNAME  = get_env_value("ADMIN_USERNAME", "admin_username", required=Fal
 
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{27,}$")
 MIN_DISCORD_PY_VERSION = (2, 6, 0)
+MIN_YTDLP_VERSION = (2026, 3, 17)
+
+def parse_youtube_video_id(query: str):
+    """Return a YouTube video id from common URL shapes, or None for search text."""
+    try:
+        parsed = urllib.parse.urlparse(query)
+    except Exception:
+        return None
+    netloc = parsed.netloc.lower()
+    if netloc.endswith("youtu.be"):
+        return parsed.path.lstrip("/") or None
+    if "youtube.com" not in netloc:
+        return None
+    qs = urllib.parse.parse_qs(parsed.query)
+    if qs.get("v"):
+        return qs["v"][0]
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if path_parts and path_parts[0] in {"embed", "shorts", "watch"} and len(path_parts) > 1:
+        return path_parts[-1]
+    return None
+
+def normalize_youtube_query(query: str):
+    """Normalize YouTube URLs for caching; leave search text for yt-dlp's ytsearch1."""
+    video_id = parse_youtube_video_id(query)
+    if video_id:
+        return youtube_watch_url + video_id, video_id
+    return query, None
 
 def parse_version(version: str) -> tuple:
     """Parse a package version into numeric parts for simple minimum checks."""
@@ -161,6 +196,32 @@ def run_startup_diagnostics() -> StartupReport:
         )
     else:
         report.notes.append(f"discord.py {discord_version} available.")
+
+    ytdlp_version = getattr(getattr(yt_dlp, "version", None), "__version__", "0")
+    if parse_version(ytdlp_version) < MIN_YTDLP_VERSION:
+        report.errors.append(
+            "yt-dlp "
+            f"{ytdlp_version} is too old for reliable YouTube playback. "
+            "Run `pip install --upgrade -r requirements.txt` in the venv."
+        )
+    else:
+        report.notes.append(f"yt-dlp {ytdlp_version} available.")
+
+    if importlib.util.find_spec("yt_dlp_ejs") is None:
+        report.errors.append(
+            "yt-dlp-ejs is missing. Run `pip install --upgrade -r requirements.txt` "
+            "to install YouTube JavaScript challenge support."
+        )
+    else:
+        report.notes.append("yt-dlp-ejs available.")
+
+    js_runtime = shutil.which("deno") or shutil.which("node")
+    if js_runtime:
+        report.notes.append(f"YouTube JS runtime located at {js_runtime}.")
+    else:
+        report.warnings.append(
+            "No deno or node executable found in PATH. YouTube extraction may miss formats."
+        )
 
     if importlib.util.find_spec("davey") is None:
         report.errors.append(
@@ -246,20 +307,15 @@ class YTDLSource(discord.PCMVolumeTransformer):
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=False):
         """Gets an audio source from a YouTube URL (or search query)."""
-        # If the query is not already a YouTube link, perform a search
-        if youtube_base_url not in url and youtube_base_url_2 not in url:
-            query_string = urllib.parse.urlencode({'search_query': url})
-            content = urllib.request.urlopen(youtube_results_url + query_string)
-            search_results = re.findall(r'/watch\?v=(.{11})', content.read().decode())
-            if not search_results:
-                return None, url
-            url = youtube_watch_url + search_results[0]
+        url, _ = normalize_youtube_query(url)
         loop = loop or asyncio.get_event_loop()
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
         if data is None:
             return None, url
         if 'entries' in data:
-            data = data['entries'][0]
+            data = next((entry for entry in data['entries'] if entry), None)
+        if data is None:
+            return None, url
         # If stream=True, use the direct URL; otherwise use downloaded filename
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data, volume=client.volume), data.get('webpage_url', url)
@@ -321,6 +377,17 @@ def build_runtime_status():
         lines.extend(f"- {warn}" for warn in diag.warnings)
     return "\n".join(lines)
 
+async def safe_interaction_send(ctx, message: str, *, ephemeral: bool = False):
+    """Send an interaction response without letting expired tokens mask root errors."""
+    try:
+        if ctx.response.is_done():
+            return await ctx.followup.send(message, ephemeral=ephemeral)
+        return await ctx.response.send_message(message, ephemeral=ephemeral)
+    except (discord.NotFound, discord.HTTPException) as exc:
+        command_name = getattr(getattr(ctx, "command", None), "name", "unknown")
+        logger.warning(f"Could not respond to /{command_name}: {exc}")
+        return None
+
 async def fetch_track(query: str, requested_by=None):
     """
     Fetches YouTube track info for the given query (URL or search term).
@@ -328,40 +395,9 @@ async def fetch_track(query: str, requested_by=None):
     If download_mode is False, returns track info for streaming (no file path).
     Applies size and duration restrictions based on user permissions.
     """
-    # Determine the full YouTube URL and video ID for the query
-    video_url = query
-    video_id = None
-    if youtube_base_url not in query and youtube_base_url_2 not in query:
-        # The query is a search term; perform a YouTube search to get the first result
-        try:
-            query_string = urllib.parse.urlencode({'search_query': query})
-            content = urllib.request.urlopen(youtube_results_url + query_string)
-            search_results = re.findall(r'/watch\?v=(.{11})', content.read().decode())
-            if not search_results:
-                raise Exception("No results found")
-            video_id = search_results[0]
-            video_url = youtube_watch_url + video_id
-        except Exception as e:
-            logger.error(f"Error searching for '{query}': {e}")
-            raise
-    else:
-        # The query is already a YouTube URL; extract the video ID
-        try:
-            parsed = urllib.parse.urlparse(query)
-            if parsed.netloc.endswith("youtu.be"):
-                video_id = parsed.path.lstrip('/')
-            elif "youtube.com" in parsed.netloc:
-                qs = urllib.parse.parse_qs(parsed.query)
-                if 'v' in qs:
-                    video_id = qs['v'][0]
-                elif parsed.path.startswith("/embed/") or parsed.path.startswith("/shorts/") or parsed.path.startswith("/watch/"):
-                    parts = parsed.path.split('/')
-                    video_id = parts[-1] if parts[-1] else parts[-2]  # handle trailing slash
-            if video_id:
-                video_url = youtube_watch_url + video_id
-        except Exception as e:
-            logger.error(f"Could not parse video ID from URL {query}: {e}")
-            video_id = None
+    # Determine the full YouTube URL and video ID for URL inputs. Search text is
+    # passed directly to yt-dlp so it can use its own maintained search extractor.
+    video_url, video_id = normalize_youtube_query(query)
 
     # If we have a video_id and it's cached (and in download mode), use the cached file
     if video_id and video_id in downloaded and client.download_mode:
@@ -386,7 +422,9 @@ async def fetch_track(query: str, requested_by=None):
         if data is None:
             raise Exception("No data found for query")
         if 'entries' in data:
-            data = data['entries'][0]
+            data = next((entry for entry in data['entries'] if entry), None)
+        if data is None:
+            raise Exception("No playable result found for query")
         video_id = data.get('id')
         title = data.get('title', 'Unknown title')
         page_url = data.get('webpage_url', video_url)
@@ -636,9 +674,10 @@ async def on_reaction_add(reaction, user):
 async def save_all_channel_messages(channel):
     if channel is None:
         logger.warning("Quotes backup requested but quotes channel is not available.")
-        return
+        return 0
     messages = [message.content async for message in channel.history(limit=None)]
     quotes.saveQuotes(messages)
+    return len(messages)
 
 # Slash commands
 
@@ -763,9 +802,7 @@ async def play(ctx, *, url: str):
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
                 # Prompt admin for confirmation to download the large file
                 confirm_text = f"Track **{track['title']}** is large (~{filesize_mb:.1f} MB). React 👍 to confirm download, or 👎 to cancel."
-                await ctx.followup.send(confirm_text)
-                # Get the confirmation message to add reactions
-                confirm_msg = await ctx.original_response()
+                confirm_msg = await ctx.followup.send(confirm_text, wait=True)
                 try:
                     await confirm_msg.add_reaction("👍")
                     await confirm_msg.add_reaction("👎")
@@ -797,7 +834,7 @@ async def play(ctx, *, url: str):
             client.current_track_info = track
             client.song_history.append(track)
             # Send now playing message with reactions
-            now_msg = await ctx.followup.send(f"Now playing: {track['title']} ({track['id']})")
+            now_msg = await ctx.followup.send(f"Now playing: {track['title']} ({track['id']})", wait=True)
             client.current_track_message = now_msg
             try:
                 await now_msg.add_reaction("◀️")
@@ -866,7 +903,7 @@ async def playtop(ctx, *, query: str):
             client.last_track_info = client.current_track_info
             client.current_track_info = track
             client.song_history.append(track)
-            now_msg = await ctx.followup.send(f"Now playing: {track['title']} ({track['id']})")
+            now_msg = await ctx.followup.send(f"Now playing: {track['title']} ({track['id']})", wait=True)
             client.current_track_message = now_msg
             try:
                 await now_msg.add_reaction("◀️")
@@ -894,10 +931,7 @@ async def playtop(ctx, *, query: str):
             logger.error(f"/playtop queue error: {e}")
             await ctx.followup.send("Failed to add track to queue.")
 
-@app_commands.describe(query="YouTube URL or search term")
-@client.tree.command(name="enqueue")
-async def enqueue_cmd(ctx, *, query: str):
-    """Enqueues a song to the queue (alias: /queue, /q)."""
+async def enqueue_track(ctx, query: str, command_name: str = "enqueue"):
     await ctx.response.defer()
     try:
         track = await fetch_track(query, requested_by=ctx.user)
@@ -910,24 +944,22 @@ async def enqueue_cmd(ctx, *, query: str):
         await ctx.followup.send(f"Added to queue: {track['title']} ({track['id']})")
         logger.info(f"Track enqueued: {track['title']} ({track['id']})")
     except Exception as e:
-        logger.error(f"/enqueue error: {e}")
+        logger.error(f"/{command_name} error: {e}")
         await ctx.followup.send("Failed to enqueue track.")
 
 @app_commands.describe(query="YouTube URL or search term")
-@client.tree.command(name="queue")
-async def queue_cmd(ctx, *, query: str):
-    """Alias of /enqueue."""
-    await enqueue_cmd(ctx, query=query)
+@client.tree.command(name="enqueue")
+async def enqueue_cmd(ctx, *, query: str):
+    """Enqueues a song to the queue (alias: /q)."""
+    await enqueue_track(ctx, query, "enqueue")
 
 @app_commands.describe(query="YouTube URL or search term")
 @client.tree.command(name="q")
 async def q_cmd(ctx, *, query: str):
     """Alias of /enqueue."""
-    await enqueue_cmd(ctx, query=query)
+    await enqueue_track(ctx, query, "q")
 
-@client.tree.command()
-async def queuelist(ctx):
-    """Displays the upcoming songs in the queue."""
+async def send_queue_list(ctx):
     if len(queue) == 0:
         await ctx.response.send_message("Queue is empty.")
     else:
@@ -938,6 +970,16 @@ async def queuelist(ctx):
             lines.append(f"{i}. {title} ({vid})")
         output = "\n".join(lines)
         await ctx.response.send_message(output)
+
+@client.tree.command(name="queue")
+async def queue_cmd(ctx):
+    """Displays the upcoming songs in the queue."""
+    await send_queue_list(ctx)
+
+@client.tree.command()
+async def queuelist(ctx):
+    """Alias of /queue."""
+    await send_queue_list(ctx)
 
 @client.tree.command()
 async def purgequeue(ctx):
@@ -1201,12 +1243,13 @@ async def restorequeue(ctx):
 @client.tree.command()
 async def backup_teekkari_quotes(ctx):
     """Backs up all quotes from the Teekkari quotes channel."""
+    await ctx.response.defer(thinking=True)
     channel = client.get_channel(QUOTES_ID)
     if channel is None:
-        await ctx.response.send_message("Quotes channel is not accessible. Check QUOTES_ID.", ephemeral=True)
+        await safe_interaction_send(ctx, "Quotes channel is not accessible. Check QUOTES_ID.")
         return
-    await save_all_channel_messages(channel)
-    await ctx.response.send_message("Quotes backup completed.")
+    count = await save_all_channel_messages(channel)
+    await safe_interaction_send(ctx, f"Quotes backup completed ({count} messages scanned).")
     logger.info("Teekkari quotes backed up by command.")
 
 # Random quote command
@@ -1225,8 +1268,8 @@ async def help(ctx):
         "/join – Join your voice channel.",
         "/play <URL or search> – Play a song (or add to queue if something is already playing).",
         "/playtop <query> – Play a song next (skip ahead of the queue).",
-        "/enqueue <query> – Add a song to the queue (aliases: /queue, /q).",
-        "/queuelist – Show the upcoming songs in the queue.",
+        "/enqueue <query> – Add a song to the queue (alias: /q).",
+        "/queue (alias: /queuelist) – Show the upcoming songs in the queue.",
         "/skip – Skip the current track.",
         "/stop – Stop playback and disconnect the bot.",
         "/pause – Pause the current playing audio.",
@@ -1263,10 +1306,7 @@ async def status(ctx):
 async def on_app_command_error(ctx, error):
     # Global error handler for app commands
     logger.exception(f"Error in /{ctx.command.name}: {error}")
-    if ctx.response.is_done():
-        await ctx.followup.send("💥  Oops, something went wrong. Please check the bot logs for details.")
-    else:
-        await ctx.response.send_message("💥  Oops, something went wrong. Please check the bot logs for details.")
+    await safe_interaction_send(ctx, "💥  Oops, something went wrong. Please check the bot logs for details.")
 
 if __name__ == "__main__":
     client.run(BOT_TOKEN)

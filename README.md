@@ -10,6 +10,7 @@ also has commands for handling, saving, and displaying quotes from a specific ch
 
 - **python 3.8+**  
 - **ffmpeg** installed (`sudo apt install ffmpeg`)  
+- **deno** or **node 20+** on `PATH` for current yt-dlp YouTube challenge handling
 - a discord bot token and guild/channel id (for quotes functionality)
 
 ---
@@ -51,8 +52,8 @@ admin_username=
   - `/join`
   - `/play <url|query>`
   - `/playtop <query>`
-  - `/enqueue <query>` (aliases: `/queue`, `/q`)
-  - `/queuelist`
+  - `/enqueue <query>` (alias: `/q`)
+  - `/queue` (alias: `/queuelist`)
   - `/skip`
   - `/pause` / `/resume`
   - `/stop`
@@ -91,7 +92,7 @@ tail -f output.log
   ```
 
 - **youtube “confirm you're not a bot” error**:  
-  export youtube cookies and set `ytdl_options['cookiefile']='cookies.txt'` in `main.py`.
+  update yt-dlp with `pip install --upgrade -r requirements.txt` and make sure `deno` or `node` is on `PATH`. if YouTube still blocks your server IP, export YouTube cookies to `cookies.txt` and set `YTDLP_COOKIEFILE=cookies.txt` in `.env`.
 
 - **permission errors/venv issues**:  
   ```bash
