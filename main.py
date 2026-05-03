@@ -116,6 +116,9 @@ queue = []  # list of track dicts for upcoming songs
 youtube_base_url = 'https://www.youtube.com/'
 youtube_base_url_2 = 'https://youtu.be/'
 youtube_watch_url = youtube_base_url + 'watch?v='
+QUEUE_REACTION = "📜"
+CONTROL_REACTIONS = ("◀️", "⏸️", "▶️", QUEUE_REACTION)
+DISCORD_MESSAGE_SAFE_LIMIT = 1900
 
 BOT_TOKEN = get_env_value("BOT_TOKEN", "bot_token")
 MY_GUILD_ID = coerce_int(get_env_value("MY_GUILD", "my_guild"), "MY_GUILD")
@@ -332,6 +335,7 @@ class Client(discord.Client):
         self.current_track_info = None         # current track's info (dict)
         self.last_track_info = None            # last played track's info (dict)
         self.current_track_message = None      # discord.Message for the "Now Playing" announcement
+        self.current_track_message_show_queue = False
         # Admin-controllable flags
         self.download_mode = True              # True = download-and-play, False = stream-only
         self.log_verbose = False               # True = DEBUG logging on
@@ -387,6 +391,147 @@ async def safe_interaction_send(ctx, message: str, *, ephemeral: bool = False):
         command_name = getattr(getattr(ctx, "command", None), "name", "unknown")
         logger.warning(f"Could not respond to /{command_name}: {exc}")
         return None
+
+def track_display_parts(track: dict) -> tuple:
+    title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
+    url = track.get('webpage_url') or youtube_watch_url + str(track.get('id') or '')
+    url = discord.utils.escape_markdown(str(url))
+    return title, url
+
+def format_queue_section(*, max_chars=None) -> str:
+    lines = ["📜 **Queue**"]
+    if not queue:
+        lines.append("_Queue is empty._")
+        return "\n".join(lines)
+
+    for index, track in enumerate(queue, start=1):
+        title, url = track_display_parts(track)
+        entry = [f"**{index}. {title}**", f"*{url}*"]
+        remaining = len(queue) - index
+        footer = f"_and {remaining} more queued song(s)._" if remaining else None
+        candidate_lines = lines + entry + ([footer] if footer else [])
+        if max_chars and len("\n".join(candidate_lines)) > max_chars:
+            hidden_count = len(queue) - index + 1
+            lines.append(f"_and {hidden_count} more queued song(s)._")
+            break
+        lines.extend(entry)
+    return "\n".join(lines)
+
+def format_now_playing(track: dict, *, show_queue: bool = False) -> str:
+    title, url = track_display_parts(track)
+    now_playing = f"🎵 Now playing: **{title}**\n*{url}*"
+    if not show_queue:
+        return now_playing
+    divider = "━━━━━━━━━━━━"
+    fixed_content = f"\n\n{divider}\n\n{now_playing}"
+    queue_chars = DISCORD_MESSAGE_SAFE_LIMIT - len(fixed_content)
+    return f"{format_queue_section(max_chars=queue_chars)}{fixed_content}"
+
+async def has_newer_message(channel, message) -> bool:
+    try:
+        async for _ in channel.history(limit=1, after=message):
+            return True
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        logger.warning(f"Could not inspect channel history before now-playing edit: {exc}")
+        return True
+    return False
+
+async def remove_control_reactions(message):
+    if message is None:
+        return
+    for emoji in CONTROL_REACTIONS:
+        try:
+            await message.clear_reaction(emoji)
+            logger.info(f"Removed stale now-playing control reaction {emoji} from message {message.id}.")
+        except (discord.Forbidden, discord.HTTPException):
+            try:
+                await message.remove_reaction(emoji, client.user)
+                logger.info(f"Removed bot's stale now-playing control reaction {emoji} from message {message.id}.")
+            except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+                logger.warning(f"Failed to remove stale control reaction {emoji}: {exc}")
+
+async def add_control_reactions(message):
+    existing = {
+        str(reaction.emoji)
+        for reaction in getattr(message, "reactions", [])
+        if getattr(reaction, "me", False)
+    }
+    for emoji in CONTROL_REACTIONS:
+        if emoji in existing:
+            continue
+        try:
+            await message.add_reaction(emoji)
+            logger.info(f"Added now-playing control reaction {emoji} to message {message.id}.")
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            logger.error(f"Failed to add now-playing control reaction {emoji}: {exc}")
+
+async def publish_now_playing(channel, track: dict, *, send_message=None, acknowledge=None):
+    """Edit the active now-playing message when it is still the latest message."""
+    old_message = client.current_track_message
+    same_channel = old_message and getattr(getattr(old_message, "channel", None), "id", None) == channel.id
+    newer_message_exists = await has_newer_message(channel, old_message) if same_channel else None
+    can_edit = same_channel and not newer_message_exists
+
+    if can_edit:
+        try:
+            content = format_now_playing(track, show_queue=client.current_track_message_show_queue)
+            await old_message.edit(content=content)
+            await add_control_reactions(old_message)
+            if acknowledge:
+                await acknowledge("Now playing message updated.", ephemeral=True)
+            client.current_track_message = old_message
+            logger.info(
+                f"Edited now-playing message {old_message.id} in channel {channel.id} "
+                f"for {track.get('title', 'Unknown title')} ({track.get('id', '')})."
+            )
+            return old_message
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+            logger.warning(f"Could not edit now-playing message; sending a new one: {exc}")
+
+    if old_message:
+        if not same_channel:
+            reason = "previous now-playing message is in a different channel"
+        elif newer_message_exists:
+            reason = "a newer channel message exists"
+        else:
+            reason = "the previous message could not be edited"
+        logger.info(
+            f"Sending a new now-playing message because {reason}; "
+            f"old message={old_message.id}, channel={channel.id}."
+        )
+
+    client.current_track_message_show_queue = False
+    content = format_now_playing(track, show_queue=False)
+    if send_message:
+        new_message = await send_message(content, wait=True)
+    else:
+        new_message = await channel.send(content)
+    client.current_track_message = new_message
+    await add_control_reactions(new_message)
+    if old_message and old_message.id != new_message.id:
+        await remove_control_reactions(old_message)
+    logger.info(
+        f"Sent now-playing message {new_message.id} in channel {channel.id} "
+        f"for {track.get('title', 'Unknown title')} ({track.get('id', '')})."
+    )
+    return new_message
+
+async def toggle_now_playing_queue(message):
+    if not client.current_track_info:
+        logger.info("Queue reaction ignored because no track is currently tracked.")
+        return
+    client.current_track_message_show_queue = not client.current_track_message_show_queue
+    try:
+        await message.edit(
+            content=format_now_playing(
+                client.current_track_info,
+                show_queue=client.current_track_message_show_queue,
+            )
+        )
+        state = "shown" if client.current_track_message_show_queue else "hidden"
+        logger.info(f"Queue section {state} on now-playing message {message.id}.")
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+        logger.warning(f"Failed to toggle queue section on now-playing message {message.id}: {exc}")
 
 async def fetch_track(query: str, requested_by=None):
     """
@@ -572,15 +717,7 @@ async def play_next_channel(channel):
             # Update current and last track info
             client.last_track_info = client.current_track_info
             client.current_track_info = track
-            # Announce now playing
-            now_msg = await channel.send(f"Now playing: {track['title']} ({track['id']})")
-            client.current_track_message = now_msg
-            try:
-                await now_msg.add_reaction("◀️")
-                await now_msg.add_reaction("⏸️")
-                await now_msg.add_reaction("▶️")
-            except Exception as e:
-                logger.error(f"Failed to add reactions: {e}")
+            await publish_now_playing(channel, track)
             logger.info(f"Started playing: {track['title']} ({track['id']})")
             # Add track to session history if not already recorded
             if track not in client.song_history:
@@ -642,7 +779,9 @@ async def on_reaction_add(reaction, user):
     # Music control reactions on the "Now Playing" message
     if client.current_track_message and reaction.message.id == client.current_track_message.id:
         emoji = str(reaction.emoji)
-        if emoji == "▶️":
+        if emoji == QUEUE_REACTION:
+            await toggle_now_playing_queue(reaction.message)
+        elif emoji == "▶️":
             # Skip to next track
             if client.current_voice_channel and (client.current_voice_channel.is_playing() or client.current_voice_channel.is_paused()):
                 logger.info("Skipped track with emoji.")
@@ -665,6 +804,8 @@ async def on_reaction_add(reaction, user):
                 logger.info("Previous track requested via reaction.")
             else:
                 await reaction.message.channel.send("No previous track to play.")
+        else:
+            return
         # Remove the user's reaction to allow them to use it again
         try:
             await reaction.message.remove_reaction(reaction.emoji, user)
@@ -833,15 +974,12 @@ async def play(ctx, *, url: str):
             client.last_track_info = client.current_track_info
             client.current_track_info = track
             client.song_history.append(track)
-            # Send now playing message with reactions
-            now_msg = await ctx.followup.send(f"Now playing: {track['title']} ({track['id']})", wait=True)
-            client.current_track_message = now_msg
-            try:
-                await now_msg.add_reaction("◀️")
-                await now_msg.add_reaction("⏸️")
-                await now_msg.add_reaction("▶️")
-            except Exception as e:
-                logger.error(f"Failed to add reactions: {e}")
+            await publish_now_playing(
+                ctx.channel,
+                track,
+                send_message=ctx.followup.send,
+                acknowledge=ctx.followup.send,
+            )
             logger.info(f"Playing now: {track['title']} ({track['id']})")
         except Exception as e:
             logger.error(f"/play error: {e}")
@@ -903,14 +1041,12 @@ async def playtop(ctx, *, query: str):
             client.last_track_info = client.current_track_info
             client.current_track_info = track
             client.song_history.append(track)
-            now_msg = await ctx.followup.send(f"Now playing: {track['title']} ({track['id']})", wait=True)
-            client.current_track_message = now_msg
-            try:
-                await now_msg.add_reaction("◀️")
-                await now_msg.add_reaction("⏸️")
-                await now_msg.add_reaction("▶️")
-            except Exception as e:
-                logger.error(f"Failed to add reactions: {e}")
+            await publish_now_playing(
+                ctx.channel,
+                track,
+                send_message=ctx.followup.send,
+                acknowledge=ctx.followup.send,
+            )
             logger.info(f"Playing now: {track['title']} ({track['id']})")
         except Exception as e:
             logger.error(f"/playtop error: {e}")
@@ -958,6 +1094,45 @@ async def enqueue_cmd(ctx, *, query: str):
 async def q_cmd(ctx, *, query: str):
     """Alias of /enqueue."""
     await enqueue_track(ctx, query, "q")
+
+async def queue_first(ctx, position: int, command_name: str):
+    """Move a queued track to the front so it plays next."""
+    if position < 1:
+        await ctx.response.send_message("Queue positions start at 1.")
+        logger.info(f"/{command_name} rejected invalid queue position {position}.")
+        return
+    if not queue:
+        await ctx.response.send_message("Queue is empty.")
+        logger.info(f"/{command_name} requested while queue is empty.")
+        return
+    if position > len(queue):
+        await ctx.response.send_message(f"Queue only has {len(queue)} song(s).")
+        logger.info(f"/{command_name} rejected position {position}; queue length is {len(queue)}.")
+        return
+    if position == 1:
+        track = queue[0]
+        title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
+        await ctx.response.send_message(f"**{title}** is already first in queue.")
+        logger.info(f"/{command_name} requested position 1; queue already starts with {track.get('title', 'Unknown title')} ({track.get('id', '')}).")
+        return
+
+    track = queue.pop(position - 1)
+    queue.insert(0, track)
+    title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
+    await ctx.response.send_message(f"Moved **{title}** to the front of the queue. It will play next.")
+    logger.info(f"/{command_name} moved queue position {position} to the front: {track.get('title', 'Unknown title')} ({track.get('id', '')})")
+
+@app_commands.describe(position="1-based queue position to move so it plays next")
+@client.tree.command(name="queuefirst")
+async def queuefirst_cmd(ctx, position: int):
+    """Moves a queued song to the front of the queue."""
+    await queue_first(ctx, position, "queuefirst")
+
+@app_commands.describe(position="1-based queue position to move so it plays next")
+@client.tree.command(name="qfirst")
+async def qfirst_cmd(ctx, position: int):
+    """Alias of /queuefirst."""
+    await queue_first(ctx, position, "qfirst")
 
 async def send_queue_list(ctx):
     if len(queue) == 0:
@@ -1270,6 +1445,8 @@ async def help(ctx):
         "/playtop <query> – Play a song next (skip ahead of the queue).",
         "/enqueue <query> – Add a song to the queue (alias: /q).",
         "/queue (alias: /queuelist) – Show the upcoming songs in the queue.",
+        "/queuefirst <position> (alias: /qfirst) – Move a queued song to play next.",
+        "React 📜 on now-playing – Toggle the queue above the now-playing message.",
         "/skip – Skip the current track.",
         "/stop – Stop playback and disconnect the bot.",
         "/pause – Pause the current playing audio.",

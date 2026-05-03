@@ -11,7 +11,7 @@ Restart=on-failure
 RestartSec=5
 
 StandardOutput=append:EXAMPLE/output.log
-StandardError=inherit
+StandardError=append:EXAMPLE/output.log
 
 [Install]
 WantedBy=multi-user.target

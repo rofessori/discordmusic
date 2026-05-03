@@ -54,6 +54,8 @@ admin_username=
   - `/playtop <query>`
   - `/enqueue <query>` (alias: `/q`)
   - `/queue` (alias: `/queuelist`)
+  - `/queuefirst <position>` (alias: `/qfirst`)
+  - react `📜` on now-playing to toggle the queue above the current song
   - `/skip`
   - `/pause` / `/resume`
   - `/stop`
