@@ -55,3 +55,9 @@ Queue reaction completed work:
 - The queue section renders at the top with bold numbered titles, italic YouTube URLs, a clean divider, and then the styled `🎵 Now playing:` block.
 - The queue-open state is preserved when the same now-playing message is edited for the next song, and reset when a fresh now-playing message is sent.
 - Reaction cleanup and logging now cover the `📜` control while leaving `/reboot` and other confirmation reactions keyed to their own messages.
+
+## 2026-05-03 Suggestion Audit & Queue Link Notes
+- Music suggestions are tracked in memory for `/play`, `/playtop`, `/enqueue`, `/q`, `/queuefirst`, and `/qfirst`; each accepted suggestion is also logged to `output.log` with user, command, raw input/position, title, and id.
+- `/status` is admin-only and now supports `view:latest`, `view:session`, and `view:commands`; keep new status data compact enough for one Discord message.
+- `/queue` and `/queuelist` accept `links:true` to include YouTube URLs. `/disablelinks` is an admin session toggle that hides URLs from queue-style displays, including the `📜` now-playing queue section.
+- `/now` and `/nytsoi` should stay compact: title plus video id only, never the full YouTube URL.
