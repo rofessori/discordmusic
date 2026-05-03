@@ -29,15 +29,18 @@ SAFE_MEDIA_EXTENSIONS = {
     ".opus", ".wav", ".webm",
 }
 
-# Ensure songs directory exists and load downloaded songs metadata
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
-songs_dir = BASE_DIR
-os.makedirs(songs_dir, exist_ok=True)
-downloads_file = os.path.join(songs_dir, "downloads.json")
+CACHE_DIR = os.path.join(BASE_DIR, "cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+downloads_file = os.path.join(BASE_DIR, "downloads.json")
 LAST_SESSION_QUEUE_FILE = os.path.join(BASE_DIR, "last_session_queue.tmp.json")
 PLAYLISTS_DIR = os.path.join(BASE_DIR, "playlists")
 PLAYLIST_BLACKBOX_FILE = os.path.join(BASE_DIR, "playlists-blackbox.json")
+PLAYLIST_CACHE_POLICY_FILE = os.path.join(BASE_DIR, "playlist-cache-policy.json")
+youtube_base_url = 'https://www.youtube.com/'
+youtube_base_url_2 = 'https://youtu.be/'
+youtube_watch_url = youtube_base_url + 'watch?v='
 PLAYLIST_PAGE_SIZE = 6
 PLAYLIST_TRACK_PAGE_SIZE = 8
 PLAYLIST_PAGE_REACTIONS = ("◀️", "▶️")
@@ -47,6 +50,12 @@ PLAYLIST_CREATION_TIMEOUT_SECONDS = 300
 PLAYLIST_CREATION_FINISH_WORDS = {"done", "finish", "valmis", "loppu", "stop"}
 PLAYLIST_CREATION_CANCEL_WORDS = {"cancel", "peru", "abort"}
 PLAYLIST_QUEUE_IMPORT_MODES = {"currentqueue", "jono"}
+PLAYLIST_CACHE_MODES = {"follow_global", "streaming", "bounded", "keep_cached"}
+GLOBAL_PLAYLIST_CACHE_MODES = {"streaming", "bounded", "keep_cached"}
+DEFAULT_PLAYLIST_CACHE_MODE = "bounded"
+PLAYLIST_CACHE_BOUNDED_TRACK_LIMIT = 15
+PLAYLIST_CACHE_BOUNDED_BYTES = 3 * 1024 * 1024 * 1024
+CACHE_HARD_LIMIT_BYTES = 20 * 1024 * 1024 * 1024
 HELP_EXPAND_REACTION = "📖"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
@@ -76,13 +85,35 @@ ALLOW_ADMIN_ROLE_NAME = env_flag("ALLOW_ADMIN_ROLE_NAME", False)
 MAX_PLAYLIST_TRACKS = env_int("MAX_PLAYLIST_TRACKS", 100)
 MAX_URLS_PER_MESSAGE = env_int("MAX_URLS_PER_MESSAGE", 10)
 
-def is_safe_download_path(file_path: str, video_id: Optional[str] = None) -> bool:
-    """Only allow deletion of yt-dlp media files created in this checkout."""
+def display_path(path: str) -> str:
+    try:
+        return os.path.relpath(path, BASE_DIR)
+    except ValueError:
+        return path
+
+def path_from_metadata(path: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    path = str(path)
+    if os.path.isabs(path):
+        return path
+    return os.path.join(BASE_DIR, path)
+
+def metadata_path_for_cache_file(file_path: str) -> str:
+    return display_path(file_path).replace(os.sep, "/")
+
+def is_safe_cache_path(file_path: str, expected_cache_key: Optional[str] = None) -> bool:
+    """Only trust media files that resolve inside the root cache directory."""
     if not file_path:
         return False
     try:
-        real_base = os.path.realpath(songs_dir)
-        real_path = os.path.realpath(file_path)
+        resolved = path_from_metadata(file_path)
+        if not resolved:
+            return False
+        if os.path.islink(resolved):
+            return False
+        real_base = os.path.realpath(CACHE_DIR)
+        real_path = os.path.realpath(resolved)
         if os.path.commonpath([real_base, real_path]) != real_base:
             return False
         if not os.path.isfile(real_path):
@@ -91,13 +122,16 @@ def is_safe_download_path(file_path: str, video_id: Optional[str] = None) -> boo
         stem, ext = os.path.splitext(filename)
         if ext.lower() not in SAFE_MEDIA_EXTENSIONS:
             return False
-        if not filename.startswith("youtube-"):
-            return False
-        if video_id and f"-{video_id}-" not in f"-{stem}-":
+        if expected_cache_key and expected_cache_key not in stem:
             return False
         return True
     except (OSError, ValueError):
         return False
+
+def is_safe_download_path(file_path: str, video_id: Optional[str] = None) -> bool:
+    """Compatibility wrapper for normal downloaded-cache deletion checks."""
+    expected_cache_key = canonical_cache_key_from_video_id(video_id) if video_id else None
+    return is_safe_cache_path(file_path, expected_cache_key)
 
 def remove_download_file(file_path: str, *, video_id: Optional[str] = None, reason: str = "") -> bool:
     """Remove a tracked media file only after path validation."""
@@ -139,6 +173,17 @@ def write_json_atomic(path: str, payload: dict):
             pass
         raise
 
+def canonical_youtube_url(video_id: str) -> str:
+    return youtube_watch_url + str(video_id or "").strip()
+
+def base64url_cache_key(value: str) -> str:
+    return base64.urlsafe_b64encode(str(value).encode("utf-8")).decode("ascii").rstrip("=")
+
+def canonical_cache_key_from_video_id(video_id: Optional[str]) -> Optional[str]:
+    if not video_id:
+        return None
+    return base64url_cache_key(canonical_youtube_url(video_id))
+
 downloaded = {}
 if os.path.isfile(downloads_file):
     try:
@@ -165,7 +210,7 @@ CLEANED_DOWNLOADS = len(expired_ids)
 # Setup YouTube-DL (yt_dlp) options
 ytdl_options = {
     'format': 'bestaudio[protocol^=http]/bestaudio/best[protocol^=http]/best',
-    'outtmpl': os.path.join(songs_dir, '%(extractor)s-%(id)s-%(title)s.%(ext)s'),
+    'outtmpl': os.path.join(CACHE_DIR, '%(id)s.%(ext)s'),
     'restrictfilenames': True,
     'noplaylist': True,
     'check_formats': False,
@@ -219,9 +264,6 @@ def coerce_int(value, label):
 
 # Initialize constants and global state
 queue = []  # list of track dicts for upcoming songs
-youtube_base_url = 'https://www.youtube.com/'
-youtube_base_url_2 = 'https://youtu.be/'
-youtube_watch_url = youtube_base_url + 'watch?v='
 QUEUE_REACTION = "📜"
 CONTROL_REACTIONS = ("◀️", "⏸️", "▶️", QUEUE_REACTION)
 DISCORD_MESSAGE_SAFE_LIMIT = 1900
@@ -296,6 +338,94 @@ def normalize_youtube_query(query: str):
     if video_id:
         return youtube_watch_url + video_id, video_id
     return query, None
+
+def cache_key_for_youtube_url(url: str) -> Optional[str]:
+    video_id = parse_youtube_video_id(url)
+    if not video_id:
+        return None
+    return canonical_cache_key_from_video_id(video_id)
+
+def cache_key_for_track(track: dict) -> Optional[str]:
+    cache_key = str(track.get("cache_key") or "").strip()
+    if cache_key:
+        return cache_key
+    video_id = str(track.get("id") or "").strip()
+    if video_id:
+        return canonical_cache_key_from_video_id(video_id)
+    return cache_key_for_youtube_url(str(track.get("webpage_url") or ""))
+
+def cache_filename(cache_key: str, ext: str, *, playlist: bool = False) -> str:
+    clean_ext = str(ext or "").lstrip(".").lower()
+    prefix = "plst-" if playlist else ""
+    return f"{prefix}{cache_key}.{clean_ext}"
+
+def cache_path_for_key(cache_key: str, ext: str, *, playlist: bool = False) -> str:
+    return os.path.join(CACHE_DIR, cache_filename(cache_key, ext, playlist=playlist))
+
+def cache_file_size(file_path: str) -> int:
+    try:
+        if is_safe_cache_path(file_path):
+            return os.path.getsize(path_from_metadata(file_path))
+    except OSError:
+        pass
+    return 0
+
+def cache_total_bytes() -> int:
+    total = 0
+    if not os.path.isdir(CACHE_DIR):
+        return 0
+    for filename in os.listdir(CACHE_DIR):
+        path = os.path.join(CACHE_DIR, filename)
+        if is_safe_cache_path(path):
+            try:
+                total += os.path.getsize(path)
+            except OSError:
+                continue
+    return total
+
+def cache_has_room(projected_bytes: int = 0) -> bool:
+    return cache_total_bytes() + max(0, projected_bytes or 0) <= CACHE_HARD_LIMIT_BYTES
+
+def find_existing_cache_file(cache_key: Optional[str], *, prefer_playlist: bool = True) -> Optional[str]:
+    if not cache_key or not os.path.isdir(CACHE_DIR):
+        return None
+    try:
+        filenames = os.listdir(CACHE_DIR)
+    except OSError as exc:
+        logger.warning(f"Could not inspect cache directory: {exc}")
+        return None
+    prefixes = [f"plst-{cache_key}.", f"{cache_key}."] if prefer_playlist else [f"{cache_key}.", f"plst-{cache_key}."]
+    for prefix in prefixes:
+        for filename in filenames:
+            if not filename.startswith(prefix):
+                continue
+            path = os.path.join(CACHE_DIR, filename)
+            if is_safe_cache_path(path, cache_key):
+                return path
+    return None
+
+def apply_cache_fields(track: dict, file_path: Optional[str], *, cache_mode: str):
+    cache_key = cache_key_for_track(track)
+    if cache_key:
+        track["cache_key"] = cache_key
+    track["cache_mode"] = cache_mode
+    if file_path and is_safe_cache_path(file_path, cache_key):
+        ext = os.path.splitext(path_from_metadata(file_path))[1].lstrip(".").lower()
+        track["file"] = path_from_metadata(file_path)
+        track["cache_path"] = metadata_path_for_cache_file(path_from_metadata(file_path))
+        track["ext"] = ext
+    else:
+        track.pop("file", None)
+        track["cache_path"] = None
+        track["ext"] = None
+    return track
+
+def cached_file_for_track(track: dict, *, prefer_playlist: bool = True) -> Optional[str]:
+    cache_key = cache_key_for_track(track)
+    cache_path = track.get("cache_path")
+    if cache_path and is_safe_cache_path(cache_path, cache_key):
+        return path_from_metadata(cache_path)
+    return find_existing_cache_file(cache_key, prefer_playlist=prefer_playlist)
 
 def youtube_url_for_track(track: dict) -> str:
     return track.get('webpage_url') or youtube_watch_url + str(track.get('id') or '')
@@ -485,6 +615,23 @@ def run_startup_diagnostics() -> StartupReport:
         report.errors.append(f"Cannot write downloads cache at {downloads_file}: {exc}")
 
     try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        test_path = os.path.join(CACHE_DIR, f".write-test-{os.getpid()}")
+        with open(test_path, "w") as f:
+            f.write("ok")
+        os.remove(test_path)
+        cache_mb = cache_total_bytes() // (1024 * 1024)
+        limit_mb = CACHE_HARD_LIMIT_BYTES // (1024 * 1024)
+        if cache_total_bytes() > CACHE_HARD_LIMIT_BYTES:
+            report.warnings.append(
+                f"Cache directory is over the hard cap ({cache_mb} MB / {limit_mb} MB); new downloads will stream."
+            )
+        else:
+            report.notes.append(f"Cache storage available ({cache_mb} MB / {limit_mb} MB used).")
+    except OSError as exc:
+        report.errors.append(f"Cannot write media cache at {CACHE_DIR}: {exc}")
+
+    try:
         os.makedirs(PLAYLISTS_DIR, exist_ok=True)
         test_path = os.path.join(PLAYLISTS_DIR, f".write-test-{os.getpid()}")
         with open(test_path, "w") as f:
@@ -586,6 +733,34 @@ async def require_queue_room(ctx) -> bool:
     )
     return False
 
+def load_playlist_cache_policy() -> dict:
+    policy = {
+        "default_mode": DEFAULT_PLAYLIST_CACHE_MODE,
+        "force_global": False,
+    }
+    if not os.path.isfile(PLAYLIST_CACHE_POLICY_FILE):
+        return policy
+    try:
+        with open(PLAYLIST_CACHE_POLICY_FILE, "r") as f:
+            loaded = json.load(f)
+        if not isinstance(loaded, dict):
+            logger.error("Playlist cache policy file is not a JSON object; using defaults.")
+            return policy
+        mode = loaded.get("default_mode")
+        if mode in GLOBAL_PLAYLIST_CACHE_MODES:
+            policy["default_mode"] = mode
+        policy["force_global"] = bool(loaded.get("force_global", False))
+    except Exception as exc:
+        logger.error(f"Failed to load playlist cache policy: {exc}")
+    return policy
+
+def save_playlist_cache_policy():
+    write_json_atomic(PLAYLIST_CACHE_POLICY_FILE, {
+        "default_mode": client.playlist_cache_default_mode,
+        "force_global": client.force_global_playlist_cache_mode,
+        "updated_at": time.time(),
+    })
+
 class YTDLSource(discord.PCMVolumeTransformer):
     """
     Class for creating an audio source from YouTube using yt_dlp and ffmpeg.
@@ -629,6 +804,9 @@ class Client(discord.Client):
         self.download_mode = True              # True = download-and-play, False = stream-only
         self.log_verbose = False               # True = DEBUG logging on
         self.queue_links_disabled = False
+        playlist_cache_policy = load_playlist_cache_policy()
+        self.playlist_cache_default_mode = playlist_cache_policy["default_mode"]
+        self.force_global_playlist_cache_mode = playlist_cache_policy["force_global"]
         self.download_delete_delay_seconds = DEFAULT_DOWNLOAD_DELETE_DELAY_SECONDS
         self.auto_leave_enabled = False
         self.auto_leave_delay_seconds = AUTO_LEAVE_DEFAULT_DELAY_SECONDS
@@ -672,6 +850,8 @@ if startup_report.has_blockers():
 def build_runtime_status():
     mode = "download" if client.download_mode else "stream"
     current = client.current_track_info.get('title', 'Unknown title') if client.current_track_info else "Idle"
+    cache_mb = cache_total_bytes() / (1024 * 1024)
+    cache_limit_mb = CACHE_HARD_LIMIT_BYTES // (1024 * 1024)
     lines = [
         "**runtime**",
         f"- mode: `{mode}`",
@@ -682,6 +862,9 @@ def build_runtime_status():
         f"- queue links: `{'disabled' if client.queue_links_disabled else 'enabled'}`",
         f"- song delete delay: `{client.download_delete_delay_seconds}s`",
         f"- auto leave: `{'enabled' if client.auto_leave_enabled else 'disabled'}` (`{client.auto_leave_delay_seconds}s`)",
+        f"- cache: `{cache_mb:.1f} MB / {cache_limit_mb} MB`",
+        f"- playlist cache default: `{client.playlist_cache_default_mode}`",
+        f"- force global playlist cache: `{client.force_global_playlist_cache_mode}`",
     ]
     latest_suggestion = format_suggestion_record(client.suggestion_history[-1]) if client.suggestion_history else None
     lines.append("")
@@ -884,8 +1067,10 @@ def is_play_last_query(value: str) -> bool:
 async def play_saved_track_now(voice, channel, track: dict):
     if not track.get("webpage_url") and track.get("id"):
         track["webpage_url"] = youtube_watch_url + str(track.get("id"))
-    if track.get('file') and is_safe_download_path(track['file'], str(track.get("id") or "")):
-        source = discord.FFmpegPCMAudio(track['file'], options='-vn')
+    cached_file = cached_file_for_track(track)
+    if cached_file:
+        track["file"] = cached_file
+        source = discord.FFmpegPCMAudio(cached_file, options='-vn')
         player = discord.PCMVolumeTransformer(source, volume=client.volume)
     else:
         player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True)
@@ -1040,6 +1225,7 @@ def make_playlist_metadata(name: str, owner, visibility: str = "private") -> dic
         "manager_user_ids": [],
         "tracks": [],
         "folder": f"{safe_playlist_slug(safe_name)}-{playlist_id}",
+        "cache_mode": "follow_global",
         "predownloaded": False,
         "deleted": False,
     }
@@ -1062,6 +1248,9 @@ def load_playlists(*, include_deleted: bool = False, purge_expired: bool = True)
             playlist.setdefault("visibility", "private")
             playlist.setdefault("locked", False)
             playlist.setdefault("folder", os.path.basename(root))
+            playlist.setdefault("cache_mode", "follow_global")
+            for track in playlist.get("tracks", []):
+                normalize_playlist_track_cache_fields(track)
             if playlist.get("deleted") and not include_deleted:
                 continue
             playlists.append(playlist)
@@ -1272,7 +1461,7 @@ def is_playlist_reference(value: str, user=None) -> bool:
     return text.lower().startswith("playlist:") or resolve_playlist_reference(text, user) is not None
 
 def playlist_track_from_track(track: dict, user) -> dict:
-    return {
+    item = {
         "title": str(track.get("title") or "Unknown title"),
         "id": str(track.get("id") or ""),
         "webpage_url": track.get("webpage_url") or youtube_watch_url + str(track.get("id") or ""),
@@ -1280,6 +1469,36 @@ def playlist_track_from_track(track: dict, user) -> dict:
         "added_by_discord_name": user_display(user),
         "added_at": time.time(),
     }
+    normalize_playlist_track_cache_fields(item, source_track=track)
+    return item
+
+def normalize_playlist_track_cache_fields(track: dict, *, source_track: Optional[dict] = None) -> dict:
+    source_track = source_track or track
+    if not track.get("webpage_url") and track.get("id"):
+        track["webpage_url"] = canonical_youtube_url(track.get("id"))
+    cache_key = cache_key_for_track(track) or cache_key_for_track(source_track)
+    if cache_key:
+        track["cache_key"] = cache_key
+    cache_path = source_track.get("cache_path") or track.get("cache_path")
+    file_path = source_track.get("file") or path_from_metadata(cache_path)
+    if file_path and is_safe_cache_path(file_path, cache_key):
+        ext = os.path.splitext(path_from_metadata(file_path))[1].lstrip(".").lower()
+        track["cache_path"] = metadata_path_for_cache_file(path_from_metadata(file_path))
+        track["ext"] = ext
+        if os.path.basename(path_from_metadata(file_path)).startswith("plst-"):
+            track["cache_mode"] = "playlist"
+        else:
+            track["cache_mode"] = "shortterm"
+    else:
+        if cache_path:
+            logger.warning(
+                f"Ignoring unsafe or missing playlist cache path for "
+                f"{track.get('title', 'Unknown title')}: {cache_path}"
+            )
+        track["cache_path"] = None
+        track.setdefault("cache_mode", "streaming")
+    track.setdefault("ext", None)
+    return track
 
 def playlist_track_identity(track: dict) -> Optional[str]:
     video_id = str(track.get("id") or "").strip()
@@ -1390,19 +1609,24 @@ def playlist_to_queue_tracks(playlist: dict, *, block_id: Optional[str] = None) 
     total = len(tracks)
     queue_tracks = []
     for index, track in enumerate(tracks, start=1):
+        normalize_playlist_track_cache_fields(track)
         queue_track = {
             "id": str(track.get("id") or ""),
             "title": str(track.get("title") or "Unknown title"),
             "webpage_url": track.get("webpage_url") or youtube_watch_url + str(track.get("id") or ""),
+            "cache_key": track.get("cache_key"),
+            "cache_mode": track.get("cache_mode", "streaming"),
+            "cache_path": track.get("cache_path"),
+            "ext": track.get("ext"),
             "playlist_id": playlist.get("id"),
             "playlist_name": playlist.get("name"),
             "playlist_block_id": block_id,
             "playlist_index": index,
             "playlist_total": total,
         }
-        permanent_file = track.get("permanent_file")
-        if permanent_file and is_safe_playlist_file_path(permanent_file, playlist, queue_track["id"]):
-            queue_track["file"] = permanent_file
+        cached_file = cached_file_for_track(queue_track)
+        if cached_file:
+            queue_track["file"] = cached_file
         queue_tracks.append(queue_track)
     return queue_tracks
 
@@ -1461,6 +1685,7 @@ def playlist_detail_pages(playlist: dict) -> list:
         f"- managers: `{len(playlist_manager_ids(playlist))}`",
         f"- visibility: `{playlist.get('visibility', 'private')}`",
         f"- locked: `{bool(playlist.get('locked'))}`",
+        f"- {playlist_cache_status_line(playlist)}",
         "",
         "**songs**",
     ]
@@ -1481,15 +1706,8 @@ def page_with_footer(pages: list, page_index: int) -> str:
     return pages[page_index] + footer
 
 def is_safe_playlist_file_path(file_path: str, playlist: dict, video_id: Optional[str] = None) -> bool:
-    try:
-        real_folder = os.path.realpath(playlist_folder_path(playlist))
-        real_path = os.path.realpath(file_path)
-        return (
-            os.path.commonpath([real_folder, real_path]) == real_folder
-            and is_safe_download_path(file_path, video_id)
-        )
-    except (OSError, ValueError):
-        return False
+    expected_cache_key = canonical_cache_key_from_video_id(video_id) if video_id else None
+    return is_safe_cache_path(file_path, expected_cache_key)
 
 def track_display_parts(track: dict) -> tuple:
     title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
@@ -1720,9 +1938,11 @@ def expanded_help_message() -> str:
         "/playlist removesong <playlist> <position> - Remove a song.",
         "/playlist move <playlist> <from> <to> - Reorder songs.",
         "/playlist lock <playlist> <locked> - Lock or unlock edits.",
+        "/playlist cachemode <playlist> <mode> - Admin cache policy for one playlist.",
+        "/playlist cacheglobal <mode> [force] - Admin global playlist cache policy.",
         "",
         "**admin / other**",
-        "/clear_queue, /restorequeue, /purgequeue, /autoleave, /setdeletetime, /togglelog, /toggledownload, /disablelinks, /reboot, /status",
+        "/clear_queue, /restorequeue, /purgequeue, /purgecache, /cachestatus, /autoleave, /setdeletetime, /togglelog, /toggledownload, /disablelinks, /reboot, /status",
         "/backup_teekkari_quotes, /random_quote",
     ])
 
@@ -1741,6 +1961,7 @@ def playlist_general_help_message() -> str:
         "/playlist fill current Roadtrip - add queued songs not already in it",
         "",
         "Detailed help: `/help topic:playlist command:new`, `/help topic:playlist command:add`, `/help topic:playlist command:fill`.",
+        "Playlist cache policy is admin-controlled with `/playlist cacheglobal` and `/playlist cachemode`.",
     ])
 
 def playlist_help_pages() -> dict:
@@ -1871,6 +2092,24 @@ def playlist_help_pages() -> dict:
             "notes": ["Useful before sharing a public playlist."],
             "errors": ["Only owner/admin can lock playlists."],
         },
+        "cachemode": {
+            "purpose": "set one playlist's cache behavior",
+            "synopsis": ["/playlist cachemode <playlist> <follow_global|streaming|bounded|keep_cached>"],
+            "description": "Sets the cache mode stored in that playlist's metadata.",
+            "arguments": ["<playlist> - playlist to configure.", "<mode> - follow_global, streaming, bounded, or keep_cached."],
+            "examples": ["/playlist cachemode Roadtrip bounded", "/playlist cachemode Roadtrip keep_cached"],
+            "notes": ["Admin only.", "Bounded caches up to 15 tracks or 3 GB per playlist play operation.", "Cache files live in cache/, not the playlist folder."],
+            "errors": ["Playlist not found.", "Admin permission required."],
+        },
+        "cacheglobal": {
+            "purpose": "set the global playlist cache behavior",
+            "synopsis": ["/playlist cacheglobal <streaming|bounded|keep_cached> [force]"],
+            "description": "Sets the persistent default for playlists whose mode is follow_global.",
+            "arguments": ["<mode> - streaming, bounded, or keep_cached.", "<force> - true makes all playlists ignore their own mode."],
+            "examples": ["/playlist cacheglobal bounded false", "/playlist cacheglobal streaming true"],
+            "notes": ["Admin only.", "The default at startup is bounded.", "The cache hard cap is 20 GB."],
+            "errors": ["Admin permission required."],
+        },
         "rescue": {
             "purpose": "restore a recently removed playlist",
             "synopsis": ["/playlist rescue", "/playlist rescue <playlist>"],
@@ -1931,6 +2170,48 @@ def enough_disk_for_download() -> bool:
         logger.warning(f"Disk usage check failed before download: {exc}")
         return True
 
+def estimate_total_downloaded_bytes() -> int:
+    total = 0
+    for vid, info in downloaded.items():
+        fp = info.get('filepath')
+        if fp and is_safe_download_path(fp, vid):
+            try:
+                total += os.path.getsize(path_from_metadata(fp))
+            except Exception:
+                continue
+    return total
+
+async def download_youtube_to_cache(video_url: str, cache_key: str, *, playlist: bool = False) -> tuple:
+    prefix = "plst-" if playlist else ""
+    temp_token = secrets.token_hex(4)
+    cache_bytes_before = cache_total_bytes()
+    options = dict(ytdl_options)
+    options["outtmpl"] = os.path.join(CACHE_DIR, f".download-{prefix}{cache_key}-{temp_token}.%(ext)s")
+    loop = asyncio.get_event_loop()
+    downloader = yt_dlp.YoutubeDL(options)
+    data = await loop.run_in_executor(None, lambda: downloader.extract_info(video_url, download=True))
+    if data is None:
+        raise Exception("Failed to download track info")
+    if 'entries' in data:
+        data = next((entry for entry in data['entries'] if entry), None)
+    if data is None:
+        raise Exception("No playable result found during download")
+    temp_path = downloader.prepare_filename(data)
+    ext = os.path.splitext(temp_path)[1].lstrip(".").lower()
+    target_path = cache_path_for_key(cache_key, ext, playlist=playlist)
+    if not is_safe_cache_path(temp_path):
+        raise Exception("Downloaded file path failed safety validation.")
+    if cache_bytes_before + os.path.getsize(temp_path) > CACHE_HARD_LIMIT_BYTES:
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        raise Exception("Cache hard limit reached; download refused.")
+    os.replace(temp_path, target_path)
+    if not is_safe_cache_path(target_path, cache_key):
+        raise Exception("Final cache file failed safety validation.")
+    return target_path, ext, data
+
 async def fetch_track(query: str, requested_by=None):
     """
     Fetches YouTube track info for the given query (URL or search term).
@@ -1942,7 +2223,37 @@ async def fetch_track(query: str, requested_by=None):
     # passed directly to yt-dlp so it can use its own maintained search extractor.
     video_url, video_id = normalize_youtube_query(query)
 
-    # If we have a video_id and it's cached (and in download mode), use the cached file
+    cache_key = canonical_cache_key_from_video_id(video_id) if video_id else None
+
+    # If we have a video_id and it's cached (and in download mode), use the cached file.
+    if video_id and client.download_mode:
+        existing_cache = find_existing_cache_file(cache_key, prefer_playlist=True)
+        info = downloaded.get(video_id, {})
+        if existing_cache and info.get('title'):
+            title = info.get('title', 'Unknown title')
+            page_url = youtube_watch_url + video_id
+            cache_mode = "playlist" if os.path.basename(existing_cache).startswith("plst-") else "shortterm"
+            if cache_mode != "playlist":
+                downloaded[video_id] = {
+                    'title': title,
+                    'filepath': existing_cache,
+                    'timestamp': time.time(),
+                    'cache_key': cache_key,
+                    'cache_path': metadata_path_for_cache_file(existing_cache),
+                    'ext': os.path.splitext(existing_cache)[1].lstrip(".").lower(),
+                }
+                save_downloads_metadata("cache reuse")
+            return {
+                'id': video_id,
+                'title': title,
+                'webpage_url': page_url,
+                'file': existing_cache,
+                'cache_key': cache_key,
+                'cache_path': metadata_path_for_cache_file(existing_cache),
+                'cache_mode': cache_mode,
+                'ext': os.path.splitext(existing_cache)[1].lstrip(".").lower(),
+            }
+
     if video_id and video_id in downloaded and client.download_mode:
         info = downloaded[video_id]
         file_path = info.get('filepath')
@@ -1973,6 +2284,8 @@ async def fetch_track(query: str, requested_by=None):
         page_url = data.get('webpage_url', video_url)
         if not video_id:
             raise Exception("Resolved track is missing a YouTube video id.")
+        page_url = canonical_youtube_url(video_id)
+        cache_key = canonical_cache_key_from_video_id(video_id)
         duration = data.get('duration', 0) or 0  # duration in seconds
         filesize = data.get('filesize') or data.get('filesize_approx') or 0
         if filesize == 0:
@@ -1994,23 +2307,40 @@ async def fetch_track(query: str, requested_by=None):
         if duration and duration > MAX_LENGTH_ADMIN:
             raise Exception("Track duration exceeds 5 hours (admin limit).")
 
-        # Calculate total downloaded bytes currently on disk
-        def total_downloaded_bytes():
-            total = 0
-            for vid, info in downloaded.items():
-                fp = info.get('filepath')
-                if fp and is_safe_download_path(fp, vid):
-                    try:
-                        total += os.path.getsize(fp)
-                    except Exception:
-                        continue
-            return total
-        total_bytes = total_downloaded_bytes()
+        existing_cache = find_existing_cache_file(cache_key, prefer_playlist=True)
+        if existing_cache and client.download_mode:
+            cache_mode = "playlist" if os.path.basename(existing_cache).startswith("plst-") else "shortterm"
+            if cache_mode != "playlist":
+                downloaded[video_id] = {
+                    'title': title,
+                    'filepath': existing_cache,
+                    'timestamp': time.time(),
+                    'cache_key': cache_key,
+                    'cache_path': metadata_path_for_cache_file(existing_cache),
+                    'ext': os.path.splitext(existing_cache)[1].lstrip(".").lower(),
+                }
+                save_downloads_metadata("cache reuse")
+            logger.info(f"Using cached file for {video_id}: {title}")
+            return {
+                'id': video_id,
+                'title': title,
+                'webpage_url': page_url,
+                'file': existing_cache,
+                'cache_key': cache_key,
+                'cache_path': metadata_path_for_cache_file(existing_cache),
+                'cache_mode': cache_mode,
+                'ext': os.path.splitext(existing_cache)[1].lstrip(".").lower(),
+            }
+
+        total_bytes = estimate_total_downloaded_bytes()
 
         # If in download mode, enforce file size and total disk usage limits
         if client.download_mode:
             if not enough_disk_for_download():
                 raise Exception(f"Less than {MIN_FREE_DOWNLOAD_MB}MB free on disk; download refused.")
+            if not cache_has_room(filesize or 0):
+                logger.warning("Cache hard limit reached; streaming without downloading.")
+                return {'id': video_id, 'title': title, 'webpage_url': page_url, 'cache_key': cache_key, 'cache_mode': 'streaming', 'cache_path': None}
             new_total = total_bytes + (filesize or 0)
             if new_total > TOTAL_LIMIT_NORMAL and not is_user_admin(requested_by):
                 raise Exception("Total download cache size limit exceeded (normal user).")
@@ -2032,23 +2362,32 @@ async def fetch_track(query: str, requested_by=None):
         if not client.download_mode:
             # Stream-only mode: do not download, just return info (no 'file' key)
             logger.info(f"Using stream-only mode for '{title}' ({video_id}).")
-            return {'id': video_id, 'title': title, 'webpage_url': page_url}
+            return {'id': video_id, 'title': title, 'webpage_url': page_url, 'cache_key': cache_key, 'cache_mode': 'streaming', 'cache_path': None}
 
         # Download mode: download the audio file using yt_dlp
         logger.info(f"Downloading track '{title}' ({video_id})...")
-        data_full = await loop.run_in_executor(None, lambda: ytdl.extract_info(video_url, download=True))
-        if data_full is None:
-            raise Exception("Failed to download track info")
-        if 'entries' in data_full:
-            data_full = data_full['entries'][0]
-        file_path = ytdl.prepare_filename(data_full)
-        if not is_safe_download_path(file_path, video_id):
-            raise Exception("Downloaded file path failed safety validation.")
+        file_path, ext, _ = await download_youtube_to_cache(video_url, cache_key, playlist=False)
         # Cache the downloaded file info
-        downloaded[video_id] = {'title': title, 'filepath': file_path, 'timestamp': time.time()}
+        downloaded[video_id] = {
+            'title': title,
+            'filepath': file_path,
+            'timestamp': time.time(),
+            'cache_key': cache_key,
+            'cache_path': metadata_path_for_cache_file(file_path),
+            'ext': ext,
+        }
         save_downloads_metadata("track download")
         logger.info(f"Downloaded '{title}' ({video_id}) to {file_path}")
-        return {'id': video_id, 'title': title, 'webpage_url': page_url, 'file': file_path}
+        return {
+            'id': video_id,
+            'title': title,
+            'webpage_url': page_url,
+            'file': file_path,
+            'cache_key': cache_key,
+            'cache_path': metadata_path_for_cache_file(file_path),
+            'cache_mode': 'shortterm',
+            'ext': ext,
+        }
     except Exception as e:
         logger.error(f"yt_dlp error for {query}: {e}")
         raise
@@ -2077,8 +2416,10 @@ async def ensure_voice_for_playback(ctx):
     return voice
 
 async def build_audio_player(track: dict):
-    if track.get('file'):
-        source = discord.FFmpegPCMAudio(track['file'], options='-vn')
+    cached_file = cached_file_for_track(track)
+    if cached_file:
+        track["file"] = cached_file
+        source = discord.FFmpegPCMAudio(cached_file, options='-vn')
         return discord.PCMVolumeTransformer(source, volume=client.volume)
     player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True)
     return player
@@ -2152,6 +2493,110 @@ async def enqueue_track_with_playlist_prompt(ctx, track: dict, command_name: str
         await ctx.followup.send(f"Added to queue: {title} ({track.get('id', '')})")
         logger.info(f"Track enqueued: {track.get('title')} ({track.get('id')})")
 
+def effective_playlist_cache_mode(playlist: dict) -> str:
+    if client.force_global_playlist_cache_mode:
+        return client.playlist_cache_default_mode
+    mode = playlist.get("cache_mode") or "follow_global"
+    if mode == "follow_global":
+        return client.playlist_cache_default_mode
+    if mode not in PLAYLIST_CACHE_MODES:
+        return client.playlist_cache_default_mode
+    return mode
+
+def playlist_cache_status_line(playlist: dict) -> str:
+    configured = playlist.get("cache_mode", "follow_global")
+    effective = effective_playlist_cache_mode(playlist)
+    forced = " forced-global" if client.force_global_playlist_cache_mode else ""
+    return f"cache mode: `{configured}` -> `{effective}`{forced}"
+
+async def cache_playlist_track(track: dict, *, playlist_cache: bool, projected_limit: Optional[int] = None) -> tuple:
+    cache_key = cache_key_for_track(track)
+    video_id = str(track.get("id") or "").strip()
+    if not cache_key or not video_id:
+        return False, 0
+    existing = find_existing_cache_file(cache_key, prefer_playlist=True)
+    if existing:
+        apply_cache_fields(track, existing, cache_mode="playlist" if os.path.basename(existing).startswith("plst-") else "shortterm")
+        return False, 0
+    url = track.get("webpage_url") or canonical_youtube_url(video_id)
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=False))
+    if data is None:
+        return False, 0
+    if 'entries' in data:
+        data = next((entry for entry in data['entries'] if entry), None)
+    if data is None:
+        return False, 0
+    filesize = data.get('filesize') or data.get('filesize_approx') or 0
+    if projected_limit is not None and filesize and filesize > projected_limit:
+        return False, 0
+    if not enough_disk_for_download() or not cache_has_room(filesize or 0):
+        logger.warning("Playlist cache download skipped because disk/cache limit was reached.")
+        return False, 0
+    file_path, ext, _ = await download_youtube_to_cache(url, cache_key, playlist=playlist_cache)
+    apply_cache_fields(track, file_path, cache_mode="playlist" if playlist_cache else "shortterm")
+    track["ext"] = ext
+    return True, cache_file_size(file_path)
+
+async def prepare_playlist_cache_for_playback(ctx, playlist: dict, tracks: list):
+    mode = effective_playlist_cache_mode(playlist)
+    if mode == "streaming":
+        return
+    cached = 0
+    reused = 0
+    downloaded_bytes = 0
+    capped = False
+    track_limit = PLAYLIST_CACHE_BOUNDED_TRACK_LIMIT if mode == "bounded" else len(tracks)
+    byte_limit = PLAYLIST_CACHE_BOUNDED_BYTES if mode == "bounded" else CACHE_HARD_LIMIT_BYTES
+
+    playlist_tracks = playlist.get("tracks", [])
+    for index, queue_track in enumerate(tracks):
+        cache_key = cache_key_for_track(queue_track)
+        existing = find_existing_cache_file(cache_key, prefer_playlist=True)
+        if existing:
+            apply_cache_fields(queue_track, existing, cache_mode="playlist" if os.path.basename(existing).startswith("plst-") else "shortterm")
+            if index < len(playlist_tracks):
+                apply_cache_fields(playlist_tracks[index], existing, cache_mode=queue_track.get("cache_mode", "shortterm"))
+            reused += 1
+            continue
+        if cached >= track_limit or downloaded_bytes >= byte_limit:
+            capped = True
+            continue
+        try:
+            did_download, size = await cache_playlist_track(
+                queue_track,
+                playlist_cache=True,
+                projected_limit=max(0, byte_limit - downloaded_bytes),
+            )
+        except Exception as exc:
+            logger.warning(f"Playlist cache download failed for {queue_track.get('id')}: {exc}")
+            continue
+        if did_download:
+            if downloaded_bytes + size > byte_limit:
+                file_path = queue_track.get("file")
+                if file_path and is_safe_cache_path(file_path, cache_key):
+                    try:
+                        os.remove(file_path)
+                    except OSError as exc:
+                        logger.warning(f"Failed to remove over-limit playlist cache file {file_path}: {exc}")
+                apply_cache_fields(queue_track, None, cache_mode="streaming")
+                capped = True
+                continue
+            cached += 1
+            downloaded_bytes += size
+            if index < len(playlist_tracks):
+                apply_cache_fields(playlist_tracks[index], queue_track.get("file"), cache_mode="playlist")
+    if cached or reused:
+        playlist["predownloaded"] = True
+        playlist["predownloaded_at"] = time.time()
+        save_playlist(playlist)
+    if capped:
+        await ctx.followup.send(
+            "Playlist cache limit reached: cached up to 15 tracks or 3 GB. Remaining tracks will stream when needed."
+        )
+    elif cached or reused:
+        await ctx.followup.send(f"Using playlist cache for {cached + reused} track(s).")
+
 async def play_playlist_now(ctx, playlist: dict, command_name: str):
     tracks = playlist_to_queue_tracks(playlist)
     if not tracks:
@@ -2165,6 +2610,7 @@ async def play_playlist_now(ctx, playlist: dict, command_name: str):
     voice = await ensure_voice_for_playback(ctx)
     if voice is None:
         return
+    await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     if client.currently_playing:
         for track in tracks:
             queue.append(track)
@@ -2187,6 +2633,7 @@ async def enqueue_playlist(ctx, playlist: dict, command_name: str):
     if not is_user_admin(ctx.user) and len(queue) + len(tracks) > MAX_QUEUE_LENGTH:
         await ctx.followup.send(f"Queue limit reached ({MAX_QUEUE_LENGTH} songs). Ask an admin to clear the queue.", ephemeral=True)
         return
+    await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     for track in tracks:
         queue.append(track)
         client.song_history.append(track)
@@ -2216,43 +2663,42 @@ async def add_playlist_to_queue_front(ctx, playlist: dict):
     if not is_user_admin(ctx.user) and len(queue) + len(tracks) > MAX_QUEUE_LENGTH:
         await ctx.response.send_message(f"Queue limit reached ({MAX_QUEUE_LENGTH} songs). Ask an admin to clear the queue.", ephemeral=True)
         return
+    if not ctx.response.is_done():
+        await ctx.response.defer()
+    await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     queue[0:0] = tracks
     client.song_history.extend(tracks)
-    await ctx.response.send_message(
+    await ctx.followup.send(
         f"Moved playlist **{discord.utils.escape_markdown(playlist['name'])}** to play next ({len(tracks)} song(s))."
     )
     logger.info(f"Playlist queued at front: {playlist['name']} ({playlist['id']})")
 
 async def predownload_playlist_files(playlist: dict) -> int:
-    folder = playlist_folder_path(playlist)
-    os.makedirs(folder, exist_ok=True)
-    options = dict(ytdl_options)
-    options['outtmpl'] = os.path.join(folder, '%(extractor)s-%(id)s-%(title)s.%(ext)s')
     downloaded_count = 0
-    loop = asyncio.get_event_loop()
-    permanent_ytdl = yt_dlp.YoutubeDL(options)
     for track in playlist.get("tracks", []):
+        normalize_playlist_track_cache_fields(track)
         video_id = str(track.get("id") or "")
         if not video_id:
             continue
-        if track.get("permanent_file") and is_safe_playlist_file_path(track["permanent_file"], playlist, video_id):
+        cached_file = cached_file_for_track(track)
+        if cached_file and os.path.basename(cached_file).startswith("plst-"):
+            apply_cache_fields(track, cached_file, cache_mode="playlist")
             continue
         url = track.get("webpage_url") or youtube_watch_url + video_id
-        data = await loop.run_in_executor(None, lambda u=url: permanent_ytdl.extract_info(u, download=True))
-        if data is None:
+        cache_key = cache_key_for_track(track)
+        if not cache_key:
             continue
-        if 'entries' in data:
-            data = next((entry for entry in data['entries'] if entry), None)
-        if data is None:
-            continue
-        file_path = permanent_ytdl.prepare_filename(data)
-        if not is_safe_playlist_file_path(file_path, playlist, video_id):
-            raise Exception(f"Downloaded playlist file failed safety validation for {video_id}.")
-        track["permanent_file"] = file_path
+        if not cache_has_room():
+            logger.warning("Playlist predownload stopped because cache hard limit was reached.")
+            break
+        file_path, ext, _ = await download_youtube_to_cache(url, cache_key, playlist=True)
+        apply_cache_fields(track, file_path, cache_mode="playlist")
+        track["ext"] = ext
         track["permanent_downloaded_at"] = time.time()
         downloaded_count += 1
     playlist["predownloaded"] = True
     playlist["predownloaded_at"] = time.time()
+    playlist["cache_mode"] = "keep_cached"
     save_playlist(playlist)
     return downloaded_count
 
@@ -2477,12 +2923,12 @@ async def play_next_channel(channel):
     if len(queue) > 0:
         track = queue.pop(0)
         try:
-            # If a local file exists for this track, play from file; otherwise stream from YouTube
-            if track.get('file') and os.path.isfile(track['file']):
-                source = discord.FFmpegPCMAudio(track['file'], options='-vn')
+            cached_file = cached_file_for_track(track)
+            if cached_file:
+                track["file"] = cached_file
+                source = discord.FFmpegPCMAudio(cached_file, options='-vn')
                 player = discord.PCMVolumeTransformer(source, volume=client.volume)
             else:
-                # No local file (or file missing) – stream audio directly
                 player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True)
             guild = channel.guild
             client.current_track_id = track['id']
@@ -2790,12 +3236,7 @@ async def play(ctx, *, url: str):
                 else:
                     await ctx.followup.send("Download canceled.")
                     return
-            # Play the track (either from file or streaming)
-            if track.get('file'):
-                source = discord.FFmpegPCMAudio(track['file'], options='-vn')
-                player = discord.PCMVolumeTransformer(source, volume=client.volume)
-            else:
-                player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True)
+            player = await build_audio_player(track)
             voice.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, ctx.channel))
             client.current_track_id = track['id']
             client.currently_playing = True
@@ -2866,12 +3307,7 @@ async def playtop(ctx, *, query: str):
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
                 await ctx.followup.send(f"Track **{track['title']}** (~{filesize_mb:.1f} MB) is too large to play without confirmation. Use /play for this track.")
                 return
-            # Play the track immediately
-            if track.get('file'):
-                source = discord.FFmpegPCMAudio(track['file'], options='-vn')
-                player = discord.PCMVolumeTransformer(source, volume=client.volume)
-            else:
-                player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True)
+            player = await build_audio_player(track)
             voice.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, ctx.channel))
             client.current_track_id = track['id']
             client.currently_playing = True
@@ -3078,7 +3514,7 @@ async def playlist_new(ctx, name: Optional[str] = None, visibility: Optional[str
         return
     await ctx.response.send_message(
         f"Created {playlist['visibility']} playlist **{discord.utils.escape_markdown(playlist['name'])}** (`{playlist['id']}`). "
-        f"Add songs with `/playlist add {playlist['name']} url <youtube-url>`."
+        f"It is empty. Add songs with `/playlist add {playlist['name']} url <youtube-url>`."
     )
 
 async def show_playlist_details(ctx, name: str, flags: Optional[str] = None, *, require_edit: bool = False):
@@ -3182,7 +3618,11 @@ async def playlist_add(ctx, playlist: str, source: str, queue_position: Optional
         await ctx.followup.send("Could not save the playlist. Check output.log.", ephemeral=True)
         return
     title = discord.utils.escape_markdown(str(track.get("title") or "Unknown title"))
-    await ctx.followup.send(f"Added **{title}** to **{discord.utils.escape_markdown(target['name'])}**.", ephemeral=True)
+    await ctx.followup.send(
+        f"Added **{title}** to **{discord.utils.escape_markdown(target['name'])}**. "
+        "The track is saved in playlist metadata and will stream unless cached later.",
+        ephemeral=True,
+    )
     logger.info(f"Added track to playlist {target['name']} ({target['id']}): {track.get('title')} ({track.get('id')})")
 
 @app_commands.describe(
@@ -3233,7 +3673,8 @@ async def playlist_fill(ctx, source: str, playlist: str):
         details.append(f"skipped {skipped_missing} queue item(s) without YouTube metadata")
     suffix = f" ({'; '.join(details)})." if details else "."
     await ctx.followup.send(
-        f"Added {len(additions)} queued song(s) to **{discord.utils.escape_markdown(target['name'])}**{suffix}",
+        f"Added {len(additions)} queued song(s) to **{discord.utils.escape_markdown(target['name'])}**{suffix} "
+        "These tracks are saved in playlist metadata and will stream unless cached later.",
         ephemeral=True,
     )
     logger.info(
@@ -3462,6 +3903,73 @@ async def playlist_lock(ctx, playlist: str, locked: bool):
     state = "locked" if locked else "unlocked"
     await ctx.response.send_message(f"Playlist **{discord.utils.escape_markdown(target['name'])}** is now {state}.")
 
+@app_commands.describe(playlist="Playlist name, id, or playlist:name", mode="follow_global, streaming, bounded, or keep_cached")
+@app_commands.choices(mode=[
+    app_commands.Choice(name="follow_global", value="follow_global"),
+    app_commands.Choice(name="streaming", value="streaming"),
+    app_commands.Choice(name="bounded", value="bounded"),
+    app_commands.Choice(name="keep_cached", value="keep_cached"),
+])
+@playlist_group.command(name="cachemode", description="Set a playlist's cache behavior.")
+async def playlist_cachemode(ctx, playlist: str, mode: str):
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    target = resolve_playlist_reference(playlist, ctx.user)
+    if not target:
+        await ctx.response.send_message("Playlist not found.", ephemeral=True)
+        return
+    if mode not in PLAYLIST_CACHE_MODES:
+        await ctx.response.send_message("Use follow_global, streaming, bounded, or keep_cached.", ephemeral=True)
+        return
+    target["cache_mode"] = mode
+    save_playlist(target)
+    await ctx.response.send_message(
+        f"Playlist **{discord.utils.escape_markdown(target['name'])}** cache mode set to `{mode}`. "
+        f"Effective mode is `{effective_playlist_cache_mode(target)}`.",
+        ephemeral=True,
+    )
+    logger.info(f"Playlist cache mode changed: {target['name']} ({target['id']}) -> {mode}")
+
+@app_commands.describe(mode="streaming, bounded, or keep_cached", force="Force all playlists to use this global mode")
+@app_commands.choices(mode=[
+    app_commands.Choice(name="streaming", value="streaming"),
+    app_commands.Choice(name="bounded", value="bounded"),
+    app_commands.Choice(name="keep_cached", value="keep_cached"),
+])
+@playlist_group.command(name="cacheglobal", description="Set the global playlist cache behavior.")
+async def playlist_cacheglobal(ctx, mode: str, force: Optional[bool] = None):
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    if mode not in GLOBAL_PLAYLIST_CACHE_MODES:
+        await ctx.response.send_message("Use streaming, bounded, or keep_cached.", ephemeral=True)
+        return
+    old_mode = client.playlist_cache_default_mode
+    old_force = client.force_global_playlist_cache_mode
+    client.playlist_cache_default_mode = mode
+    if force is not None:
+        client.force_global_playlist_cache_mode = bool(force)
+    try:
+        save_playlist_cache_policy()
+    except Exception as exc:
+        client.playlist_cache_default_mode = old_mode
+        client.force_global_playlist_cache_mode = old_force
+        logger.error(f"Failed to save playlist cache policy: {exc}")
+        await ctx.response.send_message("Could not save playlist cache policy. Check output.log.", ephemeral=True)
+        return
+    await ctx.response.send_message(
+        f"Global playlist cache mode changed `{old_mode}` -> `{mode}`. "
+        f"Force global: `{old_force}` -> `{client.force_global_playlist_cache_mode}`.",
+        ephemeral=True,
+    )
+    logger.info(
+        f"Global playlist cache mode changed by {user_display(ctx.user)}: "
+        f"{old_mode}/{old_force} -> {mode}/{client.force_global_playlist_cache_mode}"
+    )
+
 @app_commands.describe(playlist="Playlist name, id, or playlist:name")
 @playlist_group.command(name="predownload", description="Admin-only future permanent playlist download hook.")
 async def playlist_predownload(ctx, playlist: str):
@@ -3487,6 +3995,69 @@ async def playlist_predownload(ctx, playlist: str):
         f"Predownloaded {count} new file(s) for **{discord.utils.escape_markdown(target['name'])}**.",
         ephemeral=True,
     )
+
+def purge_cache_files(*, keep_current: bool = True) -> int:
+    current_file = None
+    if keep_current and client.current_track_info:
+        current_file = cached_file_for_track(client.current_track_info)
+        current_file = os.path.realpath(current_file) if current_file else None
+    count = 0
+    if not os.path.isdir(CACHE_DIR):
+        return 0
+    for filename in os.listdir(CACHE_DIR):
+        file_path = os.path.join(CACHE_DIR, filename)
+        if not is_safe_cache_path(file_path):
+            continue
+        if current_file and os.path.realpath(file_path) == current_file:
+            continue
+        try:
+            os.remove(file_path)
+            count += 1
+        except OSError as exc:
+            logger.warning(f"Failed to purge cache file {file_path}: {exc}")
+    for vid, info in list(downloaded.items()):
+        file_path = info.get("filepath")
+        if not file_path or not is_safe_cache_path(file_path):
+            downloaded.pop(vid, None)
+            continue
+        if not os.path.isfile(path_from_metadata(file_path)):
+            downloaded.pop(vid, None)
+    save_downloads_metadata("cache purge")
+    return count
+
+@client.tree.command()
+async def cachestatus(ctx):
+    """Shows media cache status (admin only)."""
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    cache_bytes = cache_total_bytes()
+    limit_bytes = CACHE_HARD_LIMIT_BYTES
+    files = 0
+    if os.path.isdir(CACHE_DIR):
+        files = sum(1 for name in os.listdir(CACHE_DIR) if is_safe_cache_path(os.path.join(CACHE_DIR, name)))
+    await ctx.response.send_message(
+        "\n".join([
+            "**cache status**",
+            f"- directory: `{metadata_path_for_cache_file(CACHE_DIR)}`",
+            f"- files: `{files}`",
+            f"- size: `{cache_bytes / (1024 * 1024):.1f} MB / {limit_bytes // (1024 * 1024)} MB`",
+            f"- playlist default: `{client.playlist_cache_default_mode}`",
+            f"- force global playlist cache: `{client.force_global_playlist_cache_mode}`",
+        ]),
+        ephemeral=True,
+    )
+
+@client.tree.command()
+async def purgecache(ctx):
+    """Purges validated media files from cache (admin only)."""
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    count = purge_cache_files(keep_current=True)
+    await ctx.response.send_message(f"Purged {count} cache file(s). The current playing file was kept if present.", ephemeral=True)
 
 @client.tree.command()
 async def purgequeue(ctx):

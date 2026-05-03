@@ -65,12 +65,16 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/playlist removesong <playlist> <position> [flags]` | remove a song from a playlist you can edit. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
 | `/playlist move <playlist> <from> <to> [flags]` | reorder songs inside a playlist you can edit. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
 | `/playlist lock <playlist> <locked>` | lock or unlock manager edits. owner/admin only. |
-| `/playlist predownload <playlist>` | admin-only future hook for permanent playlist downloads. disabled by default. |
+| `/playlist cachemode <playlist> <mode>` | set one playlist's cache behavior. admin only. modes: `follow_global`, `streaming`, `bounded`, `keep_cached`. |
+| `/playlist cacheglobal <mode> [force]` | set the persistent global playlist cache behavior. admin only. modes: `streaming`, `bounded`, `keep_cached`; `force:true` makes playlists ignore their own mode. |
+| `/playlist predownload <playlist>` | admin-only hook for permanent playlist downloads into `cache/plst-<cache-key>.<ext>`. disabled by default. |
 
 ## admin
 
 | command | purpose |
 | --- | --- |
+| `/cachestatus` | show cache directory, size, file count, global playlist cache mode, and force-global state. admin only. |
+| `/purgecache` | delete validated media files from `cache/`, keeping the current playing file if present. admin only. |
 | `/togglelog` | toggle verbose debug logging. admin only. |
 | `/toggledownload` | switch between download-and-play mode and stream-only mode. admin only. |
 | `/disablelinks` | toggle whether queue-style displays are allowed to show youtube links. admin only. |
@@ -98,6 +102,6 @@ status views:
 | --- | --- |
 | `/help` | show the in-discord command summary. |
 | `/help topic:playlists` | show the playlist quick-start help page. |
-| `/help topic:playlist command:<subcommand>` | show a manpage-style playlist subcommand help page. available pages: `new`, `list`, `show`, `play`, `edit`, `add`, `fill`, `addmod`, `remove`, `delete`, `rename`, `removesong`, `move`, `lock`, `rescue`, `predownload`. |
+| `/help topic:playlist command:<subcommand>` | show a manpage-style playlist subcommand help page. available pages: `new`, `list`, `show`, `play`, `edit`, `add`, `fill`, `addmod`, `remove`, `delete`, `rename`, `removesong`, `move`, `lock`, `cachemode`, `cacheglobal`, `rescue`, `predownload`. |
 
 React `📖` on the help message to expand the compact help into the full command list.

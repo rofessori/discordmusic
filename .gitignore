@@ -2,6 +2,7 @@
 /.env.backup
 /setup.tmp
 /last_session_queue.tmp.json
+/playlist-cache-policy.json
 /.idea
 /__pycache__
 
@@ -19,6 +20,7 @@ output.log
 *.log
 bugjournal.md
 playlists/
+cache/
 
 *.py[cod]
 

@@ -4,6 +4,7 @@ a discord music bot for playing audio from any youtube video in your server’s 
 
 also has commands for handling, saving, and displaying quotes from a specific channel.
 also supports local saved playlists with owners, managers, public/private visibility, and playlist playback.
+downloaded media is stored under `cache/`; playlist folders under `playlists/` contain metadata only.
 
 ## docs
 
@@ -101,9 +102,13 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/playlist removesong <playlist> <position>`
   - `/playlist move <playlist> <from_position> <to_position>`
   - `/playlist lock <playlist> <locked>`
+  - `/playlist cachemode <playlist> <follow_global|streaming|bounded|keep_cached>` (admin-only)
+  - `/playlist cacheglobal <streaming|bounded|keep_cached> [force]` (admin-only)
   - `/help topic:playlists` and `/help topic:playlist command:new`
 
 - **admin-only**:
+  - `/cachestatus`
+  - `/purgecache`
   - `/purgequeue`
   - `/playlist predownload <playlist>` (disabled unless `PLAYLIST_PREDOWNLOAD_ENABLED=true`)
   - `/autoleave <enabled> [delay_seconds]`
@@ -142,6 +147,15 @@ tail -f output.log
 
 - **non-youtube urls rejected**:
   public users can provide youtube links or normal search text. raw non-youtube URLs, local URLs, and private-network URLs are rejected before `yt-dlp` runs to reduce SSRF and local-network probing risk.
+
+- **runtime media cache**:
+  downloaded audio lives in `cache/`, not the repository root. normal `/play` downloads use `cache/<base64url-canonical-youtube-url>.<ext>`. playlist long-term cache files use `cache/plst-<base64url-canonical-youtube-url>.<ext>`. raw youtube titles and user input are not used in cache filenames.
+
+- **playlist storage**:
+  playlists are metadata-first. each playlist folder contains `metadata.json`; audio files do not live under `playlists/`. track entries include youtube metadata plus cache fields such as `cache_key`, `cache_mode`, `cache_path`, and `ext` so playback can stream or reuse a safe file in `cache/`.
+
+- **playlist cache limits**:
+  playlist caching defaults to bounded mode: at most 15 tracks or 3 GB are cached per playlist play operation, and remaining tracks stream when needed. admins can change the persistent global mode with `/playlist cacheglobal`, override a playlist with `/playlist cachemode`, inspect cache with `/cachestatus`, and purge safe cache files with `/purgecache`. the hard cache cap is 20 GB; when it is reached, new downloads fall back to streaming.
 
 - **startup warning: no deno or node executable found in path**:
   install Deno on the host and make sure the bot process can find it:
