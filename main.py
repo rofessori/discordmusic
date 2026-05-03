@@ -8,6 +8,9 @@ import yt_dlp
 from dotenv import load_dotenv
 import urllib.parse, re
 import ipaddress
+import base64
+import secrets
+import tempfile
 import time
 import json
 import logging
@@ -32,6 +35,17 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 songs_dir = BASE_DIR
 os.makedirs(songs_dir, exist_ok=True)
 downloads_file = os.path.join(songs_dir, "downloads.json")
+PLAYLISTS_DIR = os.path.join(BASE_DIR, "playlists")
+PLAYLIST_BLACKBOX_FILE = os.path.join(BASE_DIR, "playlists-blackbox.json")
+PLAYLIST_PAGE_SIZE = 6
+PLAYLIST_TRACK_PAGE_SIZE = 8
+PLAYLIST_PAGE_REACTIONS = ("◀️", "▶️")
+PLAYLIST_DELETE_GRACE_SECONDS = 600
+HELP_EXPAND_REACTION = "📖"
+PLAYLIST_PREDOWNLOAD_ENABLED = (
+    os.getenv("PLAYLIST_PREDOWNLOAD_ENABLED", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 
 def is_safe_download_path(file_path: str, video_id: Optional[str] = None) -> bool:
     """Only allow deletion of yt-dlp media files created in this checkout."""
@@ -80,6 +94,21 @@ def save_downloads_metadata(context: str):
             json.dump(downloaded, f)
     except Exception as e:
         logger.error(f"Failed to save downloads metadata after {context}: {e}")
+
+def write_json_atomic(path: str, payload: dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2)
+            f.write("\n")
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 downloaded = {}
 if os.path.isfile(downloads_file):
@@ -211,6 +240,9 @@ def normalize_youtube_query(query: str):
     if video_id:
         return youtube_watch_url + video_id, video_id
     return query, None
+
+def youtube_url_for_track(track: dict) -> str:
+    return track.get('webpage_url') or youtube_watch_url + str(track.get('id') or '')
 
 def is_youtube_host(hostname: str) -> bool:
     host = hostname.lower().rstrip(".")
@@ -378,6 +410,16 @@ def run_startup_diagnostics() -> StartupReport:
         report.errors.append(f"Cannot write downloads cache at {downloads_file}: {exc}")
 
     try:
+        os.makedirs(PLAYLISTS_DIR, exist_ok=True)
+        test_path = os.path.join(PLAYLISTS_DIR, f".write-test-{os.getpid()}")
+        with open(test_path, "w") as f:
+            f.write("ok")
+        os.remove(test_path)
+        report.notes.append("Playlist storage available.")
+    except OSError as exc:
+        report.errors.append(f"Cannot write playlist storage at {PLAYLISTS_DIR}: {exc}")
+
+    try:
         if hasattr(quotes, "_ensure_quotes_file"):
             quotes._ensure_quotes_file()
         if quotes.QUOTES_FILE.exists():
@@ -432,6 +474,9 @@ def can_control_voice(user) -> bool:
     if client.current_voice_channel is None:
         return True
     return user_in_bot_voice_channel(user)
+
+def user_id_value(user) -> int:
+    return int(getattr(user, "id", 0) or 0)
 
 async def require_voice_control(ctx, action: str = "control playback") -> bool:
     if can_control_voice(ctx.user):
@@ -510,6 +555,11 @@ class Client(discord.Client):
         self.backup_timestamp = None          # timestamp for queue backup
         self.suggestion_history = []
         self.recent_commands = []
+        self.playlist_pager_message_id = None
+        self.playlist_pager = None
+        self.help_message_id = None
+        self.help_expanded = False
+        self.playlist_delete_tasks = {}
         # File deletion task tracking
         self.deletion_tasks = {}              # map video_id -> asyncio.Future
         # Played tracks tracking
@@ -670,6 +720,396 @@ def build_status_message(view: str = "latest") -> str:
         return "\n".join(lines)
     return build_runtime_status()
 
+def generate_playlist_id() -> str:
+    return base64.urlsafe_b64encode(secrets.token_bytes(6)).decode("ascii").rstrip("=")
+
+def normalize_playlist_name(name: str) -> str:
+    return re.sub(r"\s+", " ", str(name or "").strip())
+
+def playlist_lookup_key(name: str) -> str:
+    value = normalize_playlist_name(name)
+    if value.lower().startswith("playlist:"):
+        value = value.split(":", 1)[1].strip()
+    return value.lower()
+
+def safe_playlist_slug(name: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", normalize_playlist_name(name).lower()).strip("-")
+    return slug[:48] or "playlist"
+
+def playlist_folder_path(playlist: dict) -> str:
+    folder = playlist.get("folder")
+    if folder:
+        return os.path.join(PLAYLISTS_DIR, folder)
+    return os.path.join(PLAYLISTS_DIR, f"{safe_playlist_slug(playlist.get('name', 'playlist'))}-{playlist['id']}")
+
+def playlist_metadata_path(playlist: dict) -> str:
+    return os.path.join(playlist_folder_path(playlist), "metadata.json")
+
+def make_playlist_metadata(name: str, owner, visibility: str = "private") -> dict:
+    playlist_id = generate_playlist_id()
+    owner_id = user_id_value(owner)
+    owner_name = user_display(owner)
+    now = time.time()
+    safe_name = normalize_playlist_name(name)
+    return {
+        "id": playlist_id,
+        "name": safe_name,
+        "generated_at": now,
+        "locked": False,
+        "visibility": visibility,
+        "owner_user_id": owner_id,
+        "owner_discord_name": owner_name,
+        "manager_user_ids": [],
+        "tracks": [],
+        "folder": f"{safe_playlist_slug(safe_name)}-{playlist_id}",
+        "predownloaded": False,
+        "deleted": False,
+    }
+
+def load_playlists(*, include_deleted: bool = False, purge_expired: bool = True) -> list:
+    playlists = []
+    if not os.path.isdir(PLAYLISTS_DIR):
+        return playlists
+    if purge_expired:
+        purge_expired_deleted_playlists()
+    for root, _, files in os.walk(PLAYLISTS_DIR):
+        if "metadata.json" not in files:
+            continue
+        path = os.path.join(root, "metadata.json")
+        try:
+            with open(path, "r") as f:
+                playlist = json.load(f)
+            playlist.setdefault("tracks", [])
+            playlist.setdefault("manager_user_ids", [])
+            playlist.setdefault("visibility", "private")
+            playlist.setdefault("locked", False)
+            playlist.setdefault("folder", os.path.basename(root))
+            if playlist.get("deleted") and not include_deleted:
+                continue
+            playlists.append(playlist)
+        except Exception as exc:
+            logger.error(f"Failed to load playlist metadata {path}: {exc}")
+    return playlists
+
+def save_playlist(playlist: dict):
+    write_json_atomic(playlist_metadata_path(playlist), playlist)
+
+def playlist_video_links(playlist: dict) -> list:
+    links = []
+    for track in playlist.get("tracks", []):
+        link = track.get("webpage_url") or youtube_watch_url + str(track.get("id") or "")
+        if link and link not in links:
+            links.append(link)
+    return links
+
+def append_playlist_blackbox_event(action: str, playlist: dict, actor=None):
+    event = {
+        "timestamp": time.time(),
+        "action": action,
+        "playlist_id": playlist.get("id"),
+        "playlist_name": playlist.get("name"),
+        "owner_user_id": playlist.get("owner_user_id"),
+        "owner_discord_name": playlist.get("owner_discord_name"),
+        "manager_user_ids": playlist.get("manager_user_ids", []),
+        "youtube_links": playlist_video_links(playlist),
+        "actor_user_id": user_id_value(actor) if actor else None,
+        "actor_discord_name": user_display(actor) if actor else None,
+    }
+    try:
+        if os.path.isfile(PLAYLIST_BLACKBOX_FILE):
+            with open(PLAYLIST_BLACKBOX_FILE, "r") as f:
+                events = json.load(f)
+            if not isinstance(events, list):
+                logger.error("Playlist blackbox file is not a JSON list; preserving it without appending.")
+                return
+        else:
+            events = []
+        events.append(event)
+        write_json_atomic(PLAYLIST_BLACKBOX_FILE, events)
+    except Exception as exc:
+        logger.error(f"Failed to append playlist blackbox event: {exc}")
+
+def parse_playlist_flags(flags: Optional[str]) -> set:
+    return {
+        token.strip().lower()
+        for token in str(flags or "").split()
+        if token.strip().startswith("-")
+    }
+
+def direct_playlist_editor(user, playlist: dict) -> bool:
+    uid = user_id_value(user)
+    if uid == playlist_owner_id(playlist):
+        return True
+    return not playlist.get("locked") and uid in playlist_manager_ids(playlist)
+
+def admin_editing_foreign_playlist(user, playlist: dict) -> bool:
+    return is_user_admin(user) and not direct_playlist_editor(user, playlist)
+
+async def confirm_with_reactions(ctx, message: str, *, force: bool = False) -> bool:
+    if force:
+        return True
+    try:
+        if ctx.response.is_done():
+            prompt_msg = await ctx.followup.send(message, wait=True)
+        else:
+            await ctx.response.send_message(message)
+            prompt_msg = await ctx.original_response()
+        await prompt_msg.add_reaction("👍")
+        await prompt_msg.add_reaction("👎")
+    except Exception as exc:
+        logger.warning(f"Could not send confirmation prompt: {exc}")
+        return False
+
+    def check(reaction, user):
+        return user == ctx.user and str(reaction.emoji) in ["👍", "👎"] and reaction.message.id == prompt_msg.id
+
+    try:
+        reaction, _ = await client.wait_for('reaction_add', timeout=30.0, check=check)
+    except asyncio.TimeoutError:
+        await safe_interaction_send(ctx, "No confirmation received. Cancelled.", ephemeral=True)
+        return False
+    return str(reaction.emoji) == "👍"
+
+async def confirm_admin_foreign_playlist(ctx, playlist: dict, action: str, flags: set) -> bool:
+    if not admin_editing_foreign_playlist(ctx.user, playlist):
+        return True
+    if "-force" in flags:
+        return True
+    owner = discord.utils.escape_markdown(str(playlist.get("owner_discord_name", "unknown")))
+    name = discord.utils.escape_markdown(str(playlist.get("name", "playlist")))
+    return await confirm_with_reactions(
+        ctx,
+        f"**{name}** belongs to **{owner}**. Confirm admin {action}?",
+    )
+
+def deleted_playlists_for(user) -> list:
+    purge_expired_deleted_playlists()
+    playlists = []
+    for playlist in load_playlists(include_deleted=True):
+        if not playlist.get("deleted"):
+            continue
+        if is_user_admin(user) or user_id_value(user) == playlist_owner_id(playlist):
+            playlists.append(playlist)
+    return sorted(playlists, key=lambda item: item.get("delete_after", 0))
+
+def safe_remove_playlist_folder(playlist: dict) -> bool:
+    folder = playlist_folder_path(playlist)
+    try:
+        real_base = os.path.realpath(PLAYLISTS_DIR)
+        real_folder = os.path.realpath(folder)
+        if real_folder == real_base or os.path.commonpath([real_base, real_folder]) != real_base:
+            logger.warning(f"Skipped unsafe playlist folder removal: {folder}")
+            return False
+        if os.path.isdir(real_folder):
+            shutil.rmtree(real_folder)
+        return True
+    except Exception as exc:
+        logger.error(f"Failed to remove playlist folder {folder}: {exc}")
+        return False
+
+def purge_expired_deleted_playlists():
+    now = time.time()
+    if not os.path.isdir(PLAYLISTS_DIR):
+        return
+    for playlist in load_playlists(include_deleted=True, purge_expired=False):
+        if playlist.get("deleted") and playlist.get("delete_after", 0) <= now:
+            if safe_remove_playlist_folder(playlist):
+                logger.info(f"Purged expired deleted playlist: {playlist.get('name')} ({playlist.get('id')})")
+
+async def schedule_playlist_purge(playlist_id: str, delete_after: float):
+    await asyncio.sleep(max(0, delete_after - time.time()))
+    playlist = resolve_playlist_reference(playlist_id, require_visible=False, include_deleted=True)
+    if playlist and playlist.get("deleted") and playlist.get("delete_after", 0) <= time.time():
+        safe_remove_playlist_folder(playlist)
+    client.playlist_delete_tasks.pop(playlist_id, None)
+
+def is_playlist_public(playlist: dict) -> bool:
+    return playlist.get("visibility") == "public"
+
+def playlist_owner_id(playlist: dict) -> int:
+    return int(playlist.get("owner_user_id") or 0)
+
+def playlist_manager_ids(playlist: dict) -> set:
+    return {int(user_id) for user_id in playlist.get("manager_user_ids", []) if str(user_id).isdigit()}
+
+def can_view_playlist(user, playlist: dict) -> bool:
+    uid = user_id_value(user)
+    return (
+        is_playlist_public(playlist)
+        or is_user_admin(user)
+        or uid == playlist_owner_id(playlist)
+        or uid in playlist_manager_ids(playlist)
+    )
+
+def can_edit_playlist(user, playlist: dict) -> bool:
+    uid = user_id_value(user)
+    if is_user_admin(user):
+        return True
+    if uid == playlist_owner_id(playlist):
+        return True
+    if playlist.get("locked"):
+        return False
+    return uid in playlist_manager_ids(playlist)
+
+def can_manage_playlist(user, playlist: dict) -> bool:
+    return is_user_admin(user) or user_id_value(user) == playlist_owner_id(playlist)
+
+def visible_playlists_for(user) -> list:
+    uid = user_id_value(user)
+    playlists = [playlist for playlist in load_playlists() if can_view_playlist(user, playlist)]
+    return sorted(
+        playlists,
+        key=lambda playlist: (
+            0 if playlist_owner_id(playlist) == uid else 1,
+            playlist.get("name", "").lower(),
+        ),
+    )
+
+def resolve_playlist_reference(reference: str, user=None, *, require_visible: bool = True, include_deleted: bool = False):
+    lookup = playlist_lookup_key(reference)
+    if not lookup:
+        return None
+    candidates = []
+    for playlist in load_playlists(include_deleted=include_deleted):
+        names = {playlist.get("id", "").lower(), playlist.get("name", "").lower()}
+        if lookup in names:
+            if require_visible and user is not None and not can_view_playlist(user, playlist):
+                continue
+            candidates.append(playlist)
+    if not candidates:
+        return None
+    uid = user_id_value(user)
+    candidates.sort(
+        key=lambda playlist: (
+            0 if playlist_owner_id(playlist) == uid else 1,
+            0 if uid in playlist_manager_ids(playlist) else 1,
+            0 if is_playlist_public(playlist) else 1,
+            playlist.get("name", "").lower(),
+        )
+    )
+    return candidates[0]
+
+def is_playlist_reference(value: str, user=None) -> bool:
+    text = str(value or "").strip()
+    return text.lower().startswith("playlist:") or resolve_playlist_reference(text, user) is not None
+
+def playlist_track_from_track(track: dict, user) -> dict:
+    return {
+        "title": str(track.get("title") or "Unknown title"),
+        "id": str(track.get("id") or ""),
+        "webpage_url": track.get("webpage_url") or youtube_watch_url + str(track.get("id") or ""),
+        "added_by_user_id": user_id_value(user),
+        "added_by_discord_name": user_display(user),
+        "added_at": time.time(),
+    }
+
+def playlist_to_queue_tracks(playlist: dict, *, block_id: Optional[str] = None) -> list:
+    tracks = playlist.get("tracks", [])
+    block_id = block_id or generate_playlist_id()
+    total = len(tracks)
+    queue_tracks = []
+    for index, track in enumerate(tracks, start=1):
+        queue_track = {
+            "id": str(track.get("id") or ""),
+            "title": str(track.get("title") or "Unknown title"),
+            "webpage_url": track.get("webpage_url") or youtube_watch_url + str(track.get("id") or ""),
+            "playlist_id": playlist.get("id"),
+            "playlist_name": playlist.get("name"),
+            "playlist_block_id": block_id,
+            "playlist_index": index,
+            "playlist_total": total,
+        }
+        permanent_file = track.get("permanent_file")
+        if permanent_file and is_safe_playlist_file_path(permanent_file, playlist, queue_track["id"]):
+            queue_track["file"] = permanent_file
+        queue_tracks.append(queue_track)
+    return queue_tracks
+
+def active_playlist_block_id() -> Optional[str]:
+    current = client.current_track_info or {}
+    return current.get("playlist_block_id")
+
+def playlist_block_end_index(block_id: str) -> int:
+    last_index = -1
+    for index, track in enumerate(queue):
+        if track.get("playlist_block_id") == block_id:
+            last_index = index
+    return last_index
+
+def insert_after_active_playlist(track: dict):
+    block_id = active_playlist_block_id()
+    if not block_id:
+        queue.append(track)
+        return
+    last_index = playlist_block_end_index(block_id)
+    if last_index < 0:
+        queue.append(track)
+    else:
+        queue.insert(last_index + 1, track)
+
+def format_playlist_title(playlist: dict) -> str:
+    name = discord.utils.escape_markdown(playlist.get("name", "unnamed"))
+    visibility = playlist.get("visibility", "private")
+    locked = " locked" if playlist.get("locked") else ""
+    return f"**{name}** (`{playlist.get('id')}`) - {visibility}{locked}"
+
+def chunk_lines(title: str, lines: list, page_size: int) -> list:
+    if not lines:
+        lines = ["_nothing to show._"]
+    pages = []
+    for offset in range(0, len(lines), page_size):
+        page = lines[offset:offset + page_size]
+        pages.append(f"{title}\n" + "\n".join(page))
+    return pages
+
+def playlist_list_pages_for(user) -> list:
+    playlists = visible_playlists_for(user)
+    uid = user_id_value(user)
+    lines = []
+    for playlist in playlists:
+        relation = "owner" if playlist_owner_id(playlist) == uid else (
+            "manager" if uid in playlist_manager_ids(playlist) else "public"
+        )
+        count = len(playlist.get("tracks", []))
+        lines.append(f"- {format_playlist_title(playlist)} - {count} song(s), {relation}")
+    return chunk_lines("**playlists**", lines, PLAYLIST_PAGE_SIZE)
+
+def playlist_detail_pages(playlist: dict) -> list:
+    lines = [
+        f"- owner: **{discord.utils.escape_markdown(str(playlist.get('owner_discord_name', 'unknown')))}** (`{playlist_owner_id(playlist)}`)",
+        f"- managers: `{len(playlist_manager_ids(playlist))}`",
+        f"- visibility: `{playlist.get('visibility', 'private')}`",
+        f"- locked: `{bool(playlist.get('locked'))}`",
+        "",
+        "**songs**",
+    ]
+    tracks = playlist.get("tracks", [])
+    if tracks:
+        for index, track in enumerate(tracks, start=1):
+            title = discord.utils.escape_markdown(str(track.get("title") or "Unknown title"))
+            lines.append(f"{index}. **{title}** (`{track.get('id', '')}`)")
+    else:
+        lines.append("_playlist is empty._")
+    return chunk_lines(f"**playlist edit: {discord.utils.escape_markdown(playlist.get('name', 'unnamed'))}**", lines, PLAYLIST_TRACK_PAGE_SIZE)
+
+def page_with_footer(pages: list, page_index: int) -> str:
+    if not pages:
+        return "_nothing to show._"
+    page_index = max(0, min(page_index, len(pages) - 1))
+    footer = f"\n\n_page {page_index + 1}/{len(pages)} - react ◀️/▶️ to move pages._"
+    return pages[page_index] + footer
+
+def is_safe_playlist_file_path(file_path: str, playlist: dict, video_id: Optional[str] = None) -> bool:
+    try:
+        real_folder = os.path.realpath(playlist_folder_path(playlist))
+        real_path = os.path.realpath(file_path)
+        return (
+            os.path.commonpath([real_folder, real_path]) == real_folder
+            and is_safe_download_path(file_path, video_id)
+        )
+    except (OSError, ValueError):
+        return False
+
 def track_display_parts(track: dict) -> tuple:
     title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
     url = track.get('webpage_url') or youtube_watch_url + str(track.get('id') or '')
@@ -685,6 +1125,8 @@ def format_queue_section(*, max_chars=None, show_links=True) -> str:
     for index, track in enumerate(queue, start=1):
         title, url = track_display_parts(track)
         entry = [f"**{index}. {title}**"]
+        if track.get("playlist_name"):
+            entry.append(f"_playlist: {discord.utils.escape_markdown(str(track.get('playlist_name')))}_")
         if show_links and not client.queue_links_disabled:
             entry.append(f"*{url}*")
         remaining = len(queue) - index
@@ -700,6 +1142,9 @@ def format_queue_section(*, max_chars=None, show_links=True) -> str:
 def format_now_playing(track: dict, *, show_queue: bool = False) -> str:
     title, url = track_display_parts(track)
     now_playing = f"🎵 Now playing: **{title}**\n*{url}*"
+    if track.get("playlist_name"):
+        playlist_name = discord.utils.escape_markdown(str(track.get("playlist_name")))
+        now_playing += f"\n_from playlist: **{playlist_name}**_"
     if not show_queue:
         return now_playing
     divider = "━━━━━━━━━━━━"
@@ -812,6 +1257,87 @@ async def toggle_now_playing_queue(message):
         logger.info(f"Queue section {state} on now-playing message {message.id}.")
     except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
         logger.warning(f"Failed to toggle queue section on now-playing message {message.id}: {exc}")
+
+async def send_paged_playlist_message(ctx, pages: list):
+    if ctx.response.is_done():
+        message = await ctx.followup.send(page_with_footer(pages, 0), wait=True)
+    else:
+        await ctx.response.send_message(page_with_footer(pages, 0))
+        message = await ctx.original_response()
+    client.playlist_pager_message_id = message.id
+    client.playlist_pager = {
+        "pages": pages,
+        "page": 0,
+        "user_id": user_id_value(ctx.user),
+    }
+    for emoji in PLAYLIST_PAGE_REACTIONS:
+        try:
+            await message.add_reaction(emoji)
+        except Exception as exc:
+            logger.warning(f"Failed to add playlist pager reaction {emoji}: {exc}")
+    return message
+
+async def handle_playlist_pager_reaction(reaction, user) -> bool:
+    pager = client.playlist_pager
+    if not pager or reaction.message.id != client.playlist_pager_message_id:
+        return False
+    if user_id_value(user) != pager.get("user_id"):
+        return True
+    emoji = str(reaction.emoji)
+    if emoji not in PLAYLIST_PAGE_REACTIONS:
+        return False
+    pages = pager.get("pages") or []
+    if not pages:
+        return True
+    if emoji == "◀️":
+        pager["page"] = max(0, pager.get("page", 0) - 1)
+    elif emoji == "▶️":
+        pager["page"] = min(len(pages) - 1, pager.get("page", 0) + 1)
+    try:
+        await reaction.message.edit(content=page_with_footer(pages, pager["page"]))
+        await reaction.message.remove_reaction(reaction.emoji, user)
+    except Exception as exc:
+        logger.warning(f"Failed to update playlist pager: {exc}")
+    return True
+
+def compact_help_message() -> str:
+    return "\n".join([
+        "**music bot help**",
+        "/play <youtube url or search> - play or queue music",
+        "/enqueue <query> (alias /q) - add to queue",
+        "/queue - show queue",
+        "/playlist list - browse playlists",
+        "/playlist new <name> - create a playlist",
+        "/help - react 📖 for full help",
+    ])
+
+def expanded_help_message() -> str:
+    return "\n".join([
+        "**music playback**",
+        "/join - Join your voice channel.",
+        "/play <YouTube URL, search, or playlist:name> - Play now or queue.",
+        "/playtop <query> - Play a song next.",
+        "/enqueue <query or playlist:name> (alias: /q) - Add to queue.",
+        "/queue [links] (alias: /queuelist) - Show upcoming songs.",
+        "/queuefirst <position or playlist:name> (alias: /qfirst) - Move a song or playlist to play next.",
+        "/skip, /pause, /resume, /stop, /volume <1-100> - Playback controls.",
+        "/now (alias: /nytsoi), /getqueue - Current/session info.",
+        "",
+        "**playlists**",
+        "/playlist list - Browse your playlists and visible public playlists.",
+        "/playlist new <name> [visibility] - Create a playlist.",
+        "/playlist edit <name> - Show editable playlist details.",
+        "/playlist add <playlist> <current|queue> [queue_position] - Add current or queued song.",
+        "/playlist addmod <playlist> <user> - Add manager (owner only).",
+        "/playlist remove <playlist> [flags] - Remove a playlist with 600s rescue.",
+        "/playlist removesong <playlist> <position> - Remove a song.",
+        "/playlist move <playlist> <from> <to> - Reorder songs.",
+        "/playlist lock <playlist> <locked> - Lock or unlock edits.",
+        "",
+        "**admin / other**",
+        "/clear_queue, /restorequeue, /purgequeue, /togglelog, /toggledownload, /disablelinks, /reboot, /status",
+        "/backup_teekkari_quotes, /random_quote",
+    ])
 
 def enough_disk_for_download() -> bool:
     try:
@@ -943,6 +1469,208 @@ async def fetch_track(query: str, requested_by=None):
         logger.error(f"yt_dlp error for {query}: {e}")
         raise
 
+async def ensure_voice_for_playback(ctx):
+    voice = client.current_voice_channel or ctx.guild.voice_client
+    if voice is None or not voice.is_connected():
+        if ctx.user.voice and ctx.user.voice.channel:
+            try:
+                voice = await ctx.user.voice.channel.connect()
+                client.current_voice_channel = voice
+                client.song_history = []
+                await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
+            except Exception as e:
+                logger.error(f"Voice connection failed: {e}")
+                await ctx.followup.send("Couldn't join voice channel.")
+                return None
+        else:
+            await ctx.followup.send("You need to join a voice channel first.")
+            return None
+    else:
+        client.current_voice_channel = voice
+        if not await require_voice_control(ctx, "start playback"):
+            return None
+    return voice
+
+async def build_audio_player(track: dict):
+    if track.get('file'):
+        source = discord.FFmpegPCMAudio(track['file'], options='-vn')
+        return discord.PCMVolumeTransformer(source, volume=client.volume)
+    player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True)
+    return player
+
+async def start_track_now(ctx, voice, track: dict):
+    player = await build_audio_player(track)
+    voice.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, ctx.channel))
+    client.current_track_id = track['id']
+    client.currently_playing = True
+    client.last_track_info = client.current_track_info
+    client.current_track_info = track
+    client.song_history.append(track)
+    await publish_now_playing(
+        ctx.channel,
+        track,
+        send_message=ctx.followup.send,
+        acknowledge=ctx.followup.send,
+    )
+    logger.info(f"Playing now: {track['title']} ({track['id']})")
+
+async def prompt_move_track_next(ctx, track: dict, playlist_name: str):
+    title = discord.utils.escape_markdown(str(track.get("title") or "Unknown title"))
+    safe_playlist = discord.utils.escape_markdown(str(playlist_name or "playlist"))
+    text = (
+        f"A playlist (**{safe_playlist}**) is playing. **{title}** was added after the playlist. "
+        "React 👍 to play it next or 👎 to keep it there."
+    )
+    try:
+        if ctx.response.is_done():
+            prompt_msg = await ctx.followup.send(text, wait=True)
+        else:
+            await ctx.response.send_message(text)
+            prompt_msg = await ctx.original_response()
+        await prompt_msg.add_reaction("👍")
+        await prompt_msg.add_reaction("👎")
+    except Exception as exc:
+        logger.warning(f"Could not send playlist placement prompt: {exc}")
+        return
+
+    def check(reaction, user):
+        return user == ctx.user and str(reaction.emoji) in ["👍", "👎"] and reaction.message.id == prompt_msg.id
+
+    try:
+        reaction, _ = await client.wait_for('reaction_add', timeout=20.0, check=check)
+    except asyncio.TimeoutError:
+        logger.info("Playlist placement prompt timed out; keeping song after playlist.")
+        return
+
+    if str(reaction.emoji) == "👍":
+        try:
+            queue.remove(track)
+        except ValueError:
+            return
+        queue.insert(0, track)
+        await ctx.followup.send(f"Moved **{title}** to play next.")
+        logger.info(f"Moved queued song ahead of active playlist by request: {track.get('title')} ({track.get('id')})")
+    else:
+        await ctx.followup.send(f"Keeping **{title}** after the playlist.")
+
+async def enqueue_track_with_playlist_prompt(ctx, track: dict, command_name: str):
+    block_id = active_playlist_block_id()
+    if block_id:
+        insert_after_active_playlist(track)
+        client.song_history.append(track)
+        logger.info(f"Track queued after active playlist via /{command_name}: {track.get('title')} ({track.get('id')})")
+        await prompt_move_track_next(ctx, track, (client.current_track_info or {}).get("playlist_name", "playlist"))
+    else:
+        queue.append(track)
+        client.song_history.append(track)
+        title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
+        await ctx.followup.send(f"Added to queue: {title} ({track.get('id', '')})")
+        logger.info(f"Track enqueued: {track.get('title')} ({track.get('id')})")
+
+async def play_playlist_now(ctx, playlist: dict, command_name: str):
+    tracks = playlist_to_queue_tracks(playlist)
+    if not tracks:
+        await ctx.followup.send("That playlist is empty.")
+        return
+    if not is_user_admin(ctx.user):
+        projected_queue = len(queue) + len(tracks) if client.currently_playing else len(queue) + max(0, len(tracks) - 1)
+        if projected_queue > MAX_QUEUE_LENGTH:
+            await ctx.followup.send(f"Queue limit reached ({MAX_QUEUE_LENGTH} songs). Ask an admin to clear the queue.", ephemeral=True)
+            return
+    voice = await ensure_voice_for_playback(ctx)
+    if voice is None:
+        return
+    if client.currently_playing:
+        for track in tracks:
+            queue.append(track)
+            client.song_history.append(track)
+        await ctx.followup.send(f"Queued playlist **{discord.utils.escape_markdown(playlist['name'])}** ({len(tracks)} song(s)).")
+        logger.info(f"Queued playlist via /{command_name}: {playlist['name']} ({playlist['id']})")
+        return
+    first, rest = tracks[0], tracks[1:]
+    queue.extend(rest)
+    for track in rest:
+        client.song_history.append(track)
+    await start_track_now(ctx, voice, first)
+    logger.info(f"Started playlist via /{command_name}: {playlist['name']} ({playlist['id']})")
+
+async def enqueue_playlist(ctx, playlist: dict, command_name: str):
+    tracks = playlist_to_queue_tracks(playlist)
+    if not tracks:
+        await ctx.followup.send("That playlist is empty.")
+        return
+    if not is_user_admin(ctx.user) and len(queue) + len(tracks) > MAX_QUEUE_LENGTH:
+        await ctx.followup.send(f"Queue limit reached ({MAX_QUEUE_LENGTH} songs). Ask an admin to clear the queue.", ephemeral=True)
+        return
+    for track in tracks:
+        queue.append(track)
+        client.song_history.append(track)
+    await ctx.followup.send(f"Queued playlist **{discord.utils.escape_markdown(playlist['name'])}** ({len(tracks)} song(s)).")
+    logger.info(f"Queued playlist via /{command_name}: {playlist['name']} ({playlist['id']})")
+
+def move_existing_playlist_block_to_front(playlist_id: str) -> int:
+    moving = [track for track in queue if track.get("playlist_id") == playlist_id]
+    if not moving:
+        return 0
+    queue[:] = [track for track in queue if track.get("playlist_id") != playlist_id]
+    queue[0:0] = moving
+    return len(moving)
+
+async def add_playlist_to_queue_front(ctx, playlist: dict):
+    moved = move_existing_playlist_block_to_front(playlist.get("id"))
+    if moved:
+        await ctx.response.send_message(
+            f"Moved queued playlist **{discord.utils.escape_markdown(playlist['name'])}** to play next ({moved} song(s))."
+        )
+        logger.info(f"Moved existing playlist block to front: {playlist['name']} ({playlist['id']})")
+        return
+    tracks = playlist_to_queue_tracks(playlist)
+    if not tracks:
+        await ctx.response.send_message("That playlist is empty.")
+        return
+    if not is_user_admin(ctx.user) and len(queue) + len(tracks) > MAX_QUEUE_LENGTH:
+        await ctx.response.send_message(f"Queue limit reached ({MAX_QUEUE_LENGTH} songs). Ask an admin to clear the queue.", ephemeral=True)
+        return
+    queue[0:0] = tracks
+    client.song_history.extend(tracks)
+    await ctx.response.send_message(
+        f"Moved playlist **{discord.utils.escape_markdown(playlist['name'])}** to play next ({len(tracks)} song(s))."
+    )
+    logger.info(f"Playlist queued at front: {playlist['name']} ({playlist['id']})")
+
+async def predownload_playlist_files(playlist: dict) -> int:
+    folder = playlist_folder_path(playlist)
+    os.makedirs(folder, exist_ok=True)
+    options = dict(ytdl_options)
+    options['outtmpl'] = os.path.join(folder, '%(extractor)s-%(id)s-%(title)s.%(ext)s')
+    downloaded_count = 0
+    loop = asyncio.get_event_loop()
+    permanent_ytdl = yt_dlp.YoutubeDL(options)
+    for track in playlist.get("tracks", []):
+        video_id = str(track.get("id") or "")
+        if not video_id:
+            continue
+        if track.get("permanent_file") and is_safe_playlist_file_path(track["permanent_file"], playlist, video_id):
+            continue
+        url = track.get("webpage_url") or youtube_watch_url + video_id
+        data = await loop.run_in_executor(None, lambda u=url: permanent_ytdl.extract_info(u, download=True))
+        if data is None:
+            continue
+        if 'entries' in data:
+            data = next((entry for entry in data['entries'] if entry), None)
+        if data is None:
+            continue
+        file_path = permanent_ytdl.prepare_filename(data)
+        if not is_safe_playlist_file_path(file_path, playlist, video_id):
+            raise Exception(f"Downloaded playlist file failed safety validation for {video_id}.")
+        track["permanent_file"] = file_path
+        track["permanent_downloaded_at"] = time.time()
+        downloaded_count += 1
+    playlist["predownloaded"] = True
+    playlist["predownloaded_at"] = time.time()
+    save_playlist(playlist)
+    return downloaded_count
+
 def after_played_track(error, video_id, channel):
     """Callback that runs after a track finishes playing or is stopped."""
     if error:
@@ -1057,6 +1785,17 @@ async def on_reaction_add(reaction, user):
     """Handles reaction-based controls for playback and confirmation prompts."""
     if user == client.user:
         return  # ignore the bot's own reactions
+    if await handle_playlist_pager_reaction(reaction, user):
+        return
+    if client.help_message_id and reaction.message.id == client.help_message_id and str(reaction.emoji) == HELP_EXPAND_REACTION:
+        try:
+            client.help_expanded = True
+            await reaction.message.edit(content=expanded_help_message())
+            await reaction.message.remove_reaction(reaction.emoji, user)
+            logger.info(f"Expanded help message {reaction.message.id}.")
+        except Exception as exc:
+            logger.warning(f"Failed to expand help message: {exc}")
+        return
     # Music control reactions on the "Now Playing" message
     if client.current_track_message and reaction.message.id == client.current_track_message.id:
         if not can_control_voice(user):
@@ -1112,6 +1851,8 @@ async def save_all_channel_messages(channel):
     return len(messages)
 
 # Slash commands
+
+playlist_group = app_commands.Group(name="playlist", description="create, browse, and edit saved playlists")
 
 @client.tree.command()
 async def join(ctx):
@@ -1210,6 +1951,10 @@ async def play(ctx, *, url: str):
     """Plays a YouTube video's audio by URL or search term."""
     record_command(ctx)
     await ctx.response.defer()
+    playlist = resolve_playlist_reference(url, ctx.user)
+    if playlist:
+        await play_playlist_now(ctx, playlist, "play")
+        return
     if not client.currently_playing:
         # Ensure we're connected to a voice channel before creating the player
         voice = client.current_voice_channel or ctx.guild.voice_client
@@ -1295,10 +2040,7 @@ async def play(ctx, *, url: str):
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
                 await ctx.followup.send(f"Track **{track['title']}** (~{filesize_mb:.1f} MB) is too large to queue without confirmation. Please use /play to confirm.")
                 return
-            queue.append(track)
-            client.song_history.append(track)
-            await ctx.followup.send(f"Added to queue: {track['title']} ({track['id']})")
-            logger.info(f"Track added to queue: {track['title']} ({track['id']})")
+            await enqueue_track_with_playlist_prompt(ctx, track, "play")
         except Exception as e:
             logger.error(f"/play queue error: {e}")
             await ctx.followup.send("Failed to add track to queue.")
@@ -1385,6 +2127,10 @@ async def enqueue_track(ctx, query: str, command_name: str = "enqueue"):
     await ctx.response.defer()
     if not await require_queue_room(ctx):
         return
+    playlist = resolve_playlist_reference(query, ctx.user)
+    if playlist:
+        await enqueue_playlist(ctx, playlist, command_name)
+        return
     try:
         suggestion = record_suggestion(ctx, command_name, query)
         track = await fetch_track(query, requested_by=ctx.user)
@@ -1393,10 +2139,7 @@ async def enqueue_track(ctx, query: str, command_name: str = "enqueue"):
             filesize_mb = track.get('filesize', 0) / (1024 * 1024)
             await ctx.followup.send(f"Track **{track['title']}** (~{filesize_mb:.1f} MB) requires confirmation to download. Use /play instead.")
             return
-        queue.append(track)
-        client.song_history.append(track)
-        await ctx.followup.send(f"Added to queue: {track['title']} ({track['id']})")
-        logger.info(f"Track enqueued: {track['title']} ({track['id']})")
+        await enqueue_track_with_playlist_prompt(ctx, track, command_name)
     except Exception as e:
         logger.error(f"/{command_name} error: {e}")
         await ctx.followup.send("Failed to enqueue track.")
@@ -1413,10 +2156,20 @@ async def q_cmd(ctx, *, query: str):
     """Alias of /enqueue."""
     await enqueue_track(ctx, query, "q")
 
-async def queue_first(ctx, position: int, command_name: str):
+async def queue_first(ctx, target: str, command_name: str):
     """Move a queued track to the front so it plays next."""
     record_command(ctx)
     if not await require_voice_control(ctx, "reorder the queue"):
+        return
+    playlist = resolve_playlist_reference(target, ctx.user)
+    if playlist:
+        await add_playlist_to_queue_front(ctx, playlist)
+        return
+    try:
+        position = int(str(target).strip())
+    except ValueError:
+        await ctx.response.send_message("Use a queue position number or a playlist name.")
+        logger.info(f"/{command_name} rejected target {target!r}; not a number or visible playlist.")
         return
     if position < 1:
         await ctx.response.send_message("Queue positions start at 1.")
@@ -1445,17 +2198,17 @@ async def queue_first(ctx, position: int, command_name: str):
     await ctx.response.send_message(f"Moved **{title}** to the front of the queue. It will play next.")
     logger.info(f"/{command_name} moved queue position {position} to the front: {track.get('title', 'Unknown title')} ({track.get('id', '')})")
 
-@app_commands.describe(position="1-based queue position to move so it plays next")
+@app_commands.describe(target="1-based queue position or playlist name to move so it plays next")
 @client.tree.command(name="queuefirst")
-async def queuefirst_cmd(ctx, position: int):
+async def queuefirst_cmd(ctx, target: str):
     """Moves a queued song to the front of the queue."""
-    await queue_first(ctx, position, "queuefirst")
+    await queue_first(ctx, target, "queuefirst")
 
-@app_commands.describe(position="1-based queue position to move so it plays next")
+@app_commands.describe(target="1-based queue position or playlist name to move so it plays next")
 @client.tree.command(name="qfirst")
-async def qfirst_cmd(ctx, position: int):
+async def qfirst_cmd(ctx, target: str):
     """Alias of /queuefirst."""
-    await queue_first(ctx, position, "qfirst")
+    await queue_first(ctx, target, "qfirst")
 
 async def send_queue_list(ctx, *, links: bool = False):
     if len(queue) == 0:
@@ -1467,6 +2220,8 @@ async def send_queue_list(ctx, *, links: bool = False):
             title, url = track_display_parts(track)
             vid = track.get('id', '')
             entry = [f"{i}. **{title}** ({vid})"]
+            if track.get("playlist_name"):
+                entry.append(f"_playlist: {discord.utils.escape_markdown(str(track.get('playlist_name')))}_")
             if show_links:
                 entry.append(f"*{url}*")
             remaining = len(queue) - i
@@ -1494,6 +2249,293 @@ async def queuelist(ctx, links: bool = False):
     """Alias of /queue."""
     record_command(ctx)
     await send_queue_list(ctx, links=links)
+
+@playlist_group.command(name="list", description="Browse your playlists and visible public playlists.")
+async def playlist_list(ctx):
+    record_command(ctx)
+    pages = playlist_list_pages_for(ctx.user)
+    await send_paged_playlist_message(ctx, pages)
+
+@app_commands.describe(name="Playlist name", visibility="private or public")
+@app_commands.choices(visibility=[
+    app_commands.Choice(name="private", value="private"),
+    app_commands.Choice(name="public", value="public"),
+])
+@playlist_group.command(name="new", description="Create a playlist.")
+async def playlist_new(ctx, name: str, visibility: str = "private"):
+    record_command(ctx)
+    safe_name = normalize_playlist_name(name)
+    if not safe_name:
+        await ctx.response.send_message("Playlist name cannot be empty.", ephemeral=True)
+        return
+    if resolve_playlist_reference(safe_name, ctx.user, require_visible=False):
+        await ctx.response.send_message("A playlist with that name or id already exists.", ephemeral=True)
+        return
+    playlist = make_playlist_metadata(safe_name, ctx.user, visibility if visibility in {"private", "public"} else "private")
+    save_playlist(playlist)
+    append_playlist_blackbox_event("created", playlist, ctx.user)
+    await ctx.response.send_message(
+        f"Created {playlist['visibility']} playlist **{discord.utils.escape_markdown(playlist['name'])}** (`{playlist['id']}`)."
+    )
+    logger.info(f"Playlist created: {playlist['name']} ({playlist['id']}) by {user_display(ctx.user)}")
+
+@app_commands.describe(name="Playlist name, id, or playlist:name", flags="Optional flag: -force")
+@playlist_group.command(name="edit", description="Show editable playlist details.")
+async def playlist_edit(ctx, name: str, flags: Optional[str] = None):
+    record_command(ctx)
+    parsed_flags = parse_playlist_flags(flags)
+    playlist = resolve_playlist_reference(name, ctx.user)
+    if not playlist:
+        await ctx.response.send_message("Playlist not found or not visible to you.", ephemeral=True)
+        return
+    if not can_edit_playlist(ctx.user, playlist):
+        await ctx.response.send_message("You can view this playlist, but you cannot edit it.", ephemeral=True)
+        return
+    if not await confirm_admin_foreign_playlist(ctx, playlist, "playlist edit", parsed_flags):
+        await safe_interaction_send(ctx, "Playlist edit cancelled.", ephemeral=True)
+        return
+    await send_paged_playlist_message(ctx, playlist_detail_pages(playlist))
+
+@app_commands.describe(
+    playlist="Playlist name, id, or playlist:name",
+    source="Add the current song or a song from the queue",
+    queue_position="Queue position when source is queue",
+)
+@app_commands.choices(source=[
+    app_commands.Choice(name="current", value="current"),
+    app_commands.Choice(name="queue", value="queue"),
+])
+@playlist_group.command(name="add", description="Add current or queued song to a playlist.")
+async def playlist_add(ctx, playlist: str, source: str, queue_position: Optional[int] = None):
+    record_command(ctx)
+    target = resolve_playlist_reference(playlist, ctx.user)
+    if not target:
+        await ctx.response.send_message("Playlist not found or not visible to you.", ephemeral=True)
+        return
+    if not can_edit_playlist(ctx.user, target):
+        await ctx.response.send_message("You do not have permission to edit that playlist.", ephemeral=True)
+        return
+    if source == "current":
+        track = client.current_track_info
+        if not track:
+            await ctx.response.send_message("No song is currently playing.", ephemeral=True)
+            return
+    elif source == "queue":
+        if queue_position is None or queue_position < 1 or queue_position > len(queue):
+            await ctx.response.send_message("Provide a valid queue position.", ephemeral=True)
+            return
+        track = queue[queue_position - 1]
+    else:
+        await ctx.response.send_message("Use source `current` or `queue`.", ephemeral=True)
+        return
+    target.setdefault("tracks", []).append(playlist_track_from_track(track, ctx.user))
+    save_playlist(target)
+    title = discord.utils.escape_markdown(str(track.get("title") or "Unknown title"))
+    await ctx.response.send_message(f"Added **{title}** to **{discord.utils.escape_markdown(target['name'])}**.")
+    logger.info(f"Added track to playlist {target['name']} ({target['id']}): {track.get('title')} ({track.get('id')})")
+
+@app_commands.describe(playlist="Playlist name, id, or playlist:name", user="Discord user to add as manager")
+@playlist_group.command(name="addmod", description="Add a playlist manager.")
+async def playlist_addmod(ctx, playlist: str, user: discord.Member):
+    record_command(ctx)
+    target = resolve_playlist_reference(playlist, ctx.user)
+    if not target:
+        await ctx.response.send_message("Playlist not found or not visible to you.", ephemeral=True)
+        return
+    if not can_manage_playlist(ctx.user, target):
+        await ctx.response.send_message("Only the owner or an admin can add playlist managers.", ephemeral=True)
+        return
+    manager_ids = playlist_manager_ids(target)
+    manager_ids.add(user_id_value(user))
+    target["manager_user_ids"] = sorted(manager_ids)
+    save_playlist(target)
+    await ctx.response.send_message(f"Added **{discord.utils.escape_markdown(user_display(user))}** as manager for **{discord.utils.escape_markdown(target['name'])}**.")
+    logger.info(f"Playlist manager added for {target['name']} ({target['id']}): {user_display(user)} ({user_id_value(user)})")
+
+@app_commands.describe(playlist="Playlist name, id, or playlist:name", flags="Optional flags: -now -force")
+@playlist_group.command(name="remove", description="Delete a playlist with a rescue window.")
+async def playlist_remove(ctx, playlist: str, flags: Optional[str] = None):
+    record_command(ctx)
+    parsed_flags = parse_playlist_flags(flags)
+    target = resolve_playlist_reference(playlist, ctx.user)
+    if not target:
+        await ctx.response.send_message("Playlist not found or not visible to you.", ephemeral=True)
+        return
+    if not can_manage_playlist(ctx.user, target):
+        await ctx.response.send_message("Only the owner or an admin can remove playlists.", ephemeral=True)
+        return
+    remove_now = "-now" in parsed_flags
+    if remove_now and not is_user_admin(ctx.user):
+        await ctx.response.send_message("Only admins can use `-now`.", ephemeral=True)
+        return
+    skip_confirm = remove_now and "-force" in parsed_flags and is_user_admin(ctx.user)
+    if not skip_confirm:
+        if not await confirm_admin_foreign_playlist(ctx, target, "playlist removal", parsed_flags):
+            await safe_interaction_send(ctx, "Playlist removal cancelled.", ephemeral=True)
+            return
+        if not await confirm_with_reactions(
+            ctx,
+            f"Are you sure you want to remove playlist **{discord.utils.escape_markdown(target['name'])}**?",
+        ):
+            await safe_interaction_send(ctx, "Playlist removal cancelled.", ephemeral=True)
+            return
+    if remove_now:
+        if not safe_remove_playlist_folder(target):
+            await safe_interaction_send(ctx, "Playlist removal failed. Check output.log.", ephemeral=True)
+            return
+        append_playlist_blackbox_event("removed-now", target, ctx.user)
+        await safe_interaction_send(ctx, "Playlist removed permanently.")
+        logger.info(f"Playlist removed immediately: {target.get('name')} ({target.get('id')})")
+        return
+
+    delete_after = time.time() + PLAYLIST_DELETE_GRACE_SECONDS
+    target["deleted"] = True
+    target["deleted_at"] = time.time()
+    target["delete_after"] = delete_after
+    target["deleted_by_user_id"] = user_id_value(ctx.user)
+    target["deleted_by_discord_name"] = user_display(ctx.user)
+    save_playlist(target)
+    append_playlist_blackbox_event("removed", target, ctx.user)
+    if target.get("id") in client.playlist_delete_tasks:
+        client.playlist_delete_tasks[target["id"]].cancel()
+    client.playlist_delete_tasks[target["id"]] = asyncio.create_task(schedule_playlist_purge(target["id"], delete_after))
+    await safe_interaction_send(
+        ctx,
+        f"Playlist removed. It can be restored for 600 seconds with `/playlist rescue {target['name']}`.",
+    )
+    logger.info(f"Playlist soft-deleted: {target.get('name')} ({target.get('id')})")
+
+@app_commands.describe(playlist="Deleted playlist name, id, or playlist:name to restore")
+@playlist_group.command(name="rescue", description="Restore a playlist during its delete grace window.")
+async def playlist_rescue(ctx, playlist: Optional[str] = None):
+    record_command(ctx)
+    if not playlist:
+        deleted = deleted_playlists_for(ctx.user)
+        if not deleted:
+            await ctx.response.send_message("No deleted playlists are available to rescue.", ephemeral=True)
+            return
+        lines = ["**deleted playlists available for rescue**"]
+        now = time.time()
+        for item in deleted:
+            remaining = max(0, int(item.get("delete_after", now) - now))
+            lines.append(
+                f"- **{discord.utils.escape_markdown(str(item.get('name', 'playlist')))}** "
+                f"(`{item.get('id')}`) - {remaining}s remaining"
+            )
+        await ctx.response.send_message("\n".join(lines), ephemeral=True)
+        return
+
+    target = resolve_playlist_reference(playlist, ctx.user, include_deleted=True)
+    if not target or not target.get("deleted"):
+        await ctx.response.send_message("Deleted playlist not found.", ephemeral=True)
+        return
+    if not (is_user_admin(ctx.user) or user_id_value(ctx.user) == playlist_owner_id(target)):
+        await ctx.response.send_message("Only the owner or an admin can rescue that playlist.", ephemeral=True)
+        return
+    target["deleted"] = False
+    target.pop("deleted_at", None)
+    target.pop("delete_after", None)
+    target.pop("deleted_by_user_id", None)
+    target.pop("deleted_by_discord_name", None)
+    save_playlist(target)
+    task = client.playlist_delete_tasks.pop(target.get("id"), None)
+    if task:
+        task.cancel()
+    append_playlist_blackbox_event("rescued", target, ctx.user)
+    await ctx.response.send_message(f"Restored playlist **{discord.utils.escape_markdown(target['name'])}**.")
+    logger.info(f"Playlist rescued: {target.get('name')} ({target.get('id')})")
+
+@app_commands.describe(playlist="Playlist name, id, or playlist:name", position="1-based song position to remove")
+@playlist_group.command(name="removesong", description="Remove a song from a playlist.")
+async def playlist_removesong(ctx, playlist: str, position: int, flags: Optional[str] = None):
+    record_command(ctx)
+    parsed_flags = parse_playlist_flags(flags)
+    target = resolve_playlist_reference(playlist, ctx.user)
+    if not target:
+        await ctx.response.send_message("Playlist not found or not visible to you.", ephemeral=True)
+        return
+    if not can_edit_playlist(ctx.user, target):
+        await ctx.response.send_message("You do not have permission to edit that playlist.", ephemeral=True)
+        return
+    if not await confirm_admin_foreign_playlist(ctx, target, "song removal", parsed_flags):
+        await safe_interaction_send(ctx, "Song removal cancelled.", ephemeral=True)
+        return
+    tracks = target.get("tracks", [])
+    if position < 1 or position > len(tracks):
+        await safe_interaction_send(ctx, "That song position does not exist.", ephemeral=True)
+        return
+    removed = tracks.pop(position - 1)
+    save_playlist(target)
+    await safe_interaction_send(
+        ctx,
+        f"Removed **{discord.utils.escape_markdown(str(removed.get('title') or 'Unknown title'))}** from **{discord.utils.escape_markdown(target['name'])}**.",
+    )
+
+@app_commands.describe(playlist="Playlist name, id, or playlist:name", from_position="Current position", to_position="New position", flags="Optional flag: -force")
+@playlist_group.command(name="move", description="Move a song inside a playlist.")
+async def playlist_move(ctx, playlist: str, from_position: int, to_position: int, flags: Optional[str] = None):
+    record_command(ctx)
+    parsed_flags = parse_playlist_flags(flags)
+    target = resolve_playlist_reference(playlist, ctx.user)
+    if not target:
+        await ctx.response.send_message("Playlist not found or not visible to you.", ephemeral=True)
+        return
+    if not can_edit_playlist(ctx.user, target):
+        await ctx.response.send_message("You do not have permission to edit that playlist.", ephemeral=True)
+        return
+    if not await confirm_admin_foreign_playlist(ctx, target, "song move", parsed_flags):
+        await safe_interaction_send(ctx, "Song move cancelled.", ephemeral=True)
+        return
+    tracks = target.get("tracks", [])
+    if from_position < 1 or from_position > len(tracks) or to_position < 1 or to_position > len(tracks):
+        await safe_interaction_send(ctx, "Song positions must exist in the playlist.", ephemeral=True)
+        return
+    track = tracks.pop(from_position - 1)
+    tracks.insert(to_position - 1, track)
+    save_playlist(target)
+    await safe_interaction_send(ctx, f"Moved **{discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))}** to position {to_position}.")
+
+@app_commands.describe(playlist="Playlist name, id, or playlist:name", locked="Whether managers are blocked from editing")
+@playlist_group.command(name="lock", description="Lock or unlock a playlist.")
+async def playlist_lock(ctx, playlist: str, locked: bool):
+    record_command(ctx)
+    target = resolve_playlist_reference(playlist, ctx.user)
+    if not target:
+        await ctx.response.send_message("Playlist not found or not visible to you.", ephemeral=True)
+        return
+    if not can_manage_playlist(ctx.user, target):
+        await ctx.response.send_message("Only the owner or an admin can lock playlists.", ephemeral=True)
+        return
+    target["locked"] = bool(locked)
+    save_playlist(target)
+    state = "locked" if locked else "unlocked"
+    await ctx.response.send_message(f"Playlist **{discord.utils.escape_markdown(target['name'])}** is now {state}.")
+
+@app_commands.describe(playlist="Playlist name, id, or playlist:name")
+@playlist_group.command(name="predownload", description="Admin-only future permanent playlist download hook.")
+async def playlist_predownload(ctx, playlist: str):
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    await ctx.response.defer(ephemeral=True)
+    target = resolve_playlist_reference(playlist, ctx.user)
+    if not target:
+        await ctx.followup.send("Playlist not found.", ephemeral=True)
+        return
+    if not PLAYLIST_PREDOWNLOAD_ENABLED:
+        await ctx.followup.send("Permanent playlist predownload is disabled on this bot.", ephemeral=True)
+        return
+    try:
+        count = await predownload_playlist_files(target)
+    except Exception as exc:
+        logger.error(f"Playlist predownload failed for {target.get('name')} ({target.get('id')}): {exc}")
+        await ctx.followup.send("Playlist predownload failed. Check output.log.", ephemeral=True)
+        return
+    await ctx.followup.send(
+        f"Predownloaded {count} new file(s) for **{discord.utils.escape_markdown(target['name'])}**.",
+        ephemeral=True,
+    )
 
 @client.tree.command()
 async def purgequeue(ctx):
@@ -1818,41 +2860,14 @@ async def random_quote(ctx):
 async def help(ctx):
     """Displays the list of available commands and their usage."""
     record_command(ctx)
-    help_lines = [
-        "**Music Playback Commands:**",
-        "/join – Join your voice channel.",
-        "/play <YouTube URL or search> – Play a song (or add to queue if something is already playing).",
-        "/playtop <query> – Play a song next (skip ahead of the queue).",
-        "/enqueue <query> – Add a song to the queue (alias: /q).",
-        "/queue [links] (alias: /queuelist) – Show the upcoming songs in the queue.",
-        "/queuefirst <position> (alias: /qfirst) – Move a queued song to play next.",
-        "React 📜 on now-playing – Toggle the queue above the now-playing message.",
-        "/skip – Skip the current track (same voice channel or admin).",
-        "/stop – Stop playback and disconnect the bot (same voice channel or admin).",
-        "/pause – Pause the current playing audio (same voice channel or admin).",
-        "/resume – Resume the paused audio (same voice channel or admin).",
-        "/volume <1-100> – Set playback volume (same voice channel or admin).",
-        "/now (alias: /nytsoi) – Show the currently playing song.",
-        "/getqueue – List all songs requested this session and their status.",
-        "",
-        "**Queue Management Commands:**",
-        "/clear_queue – Clear the song queue (same voice channel or admin; admins can delete files).",
-        "/purgequeue – Delete downloaded song files (admin only, except the current file).",
-        "/restorequeue – Restore the last cleared or saved queue (admin only, within 10 min).",
-        "",
-        "**Admin Commands:**",
-        "/togglelog – Toggle verbose logging on/off.",
-        "/toggledownload – Toggle between download mode and streaming mode.",
-        "/disablelinks – Toggle queue link display on/off.",
-        "/reboot – Reboot the bot (asks for confirmation).",
-        "/status [view] – Show runtime diagnostics, session suggestions, or recent commands.",
-        "",
-        "**Fun/Other Commands:**",
-        "/backup_teekkari_quotes – Backup all quotes from the Teekkari quotes channel.",
-        "/random_quote – Get a random Teekkari quote.",
-        "/help – Show this command summary."
-    ]
-    await ctx.response.send_message("\n".join(help_lines))
+    await ctx.response.send_message(compact_help_message())
+    message = await ctx.original_response()
+    client.help_message_id = message.id
+    client.help_expanded = False
+    try:
+        await message.add_reaction(HELP_EXPAND_REACTION)
+    except Exception as exc:
+        logger.warning(f"Failed to add help expand reaction: {exc}")
 
 @app_commands.describe(view="latest, session, or commands")
 @app_commands.choices(view=[
@@ -1868,6 +2883,8 @@ async def status(ctx, view: str = "latest"):
         await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
     await ctx.response.send_message(build_status_message(view), ephemeral=True)
+
+client.tree.add_command(playlist_group)
 
 @client.tree.error
 async def on_app_command_error(ctx, error):

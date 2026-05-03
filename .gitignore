@@ -15,6 +15,7 @@ AGENTS.md
 output.log
 *.log
 bugjournal.md
+playlists/
 
 *.py[cod]
 
