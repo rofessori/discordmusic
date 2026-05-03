@@ -188,6 +188,24 @@ class StartupReport:
     def has_blockers(self):
         return bool(self.errors)
 
+@dataclass
+class SuggestionRecord:
+    timestamp: float
+    user_name: str
+    user_id: int
+    command: str
+    raw_value: str
+    title: str = ""
+    video_id: str = ""
+    url: str = ""
+
+@dataclass
+class CommandRecord:
+    timestamp: float
+    user_name: str
+    user_id: int
+    command: str
+
 def run_startup_diagnostics() -> StartupReport:
     report = StartupReport(errors=[], warnings=[], notes=[])
     discord_version = getattr(discord, "__version__", "0")
@@ -339,10 +357,13 @@ class Client(discord.Client):
         # Admin-controllable flags
         self.download_mode = True              # True = download-and-play, False = stream-only
         self.log_verbose = False               # True = DEBUG logging on
+        self.queue_links_disabled = False
         # Queue and history tracking
         self.song_history = []                # list of all tracks requested in current session
         self.queue_backup = None              # backup of last cleared queue (for restore)
         self.backup_timestamp = None          # timestamp for queue backup
+        self.suggestion_history = []
+        self.recent_commands = []
         # File deletion task tracking
         self.deletion_tasks = {}              # map video_id -> asyncio.Future
         # Played tracks tracking
@@ -369,15 +390,22 @@ def build_runtime_status():
     mode = "download" if client.download_mode else "stream"
     current = client.current_track_info.get('title', 'Unknown title') if client.current_track_info else "Idle"
     lines = [
-        f"Runtime mode: {mode}",
-        f"Queue length: {len(queue)}",
-        f"Song history entries: {len(client.song_history)}",
-        f"Currently playing: {current}",
-        f"Log level: {logging.getLevelName(logger.level)}",
+        "**runtime**",
+        f"- mode: `{mode}`",
+        f"- queue length: `{len(queue)}`",
+        f"- song history entries: `{len(client.song_history)}`",
+        f"- currently playing: **{discord.utils.escape_markdown(str(current))}**",
+        f"- log level: `{logging.getLevelName(logger.level)}`",
+        f"- queue links: `{'disabled' if client.queue_links_disabled else 'enabled'}`",
     ]
+    latest_suggestion = format_suggestion_record(client.suggestion_history[-1]) if client.suggestion_history else None
+    lines.append("")
+    lines.append("**latest suggestion**")
+    lines.append(latest_suggestion or "- none this session")
     diag = getattr(client, "startup_report", None)
     if diag and diag.warnings:
-        lines.append("Outstanding warnings:")
+        lines.append("")
+        lines.append("**outstanding warnings**")
         lines.extend(f"- {warn}" for warn in diag.warnings)
     return "\n".join(lines)
 
@@ -392,13 +420,116 @@ async def safe_interaction_send(ctx, message: str, *, ephemeral: bool = False):
         logger.warning(f"Could not respond to /{command_name}: {exc}")
         return None
 
+def user_display(user) -> str:
+    return str(getattr(user, "display_name", None) or getattr(user, "name", None) or user)
+
+def command_name(ctx, fallback="unknown") -> str:
+    return getattr(getattr(ctx, "command", None), "name", fallback)
+
+def format_timestamp(timestamp: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+
+def truncate_text(value, max_chars: int = 180) -> str:
+    text = str(value)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars - 3] + "..."
+
+def record_command(ctx):
+    record = CommandRecord(
+        timestamp=time.time(),
+        user_name=user_display(ctx.user),
+        user_id=getattr(ctx.user, "id", 0),
+        command=command_name(ctx),
+    )
+    client.recent_commands.append(record)
+    client.recent_commands = client.recent_commands[-5:]
+    logger.info(f"Command invoked: /{record.command} by {record.user_name} ({record.user_id})")
+    return record
+
+def record_suggestion(ctx, command: str, raw_value, track=None):
+    raw_text = truncate_text(raw_value, 240)
+    record = SuggestionRecord(
+        timestamp=time.time(),
+        user_name=user_display(ctx.user),
+        user_id=getattr(ctx.user, "id", 0),
+        command=command,
+        raw_value=raw_text,
+        title=truncate_text(track.get('title', ''), 180) if track else "",
+        video_id=str(track.get('id', '')) if track else "",
+        url=truncate_text(track.get('webpage_url', ''), 300) if track else "",
+    )
+    client.suggestion_history.append(record)
+    logger.info(
+        f"Music suggestion: user={record.user_name} ({record.user_id}) "
+        f"command=/{record.command} raw={record.raw_value!r} "
+        f"title={record.title or '-'} id={record.video_id or '-'}"
+    )
+    return record
+
+def update_suggestion(record: SuggestionRecord, track):
+    record.title = truncate_text(track.get('title', ''), 180)
+    record.video_id = str(track.get('id', ''))
+    record.url = truncate_text(track.get('webpage_url', ''), 300)
+    logger.info(
+        f"Music suggestion resolved: user={record.user_name} ({record.user_id}) "
+        f"command=/{record.command} title={record.title or '-'} id={record.video_id or '-'}"
+    )
+    return record
+
+def format_suggestion_record(record: SuggestionRecord, *, include_url=True) -> str:
+    title = discord.utils.escape_markdown(record.title or "unresolved")
+    raw_value = discord.utils.escape_markdown(record.raw_value)
+    lines = [
+        f"- time: `{format_timestamp(record.timestamp)}`",
+        f"- user: **{discord.utils.escape_markdown(record.user_name)}** (`{record.user_id}`)",
+        f"- command: `/{record.command}`",
+    ]
+    if record.title:
+        video = f" (`{record.video_id}`)" if record.video_id else ""
+        lines.append(f"- song: **{title}**{video}")
+    else:
+        lines.append(f"- suggestion: `{raw_value}`")
+    if include_url and record.url:
+        lines.append(f"- url: {record.url}")
+    return "\n".join(lines)
+
+def format_command_record(record: CommandRecord) -> str:
+    user_name = discord.utils.escape_markdown(record.user_name)
+    return f"- `{format_timestamp(record.timestamp)}` /{record.command} by **{user_name}** (`{record.user_id}`)"
+
+def build_status_message(view: str = "latest") -> str:
+    view = (view or "latest").lower()
+    if view == "session":
+        lines = ["**music suggestion session history**"]
+        if not client.suggestion_history:
+            lines.append("- none this session")
+        else:
+            for index, record in enumerate(client.suggestion_history, start=1):
+                block = [f"\n**{index}. /{record.command}**", format_suggestion_record(record)]
+                candidate = "\n".join(lines + block)
+                if len(candidate) > DISCORD_MESSAGE_SAFE_LIMIT:
+                    remaining = len(client.suggestion_history) - index + 1
+                    lines.append(f"\n_and {remaining} additional suggestion(s) are omitted from this status message._")
+                    break
+                lines.extend(block)
+        return "\n".join(lines)
+    if view == "commands":
+        lines = ["**recent commands**"]
+        if not client.recent_commands:
+            lines.append("- none this session")
+        else:
+            lines.extend(format_command_record(record) for record in client.recent_commands[-5:])
+        return "\n".join(lines)
+    return build_runtime_status()
+
 def track_display_parts(track: dict) -> tuple:
     title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
     url = track.get('webpage_url') or youtube_watch_url + str(track.get('id') or '')
     url = discord.utils.escape_markdown(str(url))
     return title, url
 
-def format_queue_section(*, max_chars=None) -> str:
+def format_queue_section(*, max_chars=None, show_links=True) -> str:
     lines = ["📜 **Queue**"]
     if not queue:
         lines.append("_Queue is empty._")
@@ -406,7 +537,9 @@ def format_queue_section(*, max_chars=None) -> str:
 
     for index, track in enumerate(queue, start=1):
         title, url = track_display_parts(track)
-        entry = [f"**{index}. {title}**", f"*{url}*"]
+        entry = [f"**{index}. {title}**"]
+        if show_links and not client.queue_links_disabled:
+            entry.append(f"*{url}*")
         remaining = len(queue) - index
         footer = f"_and {remaining} more queued song(s)._" if remaining else None
         candidate_lines = lines + entry + ([footer] if footer else [])
@@ -825,6 +958,7 @@ async def save_all_channel_messages(channel):
 @client.tree.command()
 async def join(ctx):
     """Joins the voice channel that the user is currently in."""
+    record_command(ctx)
     if ctx.user.voice:
         try:
             client.current_voice_channel = await ctx.user.voice.channel.connect()
@@ -840,6 +974,7 @@ async def join(ctx):
 @client.tree.command()
 async def clear_queue(ctx):
     """Clears the current song queue, with option to delete downloaded files."""
+    record_command(ctx)
     if len(queue) == 0:
         await ctx.response.send_message("There is no queue to clear")
         logger.info("User tried to clear queue, there is no queue to clear.")
@@ -906,6 +1041,7 @@ async def clear_queue(ctx):
 @client.tree.command()
 async def skip(ctx):
     """Skips the currently playing track."""
+    record_command(ctx)
     if client.current_voice_channel and client.current_voice_channel.is_connected() and (client.current_voice_channel.is_playing() or client.current_voice_channel.is_paused()):
         client.current_voice_channel.stop()
         await ctx.response.send_message("Skipped the current track")
@@ -918,6 +1054,7 @@ async def skip(ctx):
 @client.tree.command()
 async def play(ctx, *, url: str):
     """Plays a YouTube video's audio by URL or search term."""
+    record_command(ctx)
     await ctx.response.defer()
     if not client.currently_playing:
         # Ensure we're connected to a voice channel before creating the player
@@ -937,7 +1074,9 @@ async def play(ctx, *, url: str):
                 await ctx.followup.send("You need to join a voice channel first.")
                 return
         try:
+            suggestion = record_suggestion(ctx, "play", url)
             track = await fetch_track(url, requested_by=ctx.user)
+            update_suggestion(suggestion, track)
             # If admin needs to confirm a large download
             if track.get('needs_confirm'):
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
@@ -959,6 +1098,7 @@ async def play(ctx, *, url: str):
                 if str(reaction.emoji) == "👍":
                     # Admin confirmed download: fetch again with download (this time no 'needs_confirm')
                     track = await fetch_track(track['webpage_url'], requested_by=ctx.user)
+                    update_suggestion(suggestion, track)
                 else:
                     await ctx.followup.send("Download canceled.")
                     return
@@ -987,7 +1127,9 @@ async def play(ctx, *, url: str):
     else:
         # If something is already playing, add the requested song to the queue
         try:
+            suggestion = record_suggestion(ctx, "play", url)
             track = await fetch_track(url, requested_by=ctx.user)
+            update_suggestion(suggestion, track)
             if track.get('needs_confirm'):
                 # Cannot queue a large download without confirmation; instruct admin to use /play
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
@@ -1005,6 +1147,7 @@ async def play(ctx, *, url: str):
 @client.tree.command()
 async def playtop(ctx, *, query: str):
     """Adds a song to the top of the queue (plays next)."""
+    record_command(ctx)
     await ctx.response.defer()
     if not client.currently_playing:
         # Nothing playing, so this will play immediately (similar to /play when queue empty)
@@ -1024,7 +1167,9 @@ async def playtop(ctx, *, query: str):
                 await ctx.followup.send("You need to join a voice channel first.")
                 return
         try:
+            suggestion = record_suggestion(ctx, "playtop", query)
             track = await fetch_track(query, requested_by=ctx.user)
+            update_suggestion(suggestion, track)
             if track.get('needs_confirm'):
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
                 await ctx.followup.send(f"Track **{track['title']}** (~{filesize_mb:.1f} MB) is too large to play without confirmation. Use /play for this track.")
@@ -1054,7 +1199,9 @@ async def playtop(ctx, *, query: str):
     else:
         # If currently playing, queue this track to be next
         try:
+            suggestion = record_suggestion(ctx, "playtop", query)
             track = await fetch_track(query, requested_by=ctx.user)
+            update_suggestion(suggestion, track)
             if track.get('needs_confirm'):
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
                 await ctx.followup.send(f"Track **{track['title']}** (~{filesize_mb:.1f} MB) is too large to queue without confirmation.")
@@ -1068,9 +1215,12 @@ async def playtop(ctx, *, query: str):
             await ctx.followup.send("Failed to add track to queue.")
 
 async def enqueue_track(ctx, query: str, command_name: str = "enqueue"):
+    record_command(ctx)
     await ctx.response.defer()
     try:
+        suggestion = record_suggestion(ctx, command_name, query)
         track = await fetch_track(query, requested_by=ctx.user)
+        update_suggestion(suggestion, track)
         if track.get('needs_confirm'):
             filesize_mb = track.get('filesize', 0) / (1024 * 1024)
             await ctx.followup.send(f"Track **{track['title']}** (~{filesize_mb:.1f} MB) requires confirmation to download. Use /play instead.")
@@ -1097,6 +1247,7 @@ async def q_cmd(ctx, *, query: str):
 
 async def queue_first(ctx, position: int, command_name: str):
     """Move a queued track to the front so it plays next."""
+    record_command(ctx)
     if position < 1:
         await ctx.response.send_message("Queue positions start at 1.")
         logger.info(f"/{command_name} rejected invalid queue position {position}.")
@@ -1111,6 +1262,7 @@ async def queue_first(ctx, position: int, command_name: str):
         return
     if position == 1:
         track = queue[0]
+        record_suggestion(ctx, command_name, f"position {position}", track)
         title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
         await ctx.response.send_message(f"**{title}** is already first in queue.")
         logger.info(f"/{command_name} requested position 1; queue already starts with {track.get('title', 'Unknown title')} ({track.get('id', '')}).")
@@ -1118,6 +1270,7 @@ async def queue_first(ctx, position: int, command_name: str):
 
     track = queue.pop(position - 1)
     queue.insert(0, track)
+    record_suggestion(ctx, command_name, f"position {position}", track)
     title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
     await ctx.response.send_message(f"Moved **{title}** to the front of the queue. It will play next.")
     logger.info(f"/{command_name} moved queue position {position} to the front: {track.get('title', 'Unknown title')} ({track.get('id', '')})")
@@ -1134,31 +1287,48 @@ async def qfirst_cmd(ctx, position: int):
     """Alias of /queuefirst."""
     await queue_first(ctx, position, "qfirst")
 
-async def send_queue_list(ctx):
+async def send_queue_list(ctx, *, links: bool = False):
     if len(queue) == 0:
         await ctx.response.send_message("Queue is empty.")
     else:
         lines = ["Upcoming songs:"]
+        show_links = links and not client.queue_links_disabled
         for i, track in enumerate(queue, start=1):
-            title = track.get('title', 'Unknown title')
+            title, url = track_display_parts(track)
             vid = track.get('id', '')
-            lines.append(f"{i}. {title} ({vid})")
+            entry = [f"{i}. **{title}** ({vid})"]
+            if show_links:
+                entry.append(f"*{url}*")
+            remaining = len(queue) - i
+            footer = f"_and {remaining} more queued song(s) omitted._" if remaining else None
+            candidate_lines = lines + entry + ([footer] if footer else [])
+            if len("\n".join(candidate_lines)) > DISCORD_MESSAGE_SAFE_LIMIT:
+                lines.append(f"_and {len(queue) - i + 1} more queued song(s) omitted._")
+                break
+            lines.extend(entry)
+        if links and client.queue_links_disabled:
+            lines.append("_Links are disabled by an admin._")
         output = "\n".join(lines)
         await ctx.response.send_message(output)
 
+@app_commands.describe(links="Show YouTube links with queued songs when links are enabled")
 @client.tree.command(name="queue")
-async def queue_cmd(ctx):
+async def queue_cmd(ctx, links: bool = False):
     """Displays the upcoming songs in the queue."""
-    await send_queue_list(ctx)
+    record_command(ctx)
+    await send_queue_list(ctx, links=links)
 
+@app_commands.describe(links="Show YouTube links with queued songs when links are enabled")
 @client.tree.command()
-async def queuelist(ctx):
+async def queuelist(ctx, links: bool = False):
     """Alias of /queue."""
-    await send_queue_list(ctx)
+    record_command(ctx)
+    await send_queue_list(ctx, links=links)
 
 @client.tree.command()
 async def purgequeue(ctx):
     """Removes all downloaded song files from disk, but keeps the queue intact."""
+    record_command(ctx)
     count = 0
     current_id = client.current_track_id
     for vid, info in list(downloaded.items()):
@@ -1183,6 +1353,7 @@ async def purgequeue(ctx):
 @client.tree.command()
 async def volume(ctx, level: int):
     """Sets the audio playback volume (1-100)."""
+    record_command(ctx)
     if level < 1 or level > 100:
         await ctx.response.send_message("Volume must be between 1 and 100.")
         return
@@ -1198,6 +1369,7 @@ async def volume(ctx, level: int):
 @client.tree.command()
 async def pause(ctx):
     """Pauses the current audio."""
+    record_command(ctx)
     if client.current_voice_channel is None:
         logger.info("Pause command issued, but bot is not in a voice channel.")
         await ctx.response.send_message("Not currently in a voice channel")
@@ -1214,6 +1386,7 @@ async def pause(ctx):
 @client.tree.command()
 async def resume(ctx):
     """Resumes the current audio if paused."""
+    record_command(ctx)
     if client.current_voice_channel is None:
         logger.info("Resume command issued, but bot is not in a voice channel.")
         await ctx.response.send_message("Not currently in a voice channel")
@@ -1230,6 +1403,7 @@ async def resume(ctx):
 @client.tree.command()
 async def stop(ctx):
     """Stops playback and disconnects the bot from the voice channel."""
+    record_command(ctx)
     if client.current_voice_channel:
         try:
             ctx.guild.voice_client.stop()
@@ -1249,6 +1423,7 @@ async def stop(ctx):
 @client.tree.command()
 async def togglelog(ctx):
     """Toggles verbose (DEBUG level) logging on or off (admin only)."""
+    record_command(ctx)
     if not is_user_admin(ctx.user):
         await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
@@ -1265,6 +1440,7 @@ async def togglelog(ctx):
 @client.tree.command()
 async def toggledownload(ctx):
     """Toggles between download-and-play mode and stream-only mode (admin only)."""
+    record_command(ctx)
     if not is_user_admin(ctx.user):
         await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
@@ -1273,9 +1449,30 @@ async def toggledownload(ctx):
     await ctx.response.send_message(f"Playback mode set to **{mode}**.")
     logger.info(f"Download mode toggled by admin: now {mode} mode")
 
+@client.tree.command()
+async def disablelinks(ctx):
+    """Toggles queue link display on or off (admin only)."""
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    client.queue_links_disabled = not client.queue_links_disabled
+    state = "disabled" if client.queue_links_disabled else "enabled"
+    if client.current_track_message and client.current_track_info and client.current_track_message_show_queue:
+        try:
+            await client.current_track_message.edit(
+                content=format_now_playing(client.current_track_info, show_queue=True)
+            )
+            logger.info("Refreshed open now-playing queue section after queue link toggle.")
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+            logger.warning(f"Failed to refresh now-playing queue section after link toggle: {exc}")
+    await ctx.response.send_message(f"Queue links are now **{state}**.")
+    logger.info(f"Queue links toggled by admin: now {state}")
+
 @client.tree.command(name="now")
 async def now_cmd(ctx):
     """Displays the currently playing song."""
+    record_command(ctx)
     if not client.currently_playing or not client.current_track_info:
         await ctx.response.send_message("No song is currently playing.")
     else:
@@ -1287,6 +1484,7 @@ async def now_cmd(ctx):
 @client.tree.command(name="nytsoi")
 async def nytsoi_cmd(ctx):
     """Finnish alias for /now (shows the current song)."""
+    record_command(ctx)
     if not client.currently_playing or not client.current_track_info:
         await ctx.response.send_message("No song is currently playing.")
     else:
@@ -1298,6 +1496,7 @@ async def nytsoi_cmd(ctx):
 @client.tree.command()
 async def getqueue(ctx):
     """Displays all songs requested since the bot joined the current voice channel."""
+    record_command(ctx)
     if not client.song_history:
         await ctx.response.send_message("No songs have been requested this session.")
         return
@@ -1320,6 +1519,7 @@ async def getqueue(ctx):
 @client.tree.command()
 async def reboot(ctx):
     """Saves the current queue and reboots the bot (admin only, requires confirmation)."""
+    record_command(ctx)
     if not is_user_admin(ctx.user):
         await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
@@ -1363,6 +1563,7 @@ async def reboot(ctx):
 @client.tree.command()
 async def restorequeue(ctx):
     """Restores the last cleared or saved queue (admin only, within 10 minutes)."""
+    record_command(ctx)
     if not is_user_admin(ctx.user):
         await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
@@ -1418,6 +1619,7 @@ async def restorequeue(ctx):
 @client.tree.command()
 async def backup_teekkari_quotes(ctx):
     """Backs up all quotes from the Teekkari quotes channel."""
+    record_command(ctx)
     await ctx.response.defer(thinking=True)
     channel = client.get_channel(QUOTES_ID)
     if channel is None:
@@ -1431,6 +1633,7 @@ async def backup_teekkari_quotes(ctx):
 @client.tree.command()
 async def random_quote(ctx):
     """Gets a random Teekkari quote."""
+    record_command(ctx)
     message = quotes.getRandomQuote()
     await ctx.response.send_message(message)
     logger.info("User requested random teekkari quote.")
@@ -1438,19 +1641,21 @@ async def random_quote(ctx):
 @client.tree.command()
 async def help(ctx):
     """Displays the list of available commands and their usage."""
+    record_command(ctx)
     help_lines = [
         "**Music Playback Commands:**",
         "/join – Join your voice channel.",
         "/play <URL or search> – Play a song (or add to queue if something is already playing).",
         "/playtop <query> – Play a song next (skip ahead of the queue).",
         "/enqueue <query> – Add a song to the queue (alias: /q).",
-        "/queue (alias: /queuelist) – Show the upcoming songs in the queue.",
+        "/queue [links] (alias: /queuelist) – Show the upcoming songs in the queue.",
         "/queuefirst <position> (alias: /qfirst) – Move a queued song to play next.",
         "React 📜 on now-playing – Toggle the queue above the now-playing message.",
         "/skip – Skip the current track.",
         "/stop – Stop playback and disconnect the bot.",
         "/pause – Pause the current playing audio.",
         "/resume – Resume the paused audio.",
+        "/volume <1-100> – Set playback volume.",
         "/now (alias: /nytsoi) – Show the currently playing song.",
         "/getqueue – List all songs requested this session and their status.",
         "",
@@ -1462,22 +1667,31 @@ async def help(ctx):
         "**Admin Commands:**",
         "/togglelog – Toggle verbose logging on/off.",
         "/toggledownload – Toggle between download mode and streaming mode.",
+        "/disablelinks – Toggle queue link display on/off.",
         "/reboot – Reboot the bot (asks for confirmation).",
-        "/status – Show runtime diagnostics (admins only).",
+        "/status [view] – Show runtime diagnostics, session suggestions, or recent commands.",
         "",
         "**Fun/Other Commands:**",
         "/backup_teekkari_quotes – Backup all quotes from the Teekkari quotes channel.",
-        "/random_quote – Get a random Teekkari quote."
+        "/random_quote – Get a random Teekkari quote.",
+        "/help – Show this command summary."
     ]
     await ctx.response.send_message("\n".join(help_lines))
 
+@app_commands.describe(view="latest, session, or commands")
+@app_commands.choices(view=[
+    app_commands.Choice(name="latest", value="latest"),
+    app_commands.Choice(name="session", value="session"),
+    app_commands.Choice(name="commands", value="commands"),
+])
 @client.tree.command()
-async def status(ctx):
+async def status(ctx, view: str = "latest"):
     """Displays runtime diagnostics (admin only)."""
+    record_command(ctx)
     if not is_user_admin(ctx.user):
         await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
-    await ctx.response.send_message(build_runtime_status(), ephemeral=True)
+    await ctx.response.send_message(build_status_message(view), ephemeral=True)
 
 @client.tree.error
 async def on_app_command_error(ctx, error):

@@ -58,7 +58,7 @@ admin_username=
   - `/play <url|query>`
   - `/playtop <query>`
   - `/enqueue <query>` (alias: `/q`)
-  - `/queue` (alias: `/queuelist`)
+  - `/queue [links]` (alias: `/queuelist`)
   - `/queuefirst <position>` (alias: `/qfirst`)
   - react `📜` on now-playing to toggle the queue above the current song
   - `/skip`
@@ -76,7 +76,9 @@ admin_username=
 - **admin-only**:
   - `/togglelog`
   - `/toggledownload`
+  - `/disablelinks`
   - `/reboot`
+  - `/status [view]`
 
 - **quotes**:
   - `/backup_teekkari_quotes`
@@ -100,6 +102,20 @@ tail -f output.log
 
 - **youtube “confirm you're not a bot” error**:  
   update yt-dlp with `pip install --upgrade -r requirements.txt` and make sure `deno` or `node` is on `PATH`. if YouTube still blocks your server IP, export YouTube cookies to `cookies.txt` and set `YTDLP_COOKIEFILE=cookies.txt` in `.env`.
+
+- **startup warning: no deno or node executable found in path**:
+  install Deno on the host and make sure the bot process can find it:
+  ```bash
+  curl -fsSL https://deno.land/install.sh | sh
+  export PATH="$HOME/.deno/bin:$PATH"
+  deno --version
+  ```
+  if the bot runs through systemd, add the same Deno bin directory to the service `PATH`, then reload and restart:
+  ```bash
+  sudo systemctl daemon-reload
+  sudo systemctl restart YOUR_SERVICE_NAME
+  ```
+  after restart, `output.log` should include `YouTube JS runtime located at ...` instead of the warning.
 
 - **permission errors/venv issues**:  
   ```bash

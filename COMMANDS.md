@@ -11,8 +11,8 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/playtop <query>` | add a track to the front of the queue so it plays next. if nothing is playing, it starts immediately. |
 | `/enqueue <query>` | add a track to the end of the queue. |
 | `/q <query>` | alias for `/enqueue`. |
-| `/queue` | show the upcoming songs in the queue. |
-| `/queuelist` | alias for `/queue`. |
+| `/queue [links]` | show the upcoming songs in the queue. set `links:true` to include youtube urls when links are enabled. |
+| `/queuelist [links]` | alias for `/queue`. |
 | `/queuefirst <position>` | move an existing queued song to the front of the queue by its 1-based position. |
 | `/qfirst <position>` | alias for `/queuefirst`. |
 | `/skip` | skip the current track and continue to the next queued track. |
@@ -47,8 +47,15 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | --- | --- |
 | `/togglelog` | toggle verbose debug logging. admin only. |
 | `/toggledownload` | switch between download-and-play mode and stream-only mode. admin only. |
+| `/disablelinks` | toggle whether queue-style displays are allowed to show youtube links. admin only. |
 | `/reboot` | save the queue, ask for confirmation, disconnect, and exit the bot process. admin only. |
-| `/status` | show runtime diagnostics such as playback mode, queue length, current track, log level, and startup warnings. admin only. |
+| `/status [view]` | show runtime diagnostics, the full suggestion session, or the last five commands. admin only. |
+
+status views:
+
+- `latest`: runtime status plus the latest music suggestion.
+- `session`: music suggestion history for the current bot session.
+- `commands`: the last five slash commands used this session.
 
 ## quotes
 
