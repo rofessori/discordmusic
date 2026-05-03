@@ -54,6 +54,7 @@ admin_username=
   - `/playtop <query>`
   - `/enqueue <query>` (alias: `/q`)
   - `/queue` (alias: `/queuelist`)
+  - `/queuefirst <position>` (alias: `/qfirst`)
   - `/skip`
   - `/pause` / `/resume`
   - `/stop`

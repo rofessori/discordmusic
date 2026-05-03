@@ -23,3 +23,23 @@ Recent commits are short, imperative sentences (e.g., `Handle missing voice clie
 
 ## Security & Configuration Tips
 Never commit `.env`, tokens, or `quotes.txt` contents—use `.gitignore`. Rotate discord tokens after sharing test bots and revoke invite links when done. When enabling download mode, ensure disk clean-up logic stays intact and document any new directories or cache knobs in this guide.
+
+## 2026-05-03 Queue Jump & Now Playing Notes
+Focused current-state analysis before the change:
+- `main.py` keeps the upcoming music list in the global `queue`; `/play`, `/playtop`, and `/enqueue` append or insert fetched track dictionaries, and `/queue` prints that list with 1-based numbering.
+- Playback startup was duplicated in `/play`, `/playtop`, and `play_next_channel()`: each block built a player, updated `client.current_track_info`, sent a plain `Now playing:` message, stored it in `client.current_track_message`, and added the three control reactions.
+- `on_reaction_add()` only treats reactions on `client.current_track_message` as music controls. Admin confirmation prompts for `/reboot`, large downloads, and queue clearing use separate message ids with `👍`/`👎`, so they should remain isolated from playback controls.
+- The old implementation never removed playback controls from stale now-playing messages when a new announcement was sent.
+
+Implementation plan used:
+- Add shared helpers for now-playing formatting, edit-vs-send decisions, and playback-control reaction cleanup.
+- Format announcements as `🎵 Now playing: **title**` plus the italicized YouTube URL on the next line.
+- Edit the previous now-playing message only when it is in the same channel and no newer message exists; otherwise send a new message and remove only `◀️`, `⏸️`, and `▶️` from the old playback message.
+- Add `/queuefirst <position>` and `/qfirst <position>` as 1-based queue reordering commands that move an existing queued song to the front without interrupting the current track.
+- Update `/help` and `README.md` so users can discover the new commands.
+
+Completed work log:
+- Centralized now-playing publishing in `publish_now_playing()`, with `format_now_playing()`, `has_newer_message()`, `remove_control_reactions()`, and `add_control_reactions()` supporting it.
+- Replaced duplicated announcement/reaction code in `/play`, `/playtop`, and `play_next_channel()` with the shared publisher.
+- Added `queue_first()` plus the `/queuefirst` and `/qfirst` slash commands, including empty queue, invalid position, and already-first responses.
+- Left confirmation reactions isolated: only the stored `client.current_track_message` receives playback-control handling or stale playback-control cleanup.
