@@ -78,3 +78,10 @@ Queue reaction completed work:
 - Playlist list and edit views are paged with `◀️`/`▶️` reactions and edit their own message even after unrelated chat appears. Only the newest playlist list/edit message remains interactive.
 - `/help` should be compact by default and expand in place with a reaction. New playlist commands should appear in expanded help and docs.
 - Keep admin-only permanent predownload support feature-flagged off by default. When enabled, files live under the playlist folder and use the same path-safety approach as normal downloads.
+
+## 2026-05-03 Playlist Removal & Blackbox Notes
+- `/playlist remove` removes a whole playlist, not an individual song. Keep song removal on `/playlist removesong`.
+- Playlist removal is soft by default: mark `deleted`, set `deleted_at` and `delete_after`, and allow `/playlist rescue` for 600 seconds before deleting the playlist folder. `/playlist rescue` is intentionally not listed in `/help`, but the bot mentions it after deletion.
+- Admins can edit, remove, or move songs in another user's playlist, but must confirm unless `-force` is present. Owners/managers may pass `-force`; it is accepted and ignored without extra user-facing noise.
+- Admin-only `-now` on `/playlist remove` deletes the playlist folder immediately. `/playlist remove <name> -now -force` skips confirmation; normal users cannot use `-now`.
+- `playlists-blackbox.json` in the repository root is an append-only JSON audit list for playlist create/remove/rescue events. Entries should include playlist name/id, owner, managers, actor, and YouTube link list; do not delete or rewrite old entries.

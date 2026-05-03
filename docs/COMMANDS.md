@@ -7,14 +7,14 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | command | purpose |
 | --- | --- |
 | `/join` | join the voice channel you are currently in. |
-| `/play <youtube url or search>` | play a youtube url or search result immediately, or add it to the queue if something is already playing. raw non-youtube urls are rejected. |
+| `/play <youtube url, search, or playlist:name>` | play a youtube result or playlist immediately, or add it to the queue if something is already playing. raw non-youtube urls are rejected. |
 | `/playtop <query>` | add a track to the front of the queue so it plays next. if nothing is playing, it starts immediately. |
-| `/enqueue <query>` | add a track to the end of the queue. |
-| `/q <query>` | alias for `/enqueue`. |
+| `/enqueue <query or playlist:name>` | add a track or playlist to the end of the queue. |
+| `/q <query or playlist:name>` | alias for `/enqueue`. |
 | `/queue [links]` | show the upcoming songs in the queue. set `links:true` to include youtube urls when links are enabled. |
 | `/queuelist [links]` | alias for `/queue`. |
-| `/queuefirst <position>` | move an existing queued song to the front of the queue by its 1-based position. |
-| `/qfirst <position>` | alias for `/queuefirst`. |
+| `/queuefirst <position or playlist:name>` | move an existing queued song or playlist to the front of the queue. |
+| `/qfirst <position or playlist:name>` | alias for `/queuefirst`. |
 | `/skip` | skip the current track and continue to the next queued track. requires the same voice channel unless the user is an admin. |
 | `/stop` | stop playback, clear the queue, and disconnect from voice. requires the same voice channel unless the user is an admin. |
 | `/pause` | pause the current playing audio. requires the same voice channel unless the user is an admin. |
@@ -40,6 +40,22 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/clear_queue` | clear the current song queue. requires the same voice channel unless the user is an admin; admins are prompted to optionally delete downloaded files. |
 | `/purgequeue` | delete downloaded song files from disk while keeping the queue intact. admin only; the currently playing file is not deleted. |
 | `/restorequeue` | restore a recently cleared queue or a queue saved during reboot. admin only, time-limited. |
+
+## playlists
+
+| command | purpose |
+| --- | --- |
+| `/playlist list` | list your playlists first, then visible public playlists, with reaction pages. |
+| `/playlist new <name> [visibility]` | create a private or public playlist. |
+| `/playlist edit <name> [flags]` | show editable playlist details and song pages. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
+| `/playlist add <playlist> current` | add the currently playing song to a playlist you can edit. |
+| `/playlist add <playlist> queue <position>` | add a queued song by queue number to a playlist you can edit. |
+| `/playlist addmod <playlist> <user>` | add a manager to a playlist you own. |
+| `/playlist remove <playlist> [flags]` | remove a whole playlist after confirmation. it can be rescued for 600 seconds. admins can use `-now`; `-now -force` skips confirmation. |
+| `/playlist removesong <playlist> <position> [flags]` | remove a song from a playlist you can edit. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
+| `/playlist move <playlist> <from> <to> [flags]` | reorder songs inside a playlist you can edit. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
+| `/playlist lock <playlist> <locked>` | lock or unlock manager edits. owner/admin only. |
+| `/playlist predownload <playlist>` | admin-only future hook for permanent playlist downloads. disabled by default. |
 
 ## admin
 
@@ -69,3 +85,5 @@ status views:
 | command | purpose |
 | --- | --- |
 | `/help` | show the in-discord command summary. |
+
+React `📖` on the help message to expand the compact help into the full command list.

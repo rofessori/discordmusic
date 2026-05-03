@@ -6,7 +6,7 @@ discord music bot - youtube-backed voice playback and quote utilities for one di
 
 ## synopsis
 
-the bot joins a discord voice channel, resolves youtube urls or search text with `yt-dlp`, and plays audio through `ffmpeg`. it keeps an in-memory song queue, tracks the current session history, can cache downloaded audio for playback, and includes quote backup/random quote commands for a configured quotes channel.
+the bot joins a discord voice channel, resolves youtube urls or search text with `yt-dlp`, and plays audio through `ffmpeg`. it keeps an in-memory song queue, tracks the current session history, can cache downloaded audio for playback, supports local saved playlists, and includes quote backup/random quote commands for a configured quotes channel.
 
 ## playback technology
 
@@ -36,9 +36,25 @@ admins can use `/toggledownload` to switch between download-and-play and stream-
 
 ## queue and playback flow
 
-the queue is an in-memory list of upcoming track dictionaries. `/play` starts playback immediately when nothing is playing, or queues the track when something is already playing. `/enqueue` and `/q` add to the end of the queue. `/playtop` inserts a new track at the front so it plays next. `/queuefirst` and `/qfirst` move an existing queued item to the front by its queue position. `/queue links:true` can show youtube urls with queued songs unless an admin has disabled queue links.
+the queue is an in-memory list of upcoming track dictionaries. `/play` starts playback immediately when nothing is playing, or queues the track when something is already playing. `/enqueue` and `/q` add to the end of the queue. `/playtop` inserts a new track at the front so it plays next. `/queuefirst` and `/qfirst` move an existing queued item or playlist to the front. `/queue links:true` can show youtube urls with queued songs unless an admin has disabled queue links.
 
 when a track ends or is skipped, the bot pops the next queued track and starts it. session history is also kept so `/getqueue` can show whether requested songs are playing, queued, played, or removed. non-admin queueing is capped to limit public-server abuse.
+
+## playlists
+
+playlists are stored locally under `playlists/<safe-name>-<playlistid>/metadata.json`. each playlist has an 8-character url-safe id, name, generated timestamp, lock state, visibility, owner discord id/name, manager user ids, and ordered track entries.
+
+users can create private or public playlists with `/playlist new`, browse them with `/playlist list`, inspect/edit with `/playlist edit`, add the current song or a queued song with `/playlist add`, and allow another user to manage the playlist with `/playlist addmod`. owners and admins can lock playlists so managers cannot edit them.
+
+playlist removal is soft by default. `/playlist remove <name>` asks for confirmation, marks the playlist deleted, and keeps it rescueable for 600 seconds. `/playlist rescue` lists deleted playlists that still exist on disk, and `/playlist rescue <name>` restores one for the owner or an admin. admins may remove immediately with `-now`; `-now -force` also skips the confirmation prompt. admins editing another user's playlist through edit/remove/move are reminded and asked to confirm unless they pass `-force`.
+
+`playlists-blackbox.json` is an append-only audit record in the repository root. it stores playlist create/remove/rescue events with playlist name/id, owner, managers, and the playlist's youtube link list.
+
+playlist references accept both `playlist:name` and exact playlist names. `/play playlist:name` starts or queues a playlist. `/enqueue playlist:name` and `/q playlist:name` queue it. `/queuefirst playlist:name` and `/qfirst playlist:name` move an existing playlist block to the front, or queue that playlist to play next.
+
+while a playlist is actively playing, normal song requests are placed after the active playlist block and the requester gets a `👍`/`👎` prompt to move the song next instead.
+
+the admin-only `/playlist predownload` command is disabled by default. enabling `PLAYLIST_PREDOWNLOAD_ENABLED=true` lets admins permanently download a playlist into its playlist folder without exposing that capability to normal users.
 
 ## now-playing controls
 
@@ -52,6 +68,8 @@ the now-playing message is the control surface for playback. it shows:
 the bot tries to edit the latest now-playing message when no one has posted after it in the same channel. if another message exists after it, the bot sends a new now-playing message and removes playback-control reactions from the old one.
 
 the `📜` reaction toggles the current queue above the now-playing block. the queue section uses bold numbered titles, optional italic urls, a divider, and then the current song. admins can use `/disablelinks` to hide urls from queue-style displays for the current bot session. users must be in the same voice channel as the bot to use playback-affecting commands or now-playing reactions, unless they are admins.
+
+playlist list/edit views use `◀️` and `▶️` reactions for pages. only the newest playlist view remains interactive. `/help` is compact by default and expands in place when users react with `📖`.
 
 ## security hardening
 

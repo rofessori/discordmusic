@@ -3,6 +3,7 @@
 a discord music bot for playing audio from any youtube video in your server’s voice channel. to use it, you need a bot token and invite url—see the [discord developer quick-start bullshittery on their devsite](https://discord.com/developers/docs/quick-start/getting-started).
 
 also has commands for handling, saving, and displaying quotes from a specific channel.
+also supports local saved playlists with owners, managers, public/private visibility, and playlist playback.
 
 ## docs
 
@@ -54,11 +55,11 @@ admin_user_id=
 
 - **slash commands**:
   - `/join`
-  - `/play <youtube url|query>`
+  - `/play <youtube url|query|playlist:name>`
   - `/playtop <query>`
-  - `/enqueue <query>` (alias: `/q`)
+  - `/enqueue <query|playlist:name>` (alias: `/q`)
   - `/queue [links]` (alias: `/queuelist`)
-  - `/queuefirst <position>` (alias: `/qfirst`)
+  - `/queuefirst <position|playlist:name>` (alias: `/qfirst`)
   - react `📜` on now-playing to toggle the queue above the current song
   - `/skip`
   - `/pause` / `/resume`
@@ -71,8 +72,20 @@ admin_user_id=
   - `/clear_queue`
   - `/restorequeue`
 
+- **playlists**:
+  - `/playlist list`
+  - `/playlist new <name> [visibility]`
+  - `/playlist edit <name>`
+  - `/playlist add <playlist> <current|queue> [queue_position]`
+  - `/playlist addmod <playlist> <user>`
+  - `/playlist remove <playlist> [flags]`
+  - `/playlist removesong <playlist> <position>`
+  - `/playlist move <playlist> <from_position> <to_position>`
+  - `/playlist lock <playlist> <locked>`
+
 - **admin-only**:
   - `/purgequeue`
+  - `/playlist predownload <playlist>` (disabled unless `PLAYLIST_PREDOWNLOAD_ENABLED=true`)
   - `/togglelog`
   - `/toggledownload`
   - `/disablelinks`
