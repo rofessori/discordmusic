@@ -68,3 +68,13 @@ Queue reaction completed work:
 - `/purgequeue` is admin-only. Non-admin playback controls and now-playing reactions require the user to be in the same voice channel as the bot.
 - Download cleanup must use `remove_download_file()`, which validates that the path is a tracked YouTube media file inside the bot directory before removal.
 - Keep `aiohttp>=3.13.4,<4.0` and `python-dotenv>=1.2.2,<2.0` in `requirements.txt` to satisfy the 2026 DoS/symlink security advisories without moving to aiohttp 4 prereleases.
+
+## 2026-05-03 Playlist System Plan
+- Implement playlists as local JSON metadata under `playlists/<safe-name>-<playlistid>/metadata.json`. Each playlist gets an 8-character URL-safe base64 id, a name, generated timestamp, locked flag, visibility, owner id/name, manager user ids, and track entries.
+- Use Discord-native slash command grouping: `/playlist new`, `/playlist list`, `/playlist edit`, `/playlist add`, `/playlist addmod`, plus focused edit helpers for remove/move/lock. Literal `/playlist:new` syntax is not valid for Discord slash commands.
+- Playlist references should accept both `playlist:name` and plain exact playlist names. Owner playlists are preferred during resolution, then managed playlists, then public playlists.
+- `/play playlist:name`, `/enqueue playlist:name`, and `/q playlist:name` should expand the playlist into queue entries with playlist context. If nothing is playing, start the first playlist track and queue the rest. `/queuefirst playlist:name` should put a playlist block at the front of the queue or move an existing queued block.
+- While a playlist block is active, normal song requests should queue after that block and offer a `👍`/`👎` reaction prompt to move the song next instead.
+- Playlist list and edit views are paged with `◀️`/`▶️` reactions and edit their own message even after unrelated chat appears. Only the newest playlist list/edit message remains interactive.
+- `/help` should be compact by default and expand in place with a reaction. New playlist commands should appear in expanded help and docs.
+- Keep admin-only permanent predownload support feature-flagged off by default. When enabled, files live under the playlist folder and use the same path-safety approach as normal downloads.

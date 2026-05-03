@@ -8,6 +8,9 @@ import yt_dlp
 from dotenv import load_dotenv
 import urllib.parse, re
 import ipaddress
+import base64
+import secrets
+import tempfile
 import time
 import json
 import logging
@@ -32,6 +35,15 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 songs_dir = BASE_DIR
 os.makedirs(songs_dir, exist_ok=True)
 downloads_file = os.path.join(songs_dir, "downloads.json")
+PLAYLISTS_DIR = os.path.join(BASE_DIR, "playlists")
+PLAYLIST_PAGE_SIZE = 6
+PLAYLIST_TRACK_PAGE_SIZE = 8
+PLAYLIST_PAGE_REACTIONS = ("◀️", "▶️")
+HELP_EXPAND_REACTION = "📖"
+PLAYLIST_PREDOWNLOAD_ENABLED = (
+    os.getenv("PLAYLIST_PREDOWNLOAD_ENABLED", "").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 
 def is_safe_download_path(file_path: str, video_id: Optional[str] = None) -> bool:
     """Only allow deletion of yt-dlp media files created in this checkout."""
@@ -80,6 +92,21 @@ def save_downloads_metadata(context: str):
             json.dump(downloaded, f)
     except Exception as e:
         logger.error(f"Failed to save downloads metadata after {context}: {e}")
+
+def write_json_atomic(path: str, payload: dict):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2)
+            f.write("\n")
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 downloaded = {}
 if os.path.isfile(downloads_file):
@@ -211,6 +238,9 @@ def normalize_youtube_query(query: str):
     if video_id:
         return youtube_watch_url + video_id, video_id
     return query, None
+
+def youtube_url_for_track(track: dict) -> str:
+    return track.get('webpage_url') or youtube_watch_url + str(track.get('id') or '')
 
 def is_youtube_host(hostname: str) -> bool:
     host = hostname.lower().rstrip(".")
@@ -432,6 +462,9 @@ def can_control_voice(user) -> bool:
     if client.current_voice_channel is None:
         return True
     return user_in_bot_voice_channel(user)
+
+def user_id_value(user) -> int:
+    return int(getattr(user, "id", 0) or 0)
 
 async def require_voice_control(ctx, action: str = "control playback") -> bool:
     if can_control_voice(ctx.user):
