@@ -737,7 +737,10 @@ class SetupAssistant:
         service_content = render_systemd_service(service_user, workdir)
         print("Service preview:")
         print(color("-" * 62, "36"))
-        print(service_content.rstrip())
+        print(f"  User: {service_user}")
+        print(f"  WorkingDirectory: {workdir}")
+        print("  ExecStart: <generated>")
+        print("  Output log: <generated>")
         print(color("-" * 62, "36"))
         print("The assistant will copy this through a private temporary file if you confirm.")
         if self.ask_yes_no("Install and start the systemd service now?", default=False):
