@@ -46,6 +46,7 @@ ENV_FIELDS = [
     "QUOTES_ID",
     "ADMIN_USER_ID",
     "ADMIN_ROLE_NAME",
+    "ALLOW_ADMIN_ROLE_NAME",
     "ADMIN_ROLE_ID",
     "ADMIN_USERNAME",
 ]
@@ -193,8 +194,10 @@ def render_env_example() -> str:
         QUOTES_ID=0
         # ADMIN_USER_ID gives one Discord user admin access.
         ADMIN_USER_ID=
-        # Admin role by name. This is the default and easiest role setup.
+        # Production admin access should use ADMIN_USER_ID or ADMIN_ROLE_ID.
+        # Role-name admin is for development/compatibility only.
         ADMIN_ROLE_NAME={DEFAULT_ADMIN_ROLE_NAME}
+        ALLOW_ADMIN_ROLE_NAME=false
         # Optional stable role-id alternative/add-on. Leave blank unless you copied the role id.
         ADMIN_ROLE_ID=
         """
@@ -279,6 +282,15 @@ def render_systemd_service(service_user: str, workdir: Path) -> str:
         ExecStart={python} {workdir / "main.py"}
         Restart=on-failure
         RestartSec=5
+
+        NoNewPrivileges=true
+        PrivateTmp=true
+        ProtectSystem=full
+        ProtectHome=true
+        ReadWritePaths={workdir}
+        CapabilityBoundingSet=
+        LockPersonality=true
+        RestrictSUIDSGID=true
 
         StandardOutput=append:{workdir / "output.log"}
         StandardError=append:{workdir / "output.log"}
@@ -445,8 +457,8 @@ class SetupAssistant:
     def collect_admin_role(self) -> None:
         print(
             textwrap.fill(
-                "Admin access can come from your user id, an admin role name, or an optional "
-                "admin role id. The role name is the default and easiest setup path.",
+                "Admin access should come from your user id or a stable admin role id. "
+                "Role-name admin is available only as an explicit development/compatibility fallback.",
                 78,
             )
         )
@@ -459,6 +471,14 @@ class SetupAssistant:
         )
         if not role_name:
             self.set_value("ADMIN_ROLE_NAME", DEFAULT_ADMIN_ROLE_NAME)
+
+        if role_name and self.ask_yes_no(
+            "Enable role-name admin fallback? Use this only for development/compatibility.",
+            default=False,
+        ):
+            self.set_value("ALLOW_ADMIN_ROLE_NAME", "true")
+        else:
+            self.set_value("ALLOW_ADMIN_ROLE_NAME", "false")
 
         existing_role_id = self.values.get("ADMIN_ROLE_ID") or env_default(self.defaults, "ADMIN_ROLE_ID", "")
         if self.ask_yes_no(
@@ -631,8 +651,8 @@ class SetupAssistant:
         for key in ENV_FIELDS:
             print(f"  {key}: {mask_value(key, self.values.get(key, ''))}")
         print()
-        print("The bot will use ADMIN_USER_ID, ADMIN_ROLE_NAME, and optional ADMIN_ROLE_ID for admin access.")
-        print("ADMIN_ROLE_NAME is the default role setup; the bot will still start if that role is missing.")
+        print("The bot will use ADMIN_USER_ID and ADMIN_ROLE_ID for production admin access.")
+        print("ADMIN_ROLE_NAME works only when ALLOW_ADMIN_ROLE_NAME=true.")
         return self.ask_yes_no("Write these values to .env now?", default=True)
 
     def write_files(self) -> None:
@@ -819,15 +839,22 @@ def self_test() -> None:
     rendered = render_env({"BOT_TOKEN": "token", "MY_GUILD": "1", "ADMIN_USERNAME": "ignored"})
     assert "BOT_TOKEN=" in rendered
     assert "ADMIN_USERNAME" not in rendered
-    assert rendered.find("ADMIN_ROLE_NAME") < rendered.find("ADMIN_ROLE_ID")
-    assert "replace_with_your_discord_bot_token" in render_env_example()
-    assert render_env_example().find("ADMIN_ROLE_NAME") < render_env_example().find("ADMIN_ROLE_ID")
+    rendered_lines = rendered.splitlines()
+    assert rendered_lines.index("ADMIN_ROLE_NAME=") < rendered_lines.index("ALLOW_ADMIN_ROLE_NAME=")
+    assert rendered_lines.index("ALLOW_ADMIN_ROLE_NAME=") < rendered_lines.index("ADMIN_ROLE_ID=")
+    env_example = render_env_example()
+    assert "replace_with_your_discord_bot_token" in env_example
+    example_lines = env_example.splitlines()
+    assert example_lines.index(f"ADMIN_ROLE_NAME={DEFAULT_ADMIN_ROLE_NAME}") < example_lines.index("ALLOW_ADMIN_ROLE_NAME=false")
+    assert example_lines.index("ALLOW_ADMIN_ROLE_NAME=false") < example_lines.index("ADMIN_ROLE_ID=")
     assert build_venv_commands()[0][-3:] == ["-m", "venv", "venv"]
     assert build_screen_start_command()[:4] == ["screen", "-S", "bot", "-dm"]
     service_text = render_systemd_service("botuser", Path("/srv/discordmusic"))
     assert "BOT_TOKEN" not in service_text
     assert "MY_GUILD" not in service_text
     assert "QUOTES_ID" not in service_text
+    assert "NoNewPrivileges=true" in service_text
+    assert "ReadWritePaths=/srv/discordmusic" in service_text
     temp_service = write_private_temp_service(service_text)
     try:
         assert temp_service.stat().st_mode & 0o777 == 0o600

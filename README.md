@@ -45,12 +45,20 @@ QUOTES_ID=0  # optional quotes channel id, or 0 to disable quotes
 
 # admin configuration
 ADMIN_USER_ID=your_discord_user_id
-ADMIN_ROLE_NAME=Bottiadmin
 ADMIN_ROLE_ID=optional_admin_role_id
+# Production admin access should use ADMIN_USER_ID or ADMIN_ROLE_ID.
+# Role-name admin is for development/compatibility only.
+ADMIN_ROLE_NAME=Bottiadmin
+ALLOW_ADMIN_ROLE_NAME=false
 
 # optional runtime tuning
 DOWNLOAD_DELETE_DELAY_SECONDS=600
+YTDLP_NO_CHECK_CERTIFICATE=false
+MAX_PLAYLIST_TRACKS=100
+MAX_URLS_PER_MESSAGE=10
 ```
+
+Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS certificates. Set it to `true` only as a temporary debug override. Guided `/playlist new` accepts up to `MAX_URLS_PER_MESSAGE` YouTube links per message and stores up to `MAX_PLAYLIST_TRACKS` tracks per playlist creation session.
 
 ---
 

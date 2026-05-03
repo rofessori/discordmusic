@@ -48,10 +48,33 @@ PLAYLIST_CREATION_FINISH_WORDS = {"done", "finish", "valmis", "loppu", "stop"}
 PLAYLIST_CREATION_CANCEL_WORDS = {"cancel", "peru", "abort"}
 PLAYLIST_QUEUE_IMPORT_MODES = {"currentqueue", "jono"}
 HELP_EXPAND_REACTION = "📖"
+TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+
+def env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in TRUTHY_ENV_VALUES
+
+def env_int(name: str, default: int, minimum: int = 1) -> int:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        parsed = int(value.strip())
+    except ValueError:
+        raise RuntimeError(f"{name} must be a number.") from None
+    if parsed < minimum:
+        raise RuntimeError(f"{name} must be at least {minimum}.")
+    return parsed
+
 PLAYLIST_PREDOWNLOAD_ENABLED = (
-    os.getenv("PLAYLIST_PREDOWNLOAD_ENABLED", "").strip().lower()
-    in {"1", "true", "yes", "on"}
+    env_flag("PLAYLIST_PREDOWNLOAD_ENABLED")
 )
+YTDLP_NO_CHECK_CERTIFICATE = env_flag("YTDLP_NO_CHECK_CERTIFICATE", False)
+ALLOW_ADMIN_ROLE_NAME = env_flag("ALLOW_ADMIN_ROLE_NAME", False)
+MAX_PLAYLIST_TRACKS = env_int("MAX_PLAYLIST_TRACKS", 100)
+MAX_URLS_PER_MESSAGE = env_int("MAX_URLS_PER_MESSAGE", 10)
 
 def is_safe_download_path(file_path: str, video_id: Optional[str] = None) -> bool:
     """Only allow deletion of yt-dlp media files created in this checkout."""
@@ -145,7 +168,6 @@ ytdl_options = {
     'outtmpl': os.path.join(songs_dir, '%(extractor)s-%(id)s-%(title)s.%(ext)s'),
     'restrictfilenames': True,
     'noplaylist': True,
-    'nocheckcertificate': True,
     'check_formats': False,
     'logtostderr': False,
     'quiet': True,
@@ -156,6 +178,8 @@ ytdl_options = {
     'verbose': False,
     'logger': logger
 }
+if YTDLP_NO_CHECK_CERTIFICATE:
+    ytdl_options['nocheckcertificate'] = True
 YTDLP_JS_RUNTIMES = {'deno': {}}
 node_path = shutil.which("node")
 if node_path:
@@ -431,7 +455,11 @@ def run_startup_diagnostics() -> StartupReport:
 
     if ADMIN_USERNAME:
         report.warnings.append(
-            "ADMIN_USERNAME is configured but ignored for security. Use ADMIN_USER_ID, ADMIN_ROLE_ID, or ADMIN_ROLE_NAME."
+            "ADMIN_USERNAME is configured but ignored for security. Use ADMIN_USER_ID or ADMIN_ROLE_ID."
+        )
+    if ALLOW_ADMIN_ROLE_NAME:
+        report.warnings.append(
+            "ALLOW_ADMIN_ROLE_NAME is enabled. Use ADMIN_USER_ID or ADMIN_ROLE_ID for production admin access."
         )
 
     env_file = os.path.join(BASE_DIR, ".env")
@@ -503,7 +531,7 @@ def is_user_admin(user) -> bool:
     for role in getattr(user, "roles", []):
         if ADMIN_ROLE_ID and getattr(role, "id", None) == ADMIN_ROLE_ID:
             return True
-        if role.name == ADMIN_ROLE_NAME:
+        if ALLOW_ADMIN_ROLE_NAME and ADMIN_ROLE_NAME and role.name == ADMIN_ROLE_NAME:
             return True
     # 2) optional user-based check (only if you set ADMIN_USER_ID)
     user_id = getattr(user, "id", None)
@@ -2306,7 +2334,11 @@ async def create_playlist_from_queue(ctx, name: str, visibility: str = "private"
 async def add_urls_to_playlist_session(session: PlaylistCreationSession, user, urls: list) -> tuple:
     added = []
     failed = []
+    limit_hit = False
     for url in urls:
+        if len(session.tracks) + len(added) >= MAX_PLAYLIST_TRACKS:
+            limit_hit = True
+            break
         try:
             track = await fetch_track(url, requested_by=user)
             if track.get("needs_confirm"):
@@ -2317,7 +2349,7 @@ async def add_urls_to_playlist_session(session: PlaylistCreationSession, user, u
             logger.warning(f"Failed to add URL to playlist creation session: {url}: {exc}")
             failed.append(url)
     session.tracks.extend(added)
-    return added, failed
+    return added, failed, limit_hit
 
 async def handle_playlist_creation_message(msg) -> bool:
     if getattr(msg.author, "bot", False):
@@ -2370,13 +2402,31 @@ async def handle_playlist_creation_message(msg) -> bool:
                 "That does not look like a YouTube URL. Send a YouTube link, `done` to finish, or `cancel` to stop."
             )
             return True
-        added, failed = await add_urls_to_playlist_session(session, msg.author, urls)
+        if len(urls) > MAX_URLS_PER_MESSAGE:
+            await msg.channel.send(
+                f"You can send up to {MAX_URLS_PER_MESSAGE} YouTube link(s) at a time. "
+                "Send fewer links, `done` to finish, or `cancel` to stop."
+            )
+            return True
+        if len(session.tracks) >= MAX_PLAYLIST_TRACKS:
+            await msg.channel.send(
+                f"This playlist can hold up to {MAX_PLAYLIST_TRACKS} track(s). "
+                "Type `done` to save it or `cancel` to stop."
+            )
+            return True
+        added, failed, limit_hit = await add_urls_to_playlist_session(session, msg.author, urls)
         parts = []
         if added:
             parts.append(f"Added {len(added)} track(s).")
         if failed:
             parts.append(f"Could not add {len(failed)} link(s).")
-        parts.append("Add another YouTube URL, or type `done`.")
+        if limit_hit or len(session.tracks) >= MAX_PLAYLIST_TRACKS:
+            parts.append(
+                f"This playlist can hold up to {MAX_PLAYLIST_TRACKS} track(s). "
+                "Type `done` to save it or `cancel` to stop."
+            )
+        else:
+            parts.append("Add another YouTube URL, or type `done`.")
         await msg.channel.send(" ".join(parts))
         return True
     return False
