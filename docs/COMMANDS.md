@@ -7,7 +7,7 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | command | purpose |
 | --- | --- |
 | `/join` | join the voice channel you are currently in. |
-| `/play <url or search>` | play a youtube url or search result immediately, or add it to the queue if something is already playing. |
+| `/play <youtube url or search>` | play a youtube url or search result immediately, or add it to the queue if something is already playing. raw non-youtube urls are rejected. |
 | `/playtop <query>` | add a track to the front of the queue so it plays next. if nothing is playing, it starts immediately. |
 | `/enqueue <query>` | add a track to the end of the queue. |
 | `/q <query>` | alias for `/enqueue`. |
@@ -15,11 +15,11 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/queuelist [links]` | alias for `/queue`. |
 | `/queuefirst <position>` | move an existing queued song to the front of the queue by its 1-based position. |
 | `/qfirst <position>` | alias for `/queuefirst`. |
-| `/skip` | skip the current track and continue to the next queued track. |
-| `/stop` | stop playback, clear the queue, and disconnect from voice. |
-| `/pause` | pause the current playing audio. |
-| `/resume` | resume paused audio. |
-| `/volume <1-100>` | set playback volume from 1 to 100 percent. |
+| `/skip` | skip the current track and continue to the next queued track. requires the same voice channel unless the user is an admin. |
+| `/stop` | stop playback, clear the queue, and disconnect from voice. requires the same voice channel unless the user is an admin. |
+| `/pause` | pause the current playing audio. requires the same voice channel unless the user is an admin. |
+| `/resume` | resume paused audio. requires the same voice channel unless the user is an admin. |
+| `/volume <1-100>` | set playback volume from 1 to 100 percent. requires the same voice channel unless the user is an admin. |
 | `/now` | show the currently playing song. |
 | `/nytsoi` | finnish alias for `/now`. |
 | `/getqueue` | list all songs requested in the current session and show whether they are playing, queued, played, or removed. |
@@ -28,17 +28,17 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 
 | reaction | purpose |
 | --- | --- |
-| `◀️` | replay the previous track when one is available. |
-| `⏸️` | pause or resume playback. |
-| `▶️` | skip to the next track. |
-| `📜` | toggle the current queue above the now-playing message. |
+| `◀️` | replay the previous track when one is available. requires the same voice channel unless the user is an admin. |
+| `⏸️` | pause or resume playback. requires the same voice channel unless the user is an admin. |
+| `▶️` | skip to the next track. requires the same voice channel unless the user is an admin. |
+| `📜` | toggle the current queue above the now-playing message. requires the same voice channel unless the user is an admin. |
 
 ## queue management
 
 | command | purpose |
 | --- | --- |
-| `/clear_queue` | clear the current song queue. admins are prompted to optionally delete downloaded files. |
-| `/purgequeue` | delete downloaded song files from disk while keeping the queue intact. the currently playing file is not deleted. |
+| `/clear_queue` | clear the current song queue. requires the same voice channel unless the user is an admin; admins are prompted to optionally delete downloaded files. |
+| `/purgequeue` | delete downloaded song files from disk while keeping the queue intact. admin only; the currently playing file is not deleted. |
 | `/restorequeue` | restore a recently cleared queue or a queue saved during reboot. admin only, time-limited. |
 
 ## admin

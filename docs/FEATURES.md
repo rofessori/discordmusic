@@ -11,7 +11,7 @@ the bot joins a discord voice channel, resolves youtube urls or search text with
 ## playback technology
 
 - `discord.py[voice]` provides slash commands, guild command sync, voice connection handling, and reaction events.
-- `yt-dlp` resolves youtube urls or search terms, extracts metadata, checks duration/filesize, and downloads audio when download mode is enabled.
+- `yt-dlp` resolves youtube urls or search terms, extracts metadata, checks duration/filesize, and downloads audio when download mode is enabled. raw non-youtube urls are rejected before extraction.
 - `ffmpeg` feeds the selected audio source into discord voice playback.
 - `yt-dlp-ejs` plus `deno` or `node` supports current youtube javascript challenge handling.
 - `.env` values configure the bot token, guild id, quotes channel id, and optional admin identity.
@@ -27,6 +27,8 @@ download mode exists to make playback more stable after extraction succeeds: onc
 - schedules played files for deletion after playback.
 - enforces duration and cache-size limits, with stricter behavior for non-admin users.
 - asks admins to confirm unusually large downloads instead of downloading silently.
+- refuses downloads when free disk space is below the configured safety floor.
+- deletes only validated yt-dlp media files from the bot download directory.
 
 ## stream-only mode
 
@@ -36,7 +38,7 @@ admins can use `/toggledownload` to switch between download-and-play and stream-
 
 the queue is an in-memory list of upcoming track dictionaries. `/play` starts playback immediately when nothing is playing, or queues the track when something is already playing. `/enqueue` and `/q` add to the end of the queue. `/playtop` inserts a new track at the front so it plays next. `/queuefirst` and `/qfirst` move an existing queued item to the front by its queue position. `/queue links:true` can show youtube urls with queued songs unless an admin has disabled queue links.
 
-when a track ends or is skipped, the bot pops the next queued track and starts it. session history is also kept so `/getqueue` can show whether requested songs are playing, queued, played, or removed.
+when a track ends or is skipped, the bot pops the next queued track and starts it. session history is also kept so `/getqueue` can show whether requested songs are playing, queued, played, or removed. non-admin queueing is capped to limit public-server abuse.
 
 ## now-playing controls
 
@@ -49,7 +51,15 @@ the now-playing message is the control surface for playback. it shows:
 
 the bot tries to edit the latest now-playing message when no one has posted after it in the same channel. if another message exists after it, the bot sends a new now-playing message and removes playback-control reactions from the old one.
 
-the `📜` reaction toggles the current queue above the now-playing block. the queue section uses bold numbered titles, optional italic urls, a divider, and then the current song. admins can use `/disablelinks` to hide urls from queue-style displays for the current bot session.
+the `📜` reaction toggles the current queue above the now-playing block. the queue section uses bold numbered titles, optional italic urls, a divider, and then the current song. admins can use `/disablelinks` to hide urls from queue-style displays for the current bot session. users must be in the same voice channel as the bot to use playback-affecting commands or now-playing reactions, unless they are admins.
+
+## security hardening
+
+- media input is youtube-only for URLs; plain search text is still supported.
+- local, private-network, and non-youtube URLs are rejected before `yt-dlp` runs.
+- admin privileges come from `ADMIN_ROLE_NAME` or numeric `ADMIN_USER_ID`; username-based admin overrides are ignored.
+- `/purgequeue` is admin-only and all downloaded-file deletion goes through path validation.
+- dependency minimums include `aiohttp>=3.13.4,<4.0` for 2026 DoS fixes and `python-dotenv>=1.2.2,<2.0` for the `.env` symlink rewrite fix.
 
 ## status and session audit
 
