@@ -24,7 +24,7 @@ download mode exists to make playback more stable after extraction succeeds: onc
 
 - reuses cached files when the same youtube video is requested again.
 - removes cached files older than one hour on startup.
-- schedules played files for deletion after playback.
+- schedules played files for deletion after playback. the default delay is 600 seconds and can be changed with `DOWNLOAD_DELETE_DELAY_SECONDS` or at runtime by admins with `/setdeletetime <seconds>`.
 - enforces duration and cache-size limits, with stricter behavior for non-admin users.
 - asks admins to confirm unusually large downloads instead of downloading silently.
 - refuses downloads when free disk space is below the configured safety floor.
@@ -44,13 +44,15 @@ when a track ends or is skipped, the bot pops the next queued track and starts i
 
 playlists are stored locally under `playlists/<safe-name>-<playlistid>/metadata.json`. each playlist has an 8-character url-safe id, name, generated timestamp, lock state, visibility, owner discord id/name, manager user ids, and ordered track entries.
 
-users can create private or public playlists with `/playlist new`, browse them with `/playlist list`, inspect/edit with `/playlist edit`, add the current song or a queued song with `/playlist add`, and allow another user to manage the playlist with `/playlist addmod`. owners and admins can lock playlists so managers cannot edit them.
+users can create private or public playlists with `/playlist new`. without arguments it starts a guided flow: the bot asks for a playlist name, accepts one or more youtube urls, supports `done`/`finish`/`valmis`/`loppu`/`stop`, and saves only when the user finishes. users can also import the upcoming queue directly with `/playlist new <name> currentqueue`; `jono` is a finnish alias for that import mode.
+
+users can browse playlists with `/playlist list`, inspect with `/playlist show`, inspect/edit with `/playlist edit`, play directly with `/playlist play`, add the current song, a queued song, or a youtube url with `/playlist add`, and bulk-fill a playlist from queued songs with `/playlist fill current <name>`. fill skips songs already in that playlist. owners can allow another user to manage the playlist with `/playlist addmod`. owners and admins can rename playlists with `/playlist rename` and lock playlists so managers cannot edit them.
 
 playlist removal is soft by default. `/playlist remove <name>` asks for confirmation, marks the playlist deleted, and keeps it rescueable for 600 seconds. `/playlist rescue` lists deleted playlists that still exist on disk, and `/playlist rescue <name>` restores one for the owner or an admin. admins may remove immediately with `-now`; `-now -force` also skips the confirmation prompt. admins editing another user's playlist through edit/remove/move are reminded and asked to confirm unless they pass `-force`.
 
 `playlists-blackbox.json` is an append-only audit record in the repository root. it stores playlist create/remove/rescue events with playlist name/id, owner, managers, and the playlist's youtube link list.
 
-playlist references accept both `playlist:name` and exact playlist names. `/play playlist:name` starts or queues a playlist. `/enqueue playlist:name` and `/q playlist:name` queue it. `/queuefirst playlist:name` and `/qfirst playlist:name` move an existing playlist block to the front, or queue that playlist to play next.
+playlist references accept both `playlist:name` and exact playlist names. `/playlist play <name>` and `/play playlist:name` start or queue a playlist. `/enqueue playlist:name` and `/q playlist:name` queue it. `/queuefirst playlist:name` and `/qfirst playlist:name` move an existing playlist block to the front, or queue that playlist to play next.
 
 while a playlist is actively playing, normal song requests are placed after the active playlist block and the requester gets a `👍`/`👎` prompt to move the song next instead.
 
@@ -69,7 +71,7 @@ the bot tries to edit the latest now-playing message when no one has posted afte
 
 the `📜` reaction toggles the current queue above the now-playing block. the queue section uses bold numbered titles, optional italic urls, a divider, and then the current song. admins can use `/disablelinks` to hide urls from queue-style displays for the current bot session. users must be in the same voice channel as the bot to use playback-affecting commands or now-playing reactions, unless they are admins.
 
-playlist list/edit views use `◀️` and `▶️` reactions for pages. only the newest playlist view remains interactive. `/help` is compact by default and expands in place when users react with `📖`.
+playlist list/edit views use `◀️` and `▶️` reactions for pages. only the newest playlist view remains interactive. `/help` is compact by default and expands in place when users react with `📖`. playlist help is available with `/help topic:playlists`, and detailed subcommand pages use `/help topic:playlist command:new` style selectors.
 
 ## security hardening
 

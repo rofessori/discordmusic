@@ -47,6 +47,9 @@ QUOTES_ID=0  # optional quotes channel id, or 0 to disable quotes
 ADMIN_USER_ID=your_discord_user_id
 ADMIN_ROLE_NAME=Bottiadmin
 ADMIN_ROLE_ID=optional_admin_role_id
+
+# optional runtime tuning
+DOWNLOAD_DELETE_DELAY_SECONDS=600
 ```
 
 ---
@@ -74,18 +77,27 @@ ADMIN_ROLE_ID=optional_admin_role_id
 
 - **playlists**:
   - `/playlist list`
-  - `/playlist new <name> [visibility]`
+  - `/playlist new` guided creation flow
+  - `/playlist new <name> currentqueue` (also accepts `jono`)
+  - `/playlist new <name> [private|public]`
   - `/playlist edit <name>`
-  - `/playlist add <playlist> <current|queue> [queue_position]`
+  - `/playlist show <name>`
+  - `/playlist play <name>`
+  - `/playlist add <playlist> <current|queue|url> [queue_position] [url]`
+  - `/playlist fill current <playlist>`
   - `/playlist addmod <playlist> <user>`
   - `/playlist remove <playlist> [flags]`
+  - `/playlist delete <playlist> [flags]`
+  - `/playlist rename <playlist> <new_name> [flags]`
   - `/playlist removesong <playlist> <position>`
   - `/playlist move <playlist> <from_position> <to_position>`
   - `/playlist lock <playlist> <locked>`
+  - `/help topic:playlists` and `/help topic:playlist command:new`
 
 - **admin-only**:
   - `/purgequeue`
   - `/playlist predownload <playlist>` (disabled unless `PLAYLIST_PREDOWNLOAD_ENABLED=true`)
+  - `/setdeletetime <seconds>`
   - `/togglelog`
   - `/toggledownload`
   - `/disablelinks`

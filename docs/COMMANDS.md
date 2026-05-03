@@ -46,12 +46,21 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | command | purpose |
 | --- | --- |
 | `/playlist list` | list your playlists first, then visible public playlists, with reaction pages. |
-| `/playlist new <name> [visibility]` | create a private or public playlist. |
+| `/playlist new` | start a guided playlist creation flow that asks for the name and youtube urls. |
+| `/playlist new <name> [visibility]` | create an empty private or public playlist. |
+| `/playlist new <name> currentqueue` | create a playlist from the upcoming queue. |
+| `/playlist new <name> jono` | finnish alias for `currentqueue`. |
+| `/playlist show <name>` | show readable playlist details without requiring edit permission. |
+| `/playlist play <name>` | start a playlist now, or queue it if something is already playing. |
 | `/playlist edit <name> [flags]` | show editable playlist details and song pages. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
 | `/playlist add <playlist> current` | add the currently playing song to a playlist you can edit. |
 | `/playlist add <playlist> queue <position>` | add a queued song by queue number to a playlist you can edit. |
+| `/playlist add <playlist> url <url>` | add a youtube url directly to a playlist you can edit. |
+| `/playlist fill current <playlist>` | add queued songs that are not already in the playlist. |
 | `/playlist addmod <playlist> <user>` | add a manager to a playlist you own. |
 | `/playlist remove <playlist> [flags]` | remove a whole playlist after confirmation. it can be rescued for 600 seconds. admins can use `-now`; `-now -force` skips confirmation. |
+| `/playlist delete <playlist> [flags]` | alias for `/playlist remove`. |
+| `/playlist rename <playlist> <new_name> [flags]` | rename a playlist you own or manage. admins can rename any playlist after confirmation unless `-force` is supplied. |
 | `/playlist removesong <playlist> <position> [flags]` | remove a song from a playlist you can edit. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
 | `/playlist move <playlist> <from> <to> [flags]` | reorder songs inside a playlist you can edit. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
 | `/playlist lock <playlist> <locked>` | lock or unlock manager edits. owner/admin only. |
@@ -64,6 +73,7 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/togglelog` | toggle verbose debug logging. admin only. |
 | `/toggledownload` | switch between download-and-play mode and stream-only mode. admin only. |
 | `/disablelinks` | toggle whether queue-style displays are allowed to show youtube links. admin only. |
+| `/setdeletetime <seconds>` | set how long downloaded song files wait after playback before delayed cleanup deletes them. admin only. |
 | `/reboot` | save the queue, ask for confirmation, disconnect, and exit the bot process. admin only. |
 | `/status [view]` | show runtime diagnostics, the full suggestion session, or the last five commands. admin only. |
 
@@ -85,5 +95,7 @@ status views:
 | command | purpose |
 | --- | --- |
 | `/help` | show the in-discord command summary. |
+| `/help topic:playlists` | show the playlist quick-start help page. |
+| `/help topic:playlist command:<subcommand>` | show a manpage-style playlist subcommand help page. available pages: `new`, `list`, `show`, `play`, `edit`, `add`, `fill`, `addmod`, `remove`, `delete`, `rename`, `removesong`, `move`, `lock`, `rescue`, `predownload`. |
 
 React `📖` on the help message to expand the compact help into the full command list.
