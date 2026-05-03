@@ -95,12 +95,12 @@ Projectwide bugcheck follow-up:
 ## 2026-05-03 Setup Assistant TUI Plan & Notes
 Plan implemented for `setup_assistant.py`:
 - Replace the basic prompt script with a stdlib-only colored terminal assistant that works before dependencies are installed.
-- Support guided setup and quick advanced setup. Guided setup explains the Discord Developer Portal, bot token, user id, role id/name, optional username note, optional quotes channel id, server id, OAuth2 invite permissions, dependency install, `screen`, and optional systemd service.
+- Support guided setup and quick advanced setup. Guided setup explains the Discord Developer Portal, bot token, user id, admin role name by default, optional role id, optional username note, optional quotes channel id, server id, OAuth2 invite permissions, dependency install, `screen`, and optional systemd service.
 - Save progress to `setup.tmp` after each meaningful step and keep that file mode `0600` because it can contain the bot token. F1 or `:save` saves and exits; F2, `:quit`, or `:nosave` exits without saved progress.
 - Write real secrets only to `.env`. `.env.example` is generated or refreshed with placeholders only, never with the actual bot token.
 - Use subprocess argument lists for setup commands, not `shell=True`; show each command before running it and ask before package install, bot start, or systemd install.
 - Detect `screen` install commands for Debian/Ubuntu, Fedora/RHEL, Arch, and macOS/Homebrew. Let `sudo` prompt normally when needed.
-- Keep the bot runtime tolerant of optional quotes by allowing `QUOTES_ID=0`, and prefer stable `ADMIN_ROLE_ID` with `ADMIN_ROLE_NAME` as fallback.
+- Keep the bot runtime tolerant of optional quotes by allowing `QUOTES_ID=0`. Admin role setup should prefer `ADMIN_ROLE_NAME=Bottiadmin` as the default user-facing path and keep `ADMIN_ROLE_ID` as an optional stable-id add-on.
 
 Setup security checks:
 - Do not commit `.env`, `.env.backup`, `setup.tmp`, or generated local service files.

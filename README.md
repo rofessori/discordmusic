@@ -45,8 +45,8 @@ QUOTES_ID=0  # optional quotes channel id, or 0 to disable quotes
 
 # admin configuration
 ADMIN_USER_ID=your_discord_user_id
-ADMIN_ROLE_ID=optional_admin_role_id
 ADMIN_ROLE_NAME=Bottiadmin
+ADMIN_ROLE_ID=optional_admin_role_id
 ```
 
 ---

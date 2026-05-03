@@ -46,8 +46,8 @@ ENV_FIELDS = [
     "MY_GUILD",
     "QUOTES_ID",
     "ADMIN_USER_ID",
-    "ADMIN_ROLE_ID",
     "ADMIN_ROLE_NAME",
+    "ADMIN_ROLE_ID",
     "ADMIN_USERNAME",
 ]
 SECRET_FIELDS = {"BOT_TOKEN"}
@@ -192,11 +192,12 @@ def render_env_example() -> str:
         MY_GUILD=000000000000000000
         # Set QUOTES_ID=0 to skip the optional quotes feature.
         QUOTES_ID=0
-        # Prefer ADMIN_USER_ID and/or ADMIN_ROLE_ID because they are stable Discord ids.
+        # ADMIN_USER_ID gives one Discord user admin access.
         ADMIN_USER_ID=
-        ADMIN_ROLE_ID=
-        # Role-name fallback. The role does not have to exist for the bot to start.
+        # Admin role by name. This is the default and easiest role setup.
         ADMIN_ROLE_NAME={DEFAULT_ADMIN_ROLE_NAME}
+        # Optional stable role-id alternative/add-on. Leave blank unless you copied the role id.
+        ADMIN_ROLE_ID=
         """
     ).strip() + "\n"
 
@@ -419,6 +420,40 @@ class SetupAssistant:
         self.save()
         return mode
 
+    def collect_admin_role(self) -> None:
+        print(
+            textwrap.fill(
+                "Admin access can come from your user id, an admin role name, or an optional "
+                "admin role id. The role name is the default and easiest setup path.",
+                78,
+            )
+        )
+        role_name = self.ask_text(
+            "ADMIN_ROLE_NAME",
+            "Admin role name",
+            default=DEFAULT_ADMIN_ROLE_NAME,
+            allow_blank=True,
+            transform=lambda value: "" if value.lower() in {"skip", "none", "no", "-"} else value,
+        )
+        if not role_name:
+            self.set_value("ADMIN_ROLE_NAME", DEFAULT_ADMIN_ROLE_NAME)
+
+        existing_role_id = self.values.get("ADMIN_ROLE_ID") or env_default(self.defaults, "ADMIN_ROLE_ID", "")
+        if self.ask_yes_no(
+            "Add or keep an admin role id too?",
+            default=bool(existing_role_id),
+        ):
+            self.ask_text(
+                "ADMIN_ROLE_ID",
+                "Admin role id (optional, type skip to leave blank)",
+                allow_blank=True,
+                validator=validate_snowflake,
+                error="Role id must be a 17-20 digit Discord id, or blank.",
+                transform=normalize_optional_snowflake,
+            )
+        else:
+            self.set_value("ADMIN_ROLE_ID", "")
+
     def guided_discord_steps(self) -> None:
         self.title("step 1 - discord developer portal")
         print("Create a new Discord application or open the application you want this bot to use.")
@@ -463,27 +498,12 @@ class SetupAssistant:
         print(
             textwrap.fill(
                 "Create a server role for bot admins. The default name is Bottiadmin, "
-                "but you can use another name. If you can copy the role id, use it too; "
-                "role ids are safer than names because names can be changed.",
+                "but you can use another name. You can also add a role id if you want "
+                "a stable id-based admin role check.",
                 78,
             )
         )
-        role_name = self.ask_text(
-            "ADMIN_ROLE_NAME",
-            "Admin role name",
-            default=DEFAULT_ADMIN_ROLE_NAME,
-            allow_blank=True,
-        )
-        if not role_name:
-            self.set_value("ADMIN_ROLE_NAME", DEFAULT_ADMIN_ROLE_NAME)
-        self.ask_text(
-            "ADMIN_ROLE_ID",
-            "Admin role id (optional, type skip to leave blank)",
-            allow_blank=True,
-            validator=validate_snowflake,
-            error="Role id must be a 17-20 digit Discord id, or blank.",
-            transform=normalize_optional_snowflake,
-        )
+        self.collect_admin_role()
 
         self.title("step 5 - optional username label")
         print(
@@ -564,22 +584,7 @@ class SetupAssistant:
             validator=validate_snowflake,
             error="Server id must be a 17-20 digit Discord id.",
         )
-        self.ask_text(
-            "ADMIN_ROLE_ID",
-            "Admin role id (optional, type skip to leave blank)",
-            allow_blank=True,
-            validator=validate_snowflake,
-            error="Role id must be a 17-20 digit Discord id, or blank.",
-            transform=normalize_optional_snowflake,
-        )
-        role_name = self.ask_text(
-            "ADMIN_ROLE_NAME",
-            "Admin role name fallback (optional)",
-            default=DEFAULT_ADMIN_ROLE_NAME,
-            allow_blank=True,
-        )
-        if not role_name:
-            self.set_value("ADMIN_ROLE_NAME", DEFAULT_ADMIN_ROLE_NAME)
+        self.collect_admin_role()
         self.set_value("ADMIN_USERNAME", self.values.get("ADMIN_USERNAME", ""))
 
     def invite_walkthrough(self) -> None:
@@ -604,8 +609,8 @@ class SetupAssistant:
         for key in ENV_FIELDS:
             print(f"  {key}: {mask_value(key, self.values.get(key, ''))}")
         print()
-        print("The bot will use ADMIN_USER_ID and/or ADMIN_ROLE_ID for admin access.")
-        print("ADMIN_ROLE_NAME is only a fallback; the bot will still start if that role is missing.")
+        print("The bot will use ADMIN_USER_ID, ADMIN_ROLE_NAME, and optional ADMIN_ROLE_ID for admin access.")
+        print("ADMIN_ROLE_NAME is the default role setup; the bot will still start if that role is missing.")
         return self.ask_yes_no("Write these values to .env now?", default=True)
 
     def write_files(self) -> None:
@@ -775,8 +780,12 @@ def self_test() -> None:
     assert not validate_snowflake("abc")
     assert validate_quotes_id("0")
     assert normalize_optional_snowflake("skip") == ""
-    assert "BOT_TOKEN=" in render_env({"BOT_TOKEN": "token", "MY_GUILD": "1"})
+    rendered = render_env({"BOT_TOKEN": "token", "MY_GUILD": "1", "ADMIN_USERNAME": "ignored"})
+    assert "BOT_TOKEN=" in rendered
+    assert "ADMIN_USERNAME" not in rendered
+    assert rendered.find("ADMIN_ROLE_NAME") < rendered.find("ADMIN_ROLE_ID")
     assert "replace_with_your_discord_bot_token" in render_env_example()
+    assert render_env_example().find("ADMIN_ROLE_NAME") < render_env_example().find("ADMIN_ROLE_ID")
     assert build_venv_commands()[0][-3:] == ["-m", "venv", "venv"]
     assert build_screen_start_command()[:4] == ["screen", "-S", "bot", "-dm"]
     assert SERVICE_NAME in build_systemd_install_commands()[2]
