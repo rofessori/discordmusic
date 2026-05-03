@@ -68,6 +68,7 @@ Queue reaction completed work:
 - `/purgequeue` is admin-only. Non-admin playback controls and now-playing reactions require the user to be in the same voice channel as the bot.
 - Download cleanup must use `remove_download_file()`, which validates that the path is a tracked YouTube media file inside the bot directory before removal.
 - Downloaded song delayed cleanup defaults to `DOWNLOAD_DELETE_DELAY_SECONDS=600` and can be adjusted at runtime by admins with `/setdeletetime <seconds>`. The runtime command affects future cleanup schedules; already scheduled deletion tasks keep their original timer.
+- Auto-leave is controlled by admin `/autoleave <enabled> [delay_seconds]`. When enabled, if the bot is alone in voice it saves `current_track_info` plus the upcoming queue to `last_session_queue.tmp.json`, disconnects, and tells users to restore with `/play:last`. The slash command still routes through `/play` with `last`, `play:last`, or `/play:last` as the option value because Discord slash command names cannot contain `:`.
 - Keep `aiohttp>=3.13.4,<4.0` and `python-dotenv>=1.2.2,<2.0` in `requirements.txt` to satisfy the 2026 DoS/symlink security advisories without moving to aiohttp 4 prereleases.
 
 ## 2026-05-03 Playlist System Plan

@@ -1,4 +1,6 @@
 ## 2026-05-03
+- Added admin `/autoleave <enabled> [delay_seconds]` and `/play:last` recovery so the bot can leave after being alone, save the current song plus queue, and resume that saved session later.
+- Improved help/status UX: compact `/help` now focuses on core playback commands, `📖` toggles expanded help open and closed, and `/status` wraps URLs in a code block when queue links are disabled.
 - Added admin `/setdeletetime <seconds>` and `DOWNLOAD_DELETE_DELAY_SECONDS` so downloaded song cleanup delay is configurable instead of hardwired to 600 seconds.
 - Added `/playlist fill current <playlist>` to bulk-add queued songs that are not already in the target playlist, with duplicate and missing-metadata skips reported to the user.
 - Redesigned playlist creation UX: `/playlist new` now starts a guided name-and-youtube-url flow with cancel/finish words and timeout cleanup, `/playlist new <name> currentqueue` imports the upcoming queue, and `/playlist new <name> jono` is supported as the Finnish queue-import alias.

@@ -749,7 +749,10 @@ def format_suggestion_record(record: SuggestionRecord, *, include_url=True) -> s
     else:
         lines.append(f"- suggestion: `{raw_value}`")
     if include_url and record.url:
-        lines.append(f"- url: {record.url}")
+        if client.queue_links_disabled:
+            lines.append(f"- url:\n```text\n{record.url}\n```")
+        else:
+            lines.append(f"- url: {record.url}")
     return "\n".join(lines)
 
 def format_command_record(record: CommandRecord) -> str:
@@ -833,8 +836,8 @@ def load_last_session_recovery() -> Optional[dict]:
         tracks = payload.get("tracks", [])
         if not isinstance(tracks, list) or not tracks:
             return None
-        payload["tracks"] = tracks
-        return payload
+    payload["tracks"] = tracks
+    return payload
     except Exception as exc:
         logger.error(f"Failed to load last session recovery file: {exc}")
         return None
@@ -847,10 +850,13 @@ def remove_last_session_recovery():
     except Exception as exc:
         logger.warning(f"Failed to remove last session recovery file: {exc}")
 
+def is_play_last_query(value: str) -> bool:
+    return str(value or "").strip().lower() in {"last", "play:last", "/play:last"}
+
 async def play_saved_track_now(voice, channel, track: dict):
     if not track.get("webpage_url") and track.get("id"):
         track["webpage_url"] = youtube_watch_url + str(track.get("id"))
-    if track.get('file') and os.path.isfile(track['file']):
+    if track.get('file') and is_safe_download_path(track['file'], str(track.get("id") or "")):
         source = discord.FFmpegPCMAudio(track['file'], options='-vn')
         player = discord.PCMVolumeTransformer(source, volume=client.volume)
     else:
@@ -870,7 +876,7 @@ async def restore_last_session(ctx) -> bool:
         await ctx.followup.send("No saved last session is available.")
         return False
     if client.currently_playing:
-        await ctx.followup.send("Something is already playing. Stop playback before using `/play last`.")
+        await ctx.followup.send("Something is already playing. Stop playback before using `/play:last`.")
         return False
     if not ctx.user.voice or not ctx.user.voice.channel:
         await ctx.followup.send("You need to join a voice channel first.")
@@ -905,7 +911,7 @@ async def restore_last_session(ctx) -> bool:
         return False
     remove_last_session_recovery()
     await ctx.followup.send(f"Restored last session with {len(tracks)} track(s).")
-    logger.info(f"Restored last session through /play last with {len(tracks)} track(s).")
+    logger.info(f"Restored last session through /play:last with {len(tracks)} track(s).")
     return True
 
 async def perform_auto_leave_if_still_alone(voice_channel):
@@ -920,6 +926,7 @@ async def perform_auto_leave_if_still_alone(voice_channel):
             return
         if not bot_is_alone_in_voice(voice_channel):
             return
+        notify_channel = getattr(client.current_track_message, "channel", None)
         saved_count = save_last_session_recovery(voice_channel)
         if not saved_count:
             logger.info("Auto-leave found no current song or queue to save.")
@@ -933,6 +940,13 @@ async def perform_auto_leave_if_still_alone(voice_channel):
             client.current_track_info = None
             client.current_track_message_show_queue = False
             await voice.disconnect()
+            if notify_channel and saved_count:
+                try:
+                    await notify_channel.send(
+                        f"Left voice because nobody was listening. Saved {saved_count} song(s); start again with `/play:last`."
+                    )
+                except Exception as exc:
+                    logger.warning(f"Failed to send auto-leave recovery message: {exc}")
             logger.info(f"Auto-left voice channel {getattr(voice_channel, 'name', voice_channel)} after being alone.")
         finally:
             client.auto_leave_disconnect_in_progress = False
@@ -1643,12 +1657,10 @@ def compact_help_message() -> str:
     return "\n".join([
         "**music bot help**",
         "/play <youtube url or search> - play or queue music",
-        "/play last - restore last auto-saved session",
+        "/play:last - restore last auto-saved session",
+        "/playtop <query> - add next",
         "/enqueue <query> (alias /q) - add to queue",
         "/queue - show queue",
-        "/playlist list - browse playlists",
-        "/playlist new - guided playlist creation",
-        "/help topic:playlists - playlist help",
         "/help - react 📖 for full help",
     ])
 
@@ -1657,7 +1669,7 @@ def expanded_help_message() -> str:
         "**music playback**",
         "/join - Join your voice channel.",
         "/play <YouTube URL, search, or playlist:name> - Play now or queue.",
-        "/play last - Restore the last auto-saved voice session.",
+        "/play:last - Restore the last auto-saved voice session.",
         "/playtop <query> - Play a song next.",
         "/enqueue <query or playlist:name> (alias: /q) - Add to queue.",
         "/queue [links] (alias: /queuelist) - Show upcoming songs.",
@@ -2020,6 +2032,7 @@ async def ensure_voice_for_playback(ctx):
             try:
                 voice = await ctx.user.voice.channel.connect()
                 client.current_voice_channel = voice
+                cancel_auto_leave_task("playback joined voice")
                 client.song_history = []
                 await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
             except Exception as e:
@@ -2460,7 +2473,8 @@ async def on_voice_state_update(member, before, after):
     # If the bot client leaves voice entirely, reset tracking state
     bot_id = getattr(client.user, "id", None)
     if bot_id and member.id == bot_id and after.channel is None:
-        cancel_auto_leave_task("bot disconnected")
+        if not client.auto_leave_disconnect_in_progress:
+            cancel_auto_leave_task("bot disconnected")
         client.current_voice_channel = None
         client.currently_playing = False
         client.auto_leave_disconnect_in_progress = False
@@ -2504,12 +2518,13 @@ async def on_reaction_add(reaction, user):
         return
     if client.help_message_id and reaction.message.id == client.help_message_id and str(reaction.emoji) == HELP_EXPAND_REACTION:
         try:
-            client.help_expanded = True
-            await reaction.message.edit(content=expanded_help_message())
+            client.help_expanded = not client.help_expanded
+            await reaction.message.edit(content=expanded_help_message() if client.help_expanded else compact_help_message())
             await reaction.message.remove_reaction(reaction.emoji, user)
-            logger.info(f"Expanded help message {reaction.message.id}.")
+            state = "expanded" if client.help_expanded else "compacted"
+            logger.info(f"{state.title()} help message {reaction.message.id}.")
         except Exception as exc:
-            logger.warning(f"Failed to expand help message: {exc}")
+            logger.warning(f"Failed to toggle help message: {exc}")
         return
     # Music control reactions on the "Now Playing" message
     if client.current_track_message and reaction.message.id == client.current_track_message.id:
@@ -2667,7 +2682,7 @@ async def play(ctx, *, url: str):
     """Plays a YouTube video's audio by URL or search term."""
     record_command(ctx)
     await ctx.response.defer()
-    if str(url or "").strip().lower() == "last":
+    if is_play_last_query(url):
         await restore_last_session(ctx)
         return
     playlist = resolve_playlist_reference(url, ctx.user)
