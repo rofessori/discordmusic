@@ -43,3 +43,15 @@ Completed work log:
 - Replaced duplicated announcement/reaction code in `/play`, `/playtop`, and `play_next_channel()` with the shared publisher.
 - Added `queue_first()` plus the `/queuefirst` and `/qfirst` slash commands, including empty queue, invalid position, and already-first responses.
 - Left confirmation reactions isolated: only the stored `client.current_track_message` receives playback-control handling or stale playback-control cleanup.
+- Added `INFO` logs for now-playing message edits, new now-playing sends, playback-control reaction additions/removals, and `/queuefirst`/`/qfirst` validation decisions so these actions are visible in `output.log` when stdout/stderr are redirected there. The systemd example now appends stderr to `output.log` too, matching Python logging's default stream.
+
+Queue reaction idea recorded before implementation:
+- Add a `📜` reaction to the current now-playing message. Toggling it should edit that message so the current queue appears at the top with styled titles and italic URLs, followed by a clean divider and the existing styled now-playing block.
+- The queue view should remember its open/closed state while the bot keeps editing the same now-playing message, but reset when a new now-playing message is sent.
+- Keep cleanup scoped to now-playing controls only: stale now-playing messages lose `◀️`, `⏸️`, `▶️`, and `📜`; `/reboot` confirmation `👍`/`👎` reactions remain separate.
+
+Queue reaction completed work:
+- Added `📜` to the now-playing control reactions and wired it to toggle a queue section inside the existing now-playing message.
+- The queue section renders at the top with bold numbered titles, italic YouTube URLs, a clean divider, and then the styled `🎵 Now playing:` block.
+- The queue-open state is preserved when the same now-playing message is edited for the next song, and reset when a fresh now-playing message is sent.
+- Reaction cleanup and logging now cover the `📜` control while leaving `/reboot` and other confirmation reactions keyed to their own messages.
