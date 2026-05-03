@@ -1,4 +1,6 @@
 /.env
+/.env.backup
+/setup.tmp
 /.idea
 /__pycache__
 

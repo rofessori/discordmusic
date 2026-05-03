@@ -25,28 +25,28 @@ also supports local saved playlists with owners, managers, public/private visibi
 
 ```bash
 cd discordmusic
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-cp .env.example .env   # ← edit .env with your values
-python main.py
+python3 setup_assistant.py
 ```
+
+the setup assistant guides you through the discord developer portal, writes `.env`,
+creates the venv, can install `screen`, can start the bot in a screen session,
+and can optionally install a systemd service on linux.
 
 ## setting up
 
-copy `.env.example` to `.env` and fill the following (replace with your real tokens and ids):
+the assistant is the easiest setup path. advanced users can still create `.env`
+manually with these values:
 
 ```bash
 # bot authentication
-bot_token=your_discord_bot_token
-my_guild=your_guild_id
-quotes_id=your_quotes_channel_id
+BOT_TOKEN=your_discord_bot_token
+MY_GUILD=your_guild_id
+QUOTES_ID=0  # optional quotes channel id, or 0 to disable quotes
 
-# admin configuration (defaults)
-admin_role_name=bottiadmin
-# optional admin user override:
-admin_user_id=
+# admin configuration
+ADMIN_USER_ID=your_discord_user_id
+ADMIN_ROLE_NAME=Bottiadmin
+ADMIN_ROLE_ID=optional_admin_role_id
 ```
 
 ---
