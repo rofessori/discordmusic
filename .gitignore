@@ -3,6 +3,7 @@
 /setup.tmp
 /last_session_queue.tmp.json
 /playlist-cache-policy.json
+/channel-volume-config.json
 /.idea
 /__pycache__
 

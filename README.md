@@ -59,7 +59,7 @@ MAX_PLAYLIST_TRACKS=100
 MAX_URLS_PER_MESSAGE=10
 ```
 
-Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS certificates. Set it to `true` only as a temporary debug override. Guided `/playlist new` accepts up to `MAX_URLS_PER_MESSAGE` YouTube links per message and stores up to `MAX_PLAYLIST_TRACKS` tracks per playlist creation session.
+Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS certificates. Set it to `true` only as a temporary debug override. Guided `/playlist new` accepts up to `MAX_URLS_PER_MESSAGE` YouTube links per message and stores up to `MAX_PLAYLIST_TRACKS` tracks per playlist creation session. The bot starts at 20% volume unless a voice-channel default has been saved by an admin.
 
 ---
 
@@ -74,10 +74,10 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/queue [links]` (alias: `/queuelist`)
   - `/queuefirst <position|playlist:name>` (alias: `/qfirst`)
   - react `📜` on now-playing to toggle the queue above the current song
-  - `/skip`
+  - `/skip` (non-admins vote)
   - `/pause` / `/resume`
-  - `/stop`
-  - `/volume <1–100>`
+  - `/stop` (non-admins vote)
+  - `/volume <1–100>` (non-admins vote)
   - `/now` (alias `/nytsoi`)
   - `/getqueue`
 
@@ -88,7 +88,7 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
 - **playlists**:
   - `/playlist list`
   - `/playlist new` guided creation flow
-  - `/playlist new <name> currentqueue` (also accepts `jono`)
+  - `/playlist new <name> current` (also accepts `currentqueue` and `jono`)
   - `/playlist new <name> [private|public]`
   - `/playlist edit <name>`
   - `/playlist show <name>`
@@ -113,6 +113,8 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/playlist predownload <playlist>` (disabled unless `PLAYLIST_PREDOWNLOAD_ENABLED=true`)
   - `/autoleave <enabled> [delay_seconds]`
   - `/setdeletetime <seconds>`
+  - `/volume_session <1–100>`
+  - `/volume_default <1–100>`
   - `/togglelog`
   - `/toggledownload`
   - `/disablelinks`

@@ -43,6 +43,8 @@ the queue is an in-memory list of upcoming track dictionaries. `/play` starts pl
 
 when a track ends or is skipped, the bot pops the next queued track and starts it. session history is also kept so `/getqueue` can show whether requested songs are playing, queued, played, or removed. non-admin queueing is capped to limit public-server abuse.
 
+`/skip`, `/stop`, and `/volume` are vote-based for non-admins in the bot's voice channel. quorum is 50% of the current human members in that voice channel, rounded up, and bots are excluded. admins bypass votes. the bot starts at 20% volume, admins can hard-set the current session with `/volume_session`, and admins can save a voice-channel default with `/volume_default` in `channel-volume-config.json`.
+
 admins can enable `/autoleave` so that if the bot is alone in voice for the configured delay, it saves the current song plus upcoming queue to `last_session_queue.tmp.json`, disconnects, and reports that the session can be started again with `/play:last`. the saved session is restored by running `/play` with `last`, `play:last`, or `/play:last` as the value.
 
 ## playlists
@@ -51,7 +53,7 @@ playlists are stored locally under `playlists/<safe-name>-<playlistid>/metadata.
 
 track entries include the youtube id, canonical youtube URL, cache key, cache mode, optional `cache_path`, media extension, and added-by metadata. if `cache_path` is missing or unsafe, playback ignores it and streams or downloads through the normal safe path.
 
-users can create private or public playlists with `/playlist new`. without arguments it starts a guided flow: the bot asks for a playlist name, accepts one or more youtube urls, supports `done`/`finish`/`valmis`/`loppu`/`stop`, and saves only when the user finishes. users can also import the upcoming queue directly with `/playlist new <name> currentqueue`; `jono` is a finnish alias for that import mode.
+users can create private or public playlists with `/playlist new`. without arguments it starts a guided flow: the bot asks for a playlist name, accepts one or more youtube urls, supports `done`/`finish`/`valmis`/`loppu`/`stop`, and saves only when the user finishes. users can also import the upcoming queue directly with `/playlist new <name> current`; `currentqueue` and `jono` are aliases for that import mode. queue import creates the playlist immediately, then keeps a short add-more flow open for extra youtube urls.
 
 users can browse playlists with `/playlist list`, inspect with `/playlist show`, inspect/edit with `/playlist edit`, play directly with `/playlist play`, add the current song, a queued song, or a youtube url with `/playlist add`, and bulk-fill a playlist from queued songs with `/playlist fill current <name>`. fill skips songs already in that playlist. owners can allow another user to manage the playlist with `/playlist addmod`. owners and admins can rename playlists with `/playlist rename` and lock playlists so managers cannot edit them.
 

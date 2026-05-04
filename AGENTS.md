@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Core runtime logic lives in `main.py`, which wires Discord intents, audio queueing, and yt-dlp downloads. Quote persistence is isolated in `quotes.py`, producing `quotes.txt` at runtime. Runtime artifacts such as `downloads.json`, `queue_backup.json`, and `queue_backup.tmp` live at the repo root; keep them out of commits unless they are fixtures. Environment secrets belong in `.env`; if `.env` already exists, do not add or recreate an `.env.example` template unless the user explicitly asks for one. Deployment helpers live in `start.sh.example`, `stop.sh.example`, and `bot.service.example` for systemd setups.
+Core runtime logic lives in `main.py`, which wires Discord intents, audio queueing, and yt-dlp downloads. Quote persistence is isolated in `quotes.py`, producing `quotes.txt` at runtime. Runtime artifacts such as `downloads.json`, `queue_backup.json`, `queue_backup.tmp`, and `channel-volume-config.json` live at the repo root; keep them out of commits unless they are fixtures. Environment secrets belong in `.env`; if `.env` already exists, do not add or recreate an `.env.example` template unless the user explicitly asks for one. Deployment helpers live in `start.sh.example`, `stop.sh.example`, and `bot.service.example` for systemd setups.
 
 ## Build, Test, and Development Commands
 Use a virtualenv to keep yt-dlp, discord.py, and PyNaCl pinned:
@@ -96,7 +96,7 @@ Projectwide bugcheck follow-up:
 
 ## 2026-05-03 Playlist UX Redesign Notes
 - `/playlist new` with no arguments starts a guided playlist creation session scoped by guild, channel, and user. The session asks for a name, accepts YouTube URLs, supports `done`/`finish`/`valmis`/`loppu`/`stop`, supports `cancel`/`peru`/`abort`, expires after five minutes of inactivity, and saves only when the user finishes.
-- `/playlist new <name> currentqueue` imports the upcoming queue into a new playlist. `/playlist new <name> jono` is the Finnish alias for the same import mode. Queue import skips entries that have neither a URL nor video id and refuses to create an empty playlist.
+- `/playlist new <name> current` imports the upcoming queue into a new playlist. `/playlist new <name> currentqueue` and `/playlist new <name> jono` are aliases for the same import mode. Queue import skips entries that have neither a URL nor video id and refuses to create an empty playlist.
 - Playlist creation should reject empty, too-long, path-unsafe, or duplicate names before writing storage. Do not silently overwrite an existing playlist.
 - `/playlist show`, `/playlist play`, `/playlist delete`, and `/playlist rename` are user-friendly aliases/direct commands layered on the existing storage and permission model.
 - `/playlist add` supports `current`, `queue`, and `url` sources. URL additions must go through the existing YouTube-only extraction path and should not store unresolved arbitrary URLs.
@@ -126,3 +126,10 @@ Setup security checks:
 - Playlist cache policy is admin-controlled. The persistent global default is `bounded`, per-playlist default is `follow_global`, and admins can use `/playlist cacheglobal`, `/playlist cachemode`, `/cachestatus`, and `/purgecache`.
 - Bounded playlist caching may cache at most 15 tracks or 3 GB per playlist play operation. The hard root cache cap is 20 GB; when reached, playback should stream instead of downloading.
 - Full playlist predownload remains explicit/admin-only through `/playlist predownload` and must use `cache/plst-<cache-key>.<ext>`, not playlist folders.
+
+## 2026-05-03 Vote Controls & Playlist Current Import Notes
+- `/playlist new <name> current` is the preferred queue-import command. `currentqueue` and `jono` remain aliases. The playlist is saved immediately from the upcoming queue, then the same channel/user gets a short add-more URL flow that appends to the saved playlist until `done` or `cancel`.
+- `/playlist new` with no arguments must remain guided creation, and `/playlist new <name>` must remain empty private playlist creation.
+- Non-admin `/skip`, `/stop`, and `/volume` use a reaction vote prompt. Quorum is 50% of current human members in the bot voice channel, rounded up; bots are excluded. Admins bypass votes.
+- The bot starts at 20% volume. Admin `/volume_session` hard-sets volume until disconnect. Admin `/volume_default` saves a voice-channel default in `channel-volume-config.json`; keep that runtime config out of commits.
+- `yt-dlp` already selects `bestaudio`; quality improvements should prioritize download-and-play mode, current `yt-dlp`/JS runtimes, and conservative ffmpeg changes only after listening tests.
