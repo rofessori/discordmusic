@@ -63,6 +63,7 @@ MIN_VOLUME_LEVEL = 1
 MAX_VOLUME_LEVEL = 100
 VOICE_VOTE_TIMEOUT_SECONDS = 45
 HELP_EXPAND_REACTION = "📖"
+DEBUG_COLLAPSE_REACTION = "🧹"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -368,6 +369,17 @@ def cache_filename(cache_key: str, ext: str, *, playlist: bool = False) -> str:
 def cache_path_for_key(cache_key: str, ext: str, *, playlist: bool = False) -> str:
     return os.path.join(CACHE_DIR, cache_filename(cache_key, ext, playlist=playlist))
 
+def human_bytes(num_bytes: Optional[float]) -> str:
+    try:
+        value = float(num_bytes or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    for unit in units:
+        if abs(value) < 1024.0 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024.0
+
 def cache_file_size(file_path: str) -> int:
     try:
         if is_safe_cache_path(file_path):
@@ -392,7 +404,54 @@ def cache_total_bytes() -> int:
 def cache_has_room(projected_bytes: int = 0) -> bool:
     return cache_total_bytes() + max(0, projected_bytes or 0) <= CACHE_HARD_LIMIT_BYTES
 
-def find_existing_cache_file(cache_key: Optional[str], *, prefer_playlist: bool = True) -> Optional[str]:
+def find_legacy_cache_file(video_id: Optional[str], *, prefer_playlist: bool = True) -> tuple:
+    if not video_id or not os.path.isdir(CACHE_DIR):
+        return None, False
+    try:
+        filenames = os.listdir(CACHE_DIR)
+    except OSError as exc:
+        logger.warning(f"Could not inspect cache directory for legacy file: {exc}")
+        return None, False
+    stems = [f"plst-{video_id}", video_id] if prefer_playlist else [video_id, f"plst-{video_id}"]
+    for stem in stems:
+        for filename in filenames:
+            file_stem, ext = os.path.splitext(filename)
+            if file_stem != stem or ext.lower() not in SAFE_MEDIA_EXTENSIONS:
+                continue
+            path = os.path.join(CACHE_DIR, filename)
+            if is_safe_cache_path(path):
+                return path, stem.startswith("plst-")
+    return None, False
+
+def adopt_legacy_cache_file(video_id: Optional[str], cache_key: Optional[str], *, prefer_playlist: bool = True) -> Optional[str]:
+    legacy_path, playlist = find_legacy_cache_file(video_id, prefer_playlist=prefer_playlist)
+    if not legacy_path or not cache_key:
+        return None
+    ext = os.path.splitext(legacy_path)[1].lstrip(".").lower()
+    target_path = cache_path_for_key(cache_key, ext, playlist=playlist)
+    if os.path.realpath(legacy_path) == os.path.realpath(target_path):
+        return legacy_path
+    if os.path.exists(target_path):
+        logger.info(
+            f"Legacy cache file exists for {video_id}, but canonical cache file already exists: "
+            f"legacy={metadata_path_for_cache_file(legacy_path)} canonical={metadata_path_for_cache_file(target_path)}"
+        )
+        return target_path if is_safe_cache_path(target_path, cache_key) else None
+    try:
+        os.replace(legacy_path, target_path)
+    except OSError as exc:
+        logger.warning(
+            f"Could not adopt legacy cache file for {video_id}: "
+            f"{metadata_path_for_cache_file(legacy_path)} -> {metadata_path_for_cache_file(target_path)}: {exc}"
+        )
+        return None
+    logger.info(
+        f"Adopted legacy cache file for {video_id}: "
+        f"{metadata_path_for_cache_file(legacy_path)} -> {metadata_path_for_cache_file(target_path)}"
+    )
+    return target_path if is_safe_cache_path(target_path, cache_key) else None
+
+def find_existing_cache_file(cache_key: Optional[str], *, prefer_playlist: bool = True, video_id: Optional[str] = None) -> Optional[str]:
     if not cache_key or not os.path.isdir(CACHE_DIR):
         return None
     try:
@@ -407,7 +466,12 @@ def find_existing_cache_file(cache_key: Optional[str], *, prefer_playlist: bool 
                 continue
             path = os.path.join(CACHE_DIR, filename)
             if is_safe_cache_path(path, cache_key):
+                logger.debug(f"Cache hit for key={cache_key}: {metadata_path_for_cache_file(path)}")
                 return path
+    adopted = adopt_legacy_cache_file(video_id, cache_key, prefer_playlist=prefer_playlist)
+    if adopted:
+        return adopted
+    logger.debug(f"Cache miss for key={cache_key} video_id={video_id or '-'}")
     return None
 
 def apply_cache_fields(track: dict, file_path: Optional[str], *, cache_mode: str):
@@ -428,10 +492,11 @@ def apply_cache_fields(track: dict, file_path: Optional[str], *, cache_mode: str
 
 def cached_file_for_track(track: dict, *, prefer_playlist: bool = True) -> Optional[str]:
     cache_key = cache_key_for_track(track)
+    video_id = str(track.get("id") or "").strip() or None
     cache_path = track.get("cache_path")
     if cache_path and is_safe_cache_path(cache_path, cache_key):
         return path_from_metadata(cache_path)
-    return find_existing_cache_file(cache_key, prefer_playlist=prefer_playlist)
+    return find_existing_cache_file(cache_key, prefer_playlist=prefer_playlist, video_id=video_id)
 
 def youtube_url_for_track(track: dict) -> str:
     return track.get('webpage_url') or youtube_watch_url + str(track.get('id') or '')
@@ -563,6 +628,32 @@ class VoiceVote:
     created_at: float = 0.0
     expires_at: float = 0.0
     task: object = None
+
+@dataclass
+class PurgeCacheResult:
+    scanned: int = 0
+    removed: int = 0
+    removed_bytes: int = 0
+    kept_current: int = 0
+    skipped_unsafe: int = 0
+    failed: int = 0
+    metadata_removed: int = 0
+
+@dataclass
+class DebugPlaybackMessage:
+    message: object
+    normal_content: str
+    stage: str = "starting"
+    title: str = ""
+    video_id: str = ""
+    cache_state: str = ""
+    format_id: str = ""
+    downloaded_bytes: int = 0
+    total_bytes: int = 0
+    speed: Optional[float] = None
+    status: str = "active"
+    error: str = ""
+    last_edit_at: float = 0.0
 
 def run_startup_diagnostics() -> StartupReport:
     report = StartupReport(errors=[], warnings=[], notes=[])
@@ -895,6 +986,8 @@ class Client(discord.Client):
         self.playlist_creation_sessions = {}
         self.playlist_creation_timeout_tasks = {}
         self.active_voice_votes = {}
+        self.download_debug_messages = False
+        self.debug_playback_messages = {}
         # File deletion task tracking
         self.deletion_tasks = {}              # map video_id -> asyncio.Future
         # Played tracks tracking
@@ -930,6 +1023,7 @@ def build_runtime_status():
         f"- currently playing: **{discord.utils.escape_markdown(str(current))}**",
         f"- volume: `{int(round(client.volume * 100))}%` (`{'session' if client.session_volume_locked else 'channel/default'}`)",
         f"- log level: `{logging.getLevelName(logger.level)}`",
+        f"- download debug messages: `{'enabled' if client.download_debug_messages else 'disabled'}`",
         f"- queue links: `{'disabled' if client.queue_links_disabled else 'enabled'}`",
         f"- song delete delay: `{client.download_delete_delay_seconds}s`",
         f"- auto leave: `{'enabled' if client.auto_leave_enabled else 'disabled'}` (`{client.auto_leave_delay_seconds}s`)",
@@ -958,6 +1052,114 @@ async def safe_interaction_send(ctx, message: str, *, ephemeral: bool = False):
         command_name = getattr(getattr(ctx, "command", None), "name", "unknown")
         logger.warning(f"Could not respond to /{command_name}: {exc}")
         return None
+
+def debug_playback_content(report: DebugPlaybackMessage, *, collapsed: bool = False) -> str:
+    if collapsed:
+        title = discord.utils.escape_markdown(report.title or "track")
+        video_id = discord.utils.escape_markdown(report.video_id or "-")
+        return f"**download debug hidden**\n- track: **{title}** (`{video_id}`)"
+    lines = [
+        "**download debug**",
+        f"- stage: `{discord.utils.escape_markdown(report.stage)}`",
+    ]
+    if report.title or report.video_id:
+        lines.append(
+            f"- track: **{discord.utils.escape_markdown(report.title or 'unknown')}** "
+            f"(`{discord.utils.escape_markdown(report.video_id or '-')}`)"
+        )
+    if report.cache_state:
+        lines.append(f"- cache: `{discord.utils.escape_markdown(report.cache_state)}`")
+    if report.format_id:
+        lines.append(f"- yt-dlp format: `{discord.utils.escape_markdown(report.format_id)}`")
+    if report.total_bytes or report.downloaded_bytes:
+        total = human_bytes(report.total_bytes) if report.total_bytes else "unknown"
+        lines.append(f"- downloaded: `{human_bytes(report.downloaded_bytes)} / {total}`")
+    if report.speed:
+        lines.append(f"- speed: `{human_bytes(report.speed)}/s`")
+    if report.error:
+        lines.append(f"- internal error: `{discord.utils.escape_markdown(truncate_text(sanitize_debug_text(report.error), 140))}`")
+        lines.append("- user error: `normal command error was sent separately`")
+    if report.status in {"done", "error"}:
+        if report.status == "done":
+            lines.append("- ffmpeg: `audio-only (-vn), Discord PCM volume transformer`")
+        lines.append(f"_react {DEBUG_COLLAPSE_REACTION} to hide debug details._")
+    return "\n".join(lines)
+
+def sanitize_debug_text(value: str) -> str:
+    text = str(value or "")
+    replacements = [
+        (CACHE_DIR, "cache"),
+        (BASE_DIR, "<repo>"),
+    ]
+    for absolute, label in replacements:
+        if absolute:
+            text = text.replace(absolute, label)
+    return text
+
+async def edit_debug_playback_message(report: DebugPlaybackMessage, *, force: bool = False):
+    if not report or not report.message:
+        return
+    now = time.time()
+    if not force and now - report.last_edit_at < 1.0:
+        return
+    report.last_edit_at = now
+    try:
+        await report.message.edit(content=debug_playback_content(report))
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+        logger.warning(f"Could not edit debug playback message: {exc}")
+
+def schedule_debug_playback_update(report: Optional[DebugPlaybackMessage], loop, *, force: bool = False):
+    if not report or not loop:
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(edit_debug_playback_message(report, force=force), loop)
+    except RuntimeError as exc:
+        logger.debug(f"Could not schedule debug playback update: {exc}")
+
+async def create_debug_playback_message(ctx, command: str) -> Optional[DebugPlaybackMessage]:
+    if not client.download_debug_messages:
+        return None
+    normal = f"**download debug hidden**\n- command: `/{command}`"
+    try:
+        message = await ctx.followup.send(
+            f"**download debug**\n- command: `/{command}`\n- stage: `starting`",
+            wait=True,
+        )
+        report = DebugPlaybackMessage(message=message, normal_content=normal, stage="starting")
+        client.debug_playback_messages[message.id] = report
+        return report
+    except Exception as exc:
+        logger.warning(f"Could not create debug playback message: {exc}")
+        return None
+
+async def finish_debug_playback_message(report: Optional[DebugPlaybackMessage], *, status: str = "done", error: str = ""):
+    if not report:
+        return
+    report.status = status
+    if error:
+        report.error = error
+        report.stage = "error"
+    elif report.stage not in {"cache-hit", "streaming", "queued", "playing"}:
+        report.stage = status
+    await edit_debug_playback_message(report, force=True)
+    if status in {"done", "error"}:
+        try:
+            await report.message.add_reaction(DEBUG_COLLAPSE_REACTION)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            logger.warning(f"Could not add debug collapse reaction: {exc}")
+
+async def handle_debug_playback_reaction(reaction, user) -> bool:
+    report = client.debug_playback_messages.get(reaction.message.id)
+    if not report:
+        return False
+    if str(reaction.emoji) != DEBUG_COLLAPSE_REACTION:
+        return True
+    try:
+        await reaction.message.edit(content=debug_playback_content(report, collapsed=True))
+        await reaction.message.clear_reactions()
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+        logger.warning(f"Could not collapse debug playback message: {exc}")
+    return True
 
 def user_display(user) -> str:
     return str(getattr(user, "display_name", None) or getattr(user, "name", None) or user)
@@ -2673,13 +2875,37 @@ def estimate_total_downloaded_bytes() -> int:
                 continue
     return total
 
-async def download_youtube_to_cache(video_url: str, cache_key: str, *, playlist: bool = False) -> tuple:
+async def download_youtube_to_cache(
+    video_url: str,
+    cache_key: str,
+    *,
+    playlist: bool = False,
+    debug_report: Optional[DebugPlaybackMessage] = None,
+) -> tuple:
     prefix = "plst-" if playlist else ""
     temp_token = secrets.token_hex(4)
     cache_bytes_before = cache_total_bytes()
     options = dict(ytdl_options)
     options["outtmpl"] = os.path.join(CACHE_DIR, f".download-{prefix}{cache_key}-{temp_token}.%(ext)s")
     loop = asyncio.get_event_loop()
+    if debug_report:
+        debug_report.stage = "downloading"
+        debug_report.cache_state = "miss"
+        await edit_debug_playback_message(debug_report, force=True)
+
+        def debug_progress_hook(status):
+            if not isinstance(status, dict):
+                return
+            debug_report.stage = str(status.get("status") or "downloading")
+            debug_report.downloaded_bytes = int(status.get("downloaded_bytes") or 0)
+            debug_report.total_bytes = int(status.get("total_bytes") or status.get("total_bytes_estimate") or 0)
+            debug_report.speed = status.get("speed")
+            info = status.get("info_dict") or {}
+            if info.get("format_id"):
+                debug_report.format_id = str(info.get("format_id"))
+            schedule_debug_playback_update(debug_report, loop)
+
+        options["progress_hooks"] = [debug_progress_hook]
     downloader = yt_dlp.YoutubeDL(options)
     data = await loop.run_in_executor(None, lambda: downloader.extract_info(video_url, download=True))
     if data is None:
@@ -2689,6 +2915,10 @@ async def download_youtube_to_cache(video_url: str, cache_key: str, *, playlist:
     if data is None:
         raise Exception("No playable result found during download")
     temp_path = downloader.prepare_filename(data)
+    if debug_report:
+        debug_report.format_id = str(data.get("format_id") or debug_report.format_id or "")
+        debug_report.stage = "downloaded"
+        await edit_debug_playback_message(debug_report, force=True)
     ext = os.path.splitext(temp_path)[1].lstrip(".").lower()
     target_path = cache_path_for_key(cache_key, ext, playlist=playlist)
     if not is_safe_cache_path(temp_path):
@@ -2704,7 +2934,7 @@ async def download_youtube_to_cache(video_url: str, cache_key: str, *, playlist:
         raise Exception("Final cache file failed safety validation.")
     return target_path, ext, data
 
-async def fetch_track(query: str, requested_by=None):
+async def fetch_track(query: str, requested_by=None, debug_report: Optional[DebugPlaybackMessage] = None):
     """
     Fetches YouTube track info for the given query (URL or search term).
     If download_mode is True, downloads the audio (unless cached) and returns track info with file path.
@@ -2716,13 +2946,22 @@ async def fetch_track(query: str, requested_by=None):
     video_url, video_id = normalize_youtube_query(query)
 
     cache_key = canonical_cache_key_from_video_id(video_id) if video_id else None
+    if debug_report:
+        debug_report.stage = "normalizing"
+        await edit_debug_playback_message(debug_report, force=True)
 
     # If we have a video_id and it's cached (and in download mode), use the cached file.
     if video_id and client.download_mode:
-        existing_cache = find_existing_cache_file(cache_key, prefer_playlist=True)
+        existing_cache = find_existing_cache_file(cache_key, prefer_playlist=True, video_id=video_id)
         info = downloaded.get(video_id, {})
         if existing_cache and info.get('title'):
             title = info.get('title', 'Unknown title')
+            if debug_report:
+                debug_report.title = title
+                debug_report.video_id = video_id
+                debug_report.cache_state = "hit"
+                debug_report.stage = "cache-hit"
+                await edit_debug_playback_message(debug_report, force=True)
             page_url = youtube_watch_url + video_id
             cache_mode = "playlist" if os.path.basename(existing_cache).startswith("plst-") else "shortterm"
             if cache_mode != "playlist":
@@ -2762,6 +3001,10 @@ async def fetch_track(query: str, requested_by=None):
     # Not cached or not using cache: fetch metadata (and download if needed)
     try:
         logger.debug(f"Fetching track info for query: {query}")
+        if debug_report:
+            debug_report.stage = "resolving"
+            debug_report.cache_state = "checking"
+            await edit_debug_playback_message(debug_report, force=True)
         loop = asyncio.get_event_loop()
         # Always extract metadata without downloading first (to get info like duration and size)
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(video_url, download=False))
@@ -2776,6 +3019,11 @@ async def fetch_track(query: str, requested_by=None):
         page_url = data.get('webpage_url', video_url)
         if not video_id:
             raise Exception("Resolved track is missing a YouTube video id.")
+        if debug_report:
+            debug_report.title = title
+            debug_report.video_id = video_id
+            debug_report.format_id = str(data.get("format_id") or "")
+            await edit_debug_playback_message(debug_report, force=True)
         page_url = canonical_youtube_url(video_id)
         cache_key = canonical_cache_key_from_video_id(video_id)
         duration = data.get('duration', 0) or 0  # duration in seconds
@@ -2799,9 +3047,13 @@ async def fetch_track(query: str, requested_by=None):
         if duration and duration > MAX_LENGTH_ADMIN:
             raise Exception("Track duration exceeds 5 hours (admin limit).")
 
-        existing_cache = find_existing_cache_file(cache_key, prefer_playlist=True)
+        existing_cache = find_existing_cache_file(cache_key, prefer_playlist=True, video_id=video_id)
         if existing_cache and client.download_mode:
             cache_mode = "playlist" if os.path.basename(existing_cache).startswith("plst-") else "shortterm"
+            if debug_report:
+                debug_report.cache_state = f"hit:{cache_mode}"
+                debug_report.stage = "cache-hit"
+                await edit_debug_playback_message(debug_report, force=True)
             if cache_mode != "playlist":
                 downloaded[video_id] = {
                     'title': title,
@@ -2854,11 +3106,15 @@ async def fetch_track(query: str, requested_by=None):
         if not client.download_mode:
             # Stream-only mode: do not download, just return info (no 'file' key)
             logger.info(f"Using stream-only mode for '{title}' ({video_id}).")
+            if debug_report:
+                debug_report.cache_state = "stream-only"
+                debug_report.stage = "streaming"
+                await edit_debug_playback_message(debug_report, force=True)
             return {'id': video_id, 'title': title, 'webpage_url': page_url, 'cache_key': cache_key, 'cache_mode': 'streaming', 'cache_path': None}
 
         # Download mode: download the audio file using yt_dlp
         logger.info(f"Downloading track '{title}' ({video_id})...")
-        file_path, ext, _ = await download_youtube_to_cache(video_url, cache_key, playlist=False)
+        file_path, ext, _ = await download_youtube_to_cache(video_url, cache_key, playlist=False, debug_report=debug_report)
         # Cache the downloaded file info
         downloaded[video_id] = {
             'title': title,
@@ -2870,6 +3126,10 @@ async def fetch_track(query: str, requested_by=None):
         }
         save_downloads_metadata("track download")
         logger.info(f"Downloaded '{title}' ({video_id}) to {file_path}")
+        if debug_report:
+            debug_report.cache_state = "downloaded"
+            debug_report.stage = "cached"
+            await edit_debug_playback_message(debug_report, force=True)
         return {
             'id': video_id,
             'title': title,
@@ -2881,6 +3141,9 @@ async def fetch_track(query: str, requested_by=None):
             'ext': ext,
         }
     except Exception as e:
+        if debug_report:
+            debug_report.error = str(e)
+            await finish_debug_playback_message(debug_report, status="error", error=str(e))
         logger.error(f"yt_dlp error for {query}: {e}")
         raise
 
@@ -3007,7 +3270,7 @@ async def cache_playlist_track(track: dict, *, playlist_cache: bool, projected_l
     video_id = str(track.get("id") or "").strip()
     if not cache_key or not video_id:
         return False, 0
-    existing = find_existing_cache_file(cache_key, prefer_playlist=True)
+    existing = find_existing_cache_file(cache_key, prefer_playlist=True, video_id=video_id)
     if existing:
         apply_cache_fields(track, existing, cache_mode="playlist" if os.path.basename(existing).startswith("plst-") else "shortterm")
         return False, 0
@@ -3045,7 +3308,7 @@ async def prepare_playlist_cache_for_playback(ctx, playlist: dict, tracks: list)
     playlist_tracks = playlist.get("tracks", [])
     for index, queue_track in enumerate(tracks):
         cache_key = cache_key_for_track(queue_track)
-        existing = find_existing_cache_file(cache_key, prefer_playlist=True)
+        existing = find_existing_cache_file(cache_key, prefer_playlist=True, video_id=str(queue_track.get("id") or "").strip() or None)
         if existing:
             apply_cache_fields(queue_track, existing, cache_mode="playlist" if os.path.basename(existing).startswith("plst-") else "shortterm")
             if index < len(playlist_tracks):
@@ -3561,6 +3824,8 @@ async def on_reaction_add(reaction, user):
         return  # ignore the bot's own reactions
     if await handle_playlist_pager_reaction(reaction, user):
         return
+    if await handle_debug_playback_reaction(reaction, user):
+        return
     if client.help_message_id and reaction.message.id == client.help_message_id and str(reaction.emoji) == HELP_EXPAND_REACTION:
         try:
             client.help_expanded = not client.help_expanded
@@ -3743,9 +4008,10 @@ async def play(ctx, *, url: str):
             client.current_voice_channel = voice
             if not await require_voice_control(ctx, "start playback"):
                 return
+        debug_report = await create_debug_playback_message(ctx, "play")
         try:
             suggestion = record_suggestion(ctx, "play", url)
-            track = await fetch_track(url, requested_by=ctx.user)
+            track = await fetch_track(url, requested_by=ctx.user, debug_report=debug_report)
             update_suggestion(suggestion, track)
             # If admin needs to confirm a large download
             if track.get('needs_confirm'):
@@ -3763,13 +4029,15 @@ async def play(ctx, *, url: str):
                 try:
                     reaction, user = await client.wait_for('reaction_add', timeout=15.0, check=check)
                 except asyncio.TimeoutError:
+                    await finish_debug_playback_message(debug_report, status="error", error="large download confirmation timed out")
                     await ctx.followup.send("Confirmation timed out. Cancelling the play request.")
                     return
                 if str(reaction.emoji) == "👍":
                     # Admin confirmed download: fetch again with download (this time no 'needs_confirm')
-                    track = await fetch_track(track['webpage_url'], requested_by=ctx.user)
+                    track = await fetch_track(track['webpage_url'], requested_by=ctx.user, debug_report=debug_report)
                     update_suggestion(suggestion, track)
                 else:
+                    await finish_debug_playback_message(debug_report, status="error", error="large download cancelled by user")
                     await ctx.followup.send("Download canceled.")
                     return
             player = await build_audio_player(track)
@@ -3786,25 +4054,35 @@ async def play(ctx, *, url: str):
                 acknowledge=ctx.followup.send,
             )
             logger.info(f"Playing now: {track['title']} ({track['id']})")
+            if debug_report:
+                debug_report.stage = "playing"
+                await finish_debug_playback_message(debug_report)
         except Exception as e:
             logger.error(f"/play error: {e}")
+            await finish_debug_playback_message(debug_report, status="error", error=str(e))
             await ctx.followup.send("Failed to play the requested track.")
     else:
         # If something is already playing, add the requested song to the queue
         if not await require_queue_room(ctx):
             return
+        debug_report = await create_debug_playback_message(ctx, "play")
         try:
             suggestion = record_suggestion(ctx, "play", url)
-            track = await fetch_track(url, requested_by=ctx.user)
+            track = await fetch_track(url, requested_by=ctx.user, debug_report=debug_report)
             update_suggestion(suggestion, track)
             if track.get('needs_confirm'):
                 # Cannot queue a large download without confirmation; instruct admin to use /play
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
+                await finish_debug_playback_message(debug_report, status="error", error="large download requires /play confirmation")
                 await ctx.followup.send(f"Track **{track['title']}** (~{filesize_mb:.1f} MB) is too large to queue without confirmation. Please use /play to confirm.")
                 return
             await enqueue_track_with_playlist_prompt(ctx, track, "play")
+            if debug_report:
+                debug_report.stage = "queued"
+                await finish_debug_playback_message(debug_report)
         except Exception as e:
             logger.error(f"/play queue error: {e}")
+            await finish_debug_playback_message(debug_report, status="error", error=str(e))
             await ctx.followup.send("Failed to add track to queue.")
 
 @app_commands.describe(query="YouTube URL or search term")
@@ -4534,34 +4812,58 @@ async def playlist_predownload(ctx, playlist: str):
         ephemeral=True,
     )
 
-def purge_cache_files(*, keep_current: bool = True) -> int:
+def purge_cache_files(*, keep_current: bool = True) -> PurgeCacheResult:
+    result = PurgeCacheResult()
     current_file = None
     if keep_current and client.current_track_info:
         current_file = cached_file_for_track(client.current_track_info)
         current_file = os.path.realpath(current_file) if current_file else None
-    count = 0
     if not os.path.isdir(CACHE_DIR):
-        return 0
+        logger.info(f"Cache purge skipped because cache directory does not exist: {CACHE_DIR}")
+        return result
+    logger.info(
+        f"Cache purge started by admin: dir={CACHE_DIR} keep_current={keep_current} "
+        f"current_file={metadata_path_for_cache_file(current_file) if current_file else '-'}"
+    )
     for filename in os.listdir(CACHE_DIR):
         file_path = os.path.join(CACHE_DIR, filename)
+        result.scanned += 1
         if not is_safe_cache_path(file_path):
+            result.skipped_unsafe += 1
+            logger.info(f"Cache purge skipped unsafe/non-media file: {metadata_path_for_cache_file(file_path)}")
             continue
         if current_file and os.path.realpath(file_path) == current_file:
+            result.kept_current += 1
+            logger.info(f"Cache purge kept current playing file: {metadata_path_for_cache_file(file_path)}")
             continue
+        size = cache_file_size(file_path)
         try:
             os.remove(file_path)
-            count += 1
+            result.removed += 1
+            result.removed_bytes += size
+            logger.info(f"Cache purge removed file: {metadata_path_for_cache_file(file_path)} size={human_bytes(size)}")
         except OSError as exc:
+            result.failed += 1
             logger.warning(f"Failed to purge cache file {file_path}: {exc}")
     for vid, info in list(downloaded.items()):
         file_path = info.get("filepath")
         if not file_path or not is_safe_cache_path(file_path):
             downloaded.pop(vid, None)
+            result.metadata_removed += 1
+            logger.info(f"Cache purge removed stale metadata entry for {vid}: invalid path {file_path or '-'}")
             continue
         if not os.path.isfile(path_from_metadata(file_path)):
             downloaded.pop(vid, None)
+            result.metadata_removed += 1
+            logger.info(f"Cache purge removed stale metadata entry for {vid}: missing file {file_path}")
     save_downloads_metadata("cache purge")
-    return count
+    logger.info(
+        "Cache purge completed: "
+        f"scanned={result.scanned} removed={result.removed} removed_bytes={human_bytes(result.removed_bytes)} "
+        f"kept_current={result.kept_current} skipped_unsafe={result.skipped_unsafe} "
+        f"failed={result.failed} metadata_removed={result.metadata_removed}"
+    )
+    return result
 
 @client.tree.command()
 async def cachestatus(ctx):
@@ -4594,8 +4896,17 @@ async def purgecache(ctx):
     if not is_user_admin(ctx.user):
         await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
-    count = purge_cache_files(keep_current=True)
-    await ctx.response.send_message(f"Purged {count} cache file(s). The current playing file was kept if present.", ephemeral=True)
+    before_bytes = cache_total_bytes()
+    result = purge_cache_files(keep_current=True)
+    after_bytes = cache_total_bytes()
+    await ctx.response.send_message(
+        "\n".join([
+            f"Purged {result.removed} cache file(s), freeing {human_bytes(result.removed_bytes)}.",
+            f"Scanned {result.scanned}; kept current {result.kept_current}; skipped {result.skipped_unsafe}; failed {result.failed}.",
+            f"Metadata entries cleaned: {result.metadata_removed}. Cache is now {human_bytes(after_bytes)} (was {human_bytes(before_bytes)}).",
+        ]),
+        ephemeral=True,
+    )
 
 @client.tree.command()
 async def purgequeue(ctx):
@@ -4805,20 +5116,39 @@ async def stop(ctx):
     record_command(ctx)
     await request_voice_vote(ctx.user, ctx.channel, "stop", "stop playback")
 
+@app_commands.describe(mode="debug enables verbose logs and /play download debug messages; normal disables them")
+@app_commands.choices(mode=[
+    app_commands.Choice(name="toggle", value="toggle"),
+    app_commands.Choice(name="debug", value="debug"),
+    app_commands.Choice(name="normal", value="normal"),
+    app_commands.Choice(name="off", value="off"),
+])
 @client.tree.command()
-async def togglelog(ctx):
-    """Toggles verbose (DEBUG level) logging on or off (admin only)."""
+async def togglelog(ctx, mode: Optional[str] = "toggle"):
+    """Toggles verbose (DEBUG level) logging and optional download debug UI (admin only)."""
     record_command(ctx)
     if not is_user_admin(ctx.user):
         await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
-    client.log_verbose = not client.log_verbose
+    mode = str(mode or "toggle").lower()
+    if mode == "debug":
+        client.log_verbose = True
+        client.download_debug_messages = True
+    elif mode in {"normal", "off"}:
+        client.log_verbose = False
+        client.download_debug_messages = False
+    else:
+        client.log_verbose = not client.log_verbose
+        client.download_debug_messages = client.log_verbose
     if client.log_verbose:
         logger.setLevel(logging.DEBUG)
-        msg = "Verbose logging enabled."
+        msg = (
+            "Verbose logging enabled."
+            + (" Download debug messages enabled for `/play`." if client.download_debug_messages else "")
+        )
     else:
         logger.setLevel(logging.INFO)
-        msg = "Verbose logging disabled."
+        msg = "Verbose logging disabled. Download debug messages disabled."
     await ctx.response.send_message(msg)
     logger.info(f"Logging level toggled by admin: {msg}")
 

@@ -133,3 +133,9 @@ Setup security checks:
 - Non-admin `/skip`, `/stop`, and `/volume` use a reaction vote prompt. Quorum is 50% of current human members in the bot voice channel, rounded up; bots are excluded. Admins bypass votes.
 - The bot starts at 20% volume. Admin `/volume_session` hard-sets volume until disconnect. Admin `/volume_default` saves a voice-channel default in `channel-volume-config.json`; keep that runtime config out of commits.
 - `yt-dlp` already selects `bestaudio`; quality improvements should prioritize download-and-play mode, current `yt-dlp`/JS runtimes, and conservative ffmpeg changes only after listening tests.
+
+## 2026-05-04 Cache Logging & Download Debug Notes
+- `/purgecache` should log a useful audit trail: cache directory, current file kept, every safe file removed with size, unsafe/non-media skips, stale `downloads.json` metadata removals, failure count, and final removed bytes.
+- Cache lookup uses canonical base64 filenames, but exact legacy files named `cache/<youtube-id>.<ext>` or `cache/plst-<youtube-id>.<ext>` are adopted to canonical names when the same YouTube id is requested. Do not adopt arbitrary title filenames.
+- `/togglelog debug` enables DEBUG logging plus sanitized editable `/play` download debug messages. These messages may show track title/id, cache hit/miss/downloaded/stream-only state, yt-dlp format id, progress bytes, speed, and the generic ffmpeg path, but must not expose absolute local paths or tokens.
+- The debug message collapse reaction edits the message down to a normal summary and clears reactions.

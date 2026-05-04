@@ -75,8 +75,8 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | command | purpose |
 | --- | --- |
 | `/cachestatus` | show cache directory, size, file count, global playlist cache mode, and force-global state. admin only. |
-| `/purgecache` | delete validated media files from `cache/`, keeping the current playing file if present. admin only. |
-| `/togglelog` | toggle verbose debug logging. admin only. |
+| `/purgecache` | delete validated media files from `cache/`, keeping the current playing file if present, and report scanned/removed/skipped/metadata-cleaned counts. admin only. |
+| `/togglelog [toggle\|debug\|normal\|off]` | toggle verbose debug logging. `debug` also enables editable `/play` download debug messages. admin only. |
 | `/toggledownload` | switch between download-and-play mode and stream-only mode. admin only. |
 | `/disablelinks` | toggle whether queue-style displays are allowed to show youtube links. admin only. |
 | `/volume_session <1-100>` | hard-set this bot session's volume until disconnect. admin only. |

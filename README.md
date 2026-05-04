@@ -115,7 +115,7 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/setdeletetime <seconds>`
   - `/volume_session <1–100>`
   - `/volume_default <1–100>`
-  - `/togglelog`
+  - `/togglelog [toggle|debug|normal|off]`
   - `/toggledownload`
   - `/disablelinks`
   - `/reboot`
@@ -152,6 +152,7 @@ tail -f output.log
 
 - **runtime media cache**:
   downloaded audio lives in `cache/`, not the repository root. normal `/play` downloads use `cache/<base64url-canonical-youtube-url>.<ext>`. playlist long-term cache files use `cache/plst-<base64url-canonical-youtube-url>.<ext>`. raw youtube titles and user input are not used in cache filenames.
+  exact legacy files named `cache/<youtube-id>.<ext>` or `cache/plst-<youtube-id>.<ext>` are adopted to the canonical cache name when that video is requested.
 
 - **playlist storage**:
   playlists are metadata-first. each playlist folder contains `metadata.json`; audio files do not live under `playlists/`. track entries include youtube metadata plus cache fields such as `cache_key`, `cache_mode`, `cache_path`, and `ext` so playback can stream or reuse a safe file in `cache/`.
