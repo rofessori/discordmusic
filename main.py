@@ -109,6 +109,9 @@ def path_from_metadata(path: Optional[str]) -> Optional[str]:
 def metadata_path_for_cache_file(file_path: str) -> str:
     return display_path(file_path).replace(os.sep, "/")
 
+def is_valid_cache_key(cache_key: Optional[str]) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{16,256}", str(cache_key or "")))
+
 def is_safe_cache_path(file_path: str, expected_cache_key: Optional[str] = None) -> bool:
     """Only trust media files that resolve inside the root cache directory."""
     if not file_path:
@@ -129,8 +132,12 @@ def is_safe_cache_path(file_path: str, expected_cache_key: Optional[str] = None)
         stem, ext = os.path.splitext(filename)
         if ext.lower() not in SAFE_MEDIA_EXTENSIONS:
             return False
-        if expected_cache_key and expected_cache_key not in stem:
-            return False
+        if expected_cache_key:
+            if not is_valid_cache_key(expected_cache_key):
+                return False
+            allowed_stems = {expected_cache_key, f"plst-{expected_cache_key}"}
+            if stem not in allowed_stems:
+                return False
         return True
     except (OSError, ValueError):
         return False
@@ -354,8 +361,12 @@ def cache_key_for_youtube_url(url: str) -> Optional[str]:
 
 def cache_key_for_track(track: dict) -> Optional[str]:
     cache_key = str(track.get("cache_key") or "").strip()
-    if cache_key:
+    if is_valid_cache_key(cache_key):
         return cache_key
+    if cache_key:
+        logger.warning(
+            f"Ignoring invalid cache key for {track.get('title', 'Unknown title')}: {cache_key[:80]}"
+        )
     video_id = str(track.get("id") or "").strip()
     if video_id:
         return canonical_cache_key_from_video_id(video_id)
@@ -453,6 +464,9 @@ def adopt_legacy_cache_file(video_id: Optional[str], cache_key: Optional[str], *
 
 def find_existing_cache_file(cache_key: Optional[str], *, prefer_playlist: bool = True, video_id: Optional[str] = None) -> Optional[str]:
     if not cache_key or not os.path.isdir(CACHE_DIR):
+        return None
+    if not is_valid_cache_key(cache_key):
+        logger.warning(f"Cache lookup skipped invalid cache key: {str(cache_key)[:80]}")
         return None
     try:
         filenames = os.listdir(CACHE_DIR)
@@ -2601,6 +2615,7 @@ def compact_help_message() -> str:
         "/playtop <query> - add next",
         "/enqueue <query> (alias /q) - add to queue",
         "/queue - show queue",
+        "/help command:<command> - detailed command help",
         "/help - react 📖 for full help",
     ])
 
@@ -2638,6 +2653,8 @@ def expanded_help_message() -> str:
         "**admin / other**",
         "/clear_queue, /restorequeue, /purgequeue, /purgecache, /cachestatus, /autoleave, /setdeletetime, /volume_session, /volume_default, /togglelog, /toggledownload, /disablelinks, /reboot, /status",
         "/backup_teekkari_quotes, /random_quote",
+        "",
+        "Detailed help: `/help command:play`, `/help command:nytsoi`, `/help command:playlist new`.",
     ])
 
 def playlist_general_help_message() -> str:
@@ -2845,9 +2862,381 @@ def format_playlist_manpage(command: str) -> Optional[str]:
     ]
     return "\n".join(lines)
 
+def command_help_pages() -> dict:
+    return {
+        "join": {
+            "purpose": "connect the bot to your voice channel",
+            "synopsis": ["/join"],
+            "description": "Joins the voice channel you are currently in and resets the session song history for the new listening session.",
+            "arguments": ["none"],
+            "examples": ["/join"],
+            "notes": ["You must already be in a voice channel.", "Playback commands can also connect the bot automatically."],
+            "errors": ["Not in voice - join a voice channel first.", "Discord voice connection failed - check output.log."],
+        },
+        "play": {
+            "purpose": "play or queue YouTube audio",
+            "synopsis": ["/play <youtube url or search>", "/play playlist:<name>", "/play last"],
+            "description": "Resolves YouTube URLs or search text with yt-dlp. If nothing is playing, the track starts immediately; otherwise it is queued. Playlist names can start or queue saved playlists.",
+            "arguments": ["<query> - YouTube URL, YouTube search text, playlist:name, or last/play:last."],
+            "examples": ["/play viidestoista yö", "/play https://youtube.com/watch?v=...", "/play playlist:Roadtrip", "/play last"],
+            "notes": ["Raw non-YouTube URLs are rejected.", "Download mode caches audio under cache/; stream-only mode skips local caching.", "With `/togglelog debug`, /play posts an editable sanitized download debug message."],
+            "errors": ["Need voice channel - join voice first.", "Extraction failed - check yt-dlp, deno/node, and output.log.", "Large download - admin confirmation may be required."],
+        },
+        "playtop": {
+            "purpose": "play a song next",
+            "synopsis": ["/playtop <query>"],
+            "description": "Adds a resolved YouTube track to the front of the queue. If nothing is currently playing, it starts immediately.",
+            "arguments": ["<query> - YouTube URL or search text."],
+            "examples": ["/playtop panzermensch"],
+            "notes": ["This does not interrupt the current track when something is already playing."],
+            "errors": ["Queue limit reached for non-admins.", "Extraction failed - check output.log."],
+        },
+        "enqueue": {
+            "purpose": "add a song or playlist to the end of the queue",
+            "synopsis": ["/enqueue <query>", "/enqueue playlist:<name>"],
+            "description": "Resolves a YouTube query or visible playlist and appends it to the upcoming queue.",
+            "arguments": ["<query> - YouTube URL, search text, playlist:name, or exact playlist name."],
+            "examples": ["/enqueue and one panzermensch", "/enqueue playlist:Roadtrip"],
+            "notes": ["Alias: /q.", "If a playlist is actively playing, normal song requests are placed after that playlist block."],
+            "errors": ["Queue limit reached.", "Large download requires /play confirmation."],
+        },
+        "q": {
+            "purpose": "alias for enqueue",
+            "synopsis": ["/q <query>"],
+            "description": "Short alias for `/enqueue` with the same behavior.",
+            "arguments": ["<query> - YouTube URL, search text, playlist:name, or exact playlist name."],
+            "examples": ["/q viidestoista yö"],
+            "notes": ["Use `/help command:enqueue` for the full behavior."],
+            "errors": ["Same as `/enqueue`."],
+        },
+        "queue": {
+            "purpose": "show the upcoming queue",
+            "synopsis": ["/queue", "/queue links:true"],
+            "description": "Displays upcoming tracks with 1-based positions. Those positions are used by commands like `/queuefirst` and `/playlist add ... queue`.",
+            "arguments": ["links - true shows YouTube links unless an admin disabled queue links."],
+            "examples": ["/queue", "/queue links:true"],
+            "notes": ["Alias: /queuelist.", "The currently playing song is not part of the upcoming queue."],
+            "errors": ["Queue is empty - add songs with /play, /enqueue, or /q."],
+        },
+        "queuelist": {
+            "purpose": "alias for queue",
+            "synopsis": ["/queuelist", "/queuelist links:true"],
+            "description": "Alias for `/queue`.",
+            "arguments": ["links - true shows YouTube links unless links are disabled."],
+            "examples": ["/queuelist links:true"],
+            "notes": ["Use `/help command:queue` for the full behavior."],
+            "errors": ["Same as `/queue`."],
+        },
+        "queuefirst": {
+            "purpose": "move a queued song or playlist to play next",
+            "synopsis": ["/queuefirst <position>", "/queuefirst playlist:<name>"],
+            "description": "Moves an upcoming queue item to position 1, or moves/adds a playlist block to the front of the queue.",
+            "arguments": ["<position> - 1-based queue position.", "<playlist> - visible playlist name, id, or playlist:name."],
+            "examples": ["/queuefirst 3", "/queuefirst playlist:Roadtrip"],
+            "notes": ["Does not interrupt the currently playing track."],
+            "errors": ["Queue is empty.", "Position is outside the queue.", "Playlist is empty or not visible."],
+        },
+        "qfirst": {
+            "purpose": "alias for queuefirst",
+            "synopsis": ["/qfirst <position or playlist>"],
+            "description": "Short alias for `/queuefirst`.",
+            "arguments": ["<target> - queue position or visible playlist."],
+            "examples": ["/qfirst 2"],
+            "notes": ["Use `/help command:queuefirst` for the full behavior."],
+            "errors": ["Same as `/queuefirst`."],
+        },
+        "skip": {
+            "purpose": "skip the current track",
+            "synopsis": ["/skip"],
+            "description": "Requests that the current track stop so the next queued track can start. Non-admins start or join a reaction vote; admins bypass the vote.",
+            "arguments": ["none"],
+            "examples": ["/skip"],
+            "notes": ["Quorum is 50% of current human voice-channel members, rounded up.", "The now-playing ▶️ reaction uses the same vote logic."],
+            "errors": ["No track is playing.", "You must be in the bot's voice channel."],
+        },
+        "pause": {
+            "purpose": "pause playback",
+            "synopsis": ["/pause"],
+            "description": "Pauses the current audio without clearing the queue or disconnecting.",
+            "arguments": ["none"],
+            "examples": ["/pause"],
+            "notes": ["The now-playing ⏸️ reaction can also pause or resume."],
+            "errors": ["No audio is playing.", "Already paused.", "You must be in the bot's voice channel."],
+        },
+        "resume": {
+            "purpose": "resume paused playback",
+            "synopsis": ["/resume"],
+            "description": "Resumes audio that was paused with /pause or the now-playing pause reaction.",
+            "arguments": ["none"],
+            "examples": ["/resume"],
+            "notes": ["Does nothing if audio is already playing."],
+            "errors": ["No audio is paused.", "You must be in the bot's voice channel."],
+        },
+        "stop": {
+            "purpose": "stop playback and leave voice",
+            "synopsis": ["/stop"],
+            "description": "Stops playback, clears the upcoming queue, disconnects from voice, and resets session-only volume. Non-admins vote; admins bypass.",
+            "arguments": ["none"],
+            "examples": ["/stop"],
+            "notes": ["Use `/autoleave` if you want automatic leave when nobody is listening."],
+            "errors": ["Bot is not in voice.", "You must be in the bot's voice channel."],
+        },
+        "volume": {
+            "purpose": "vote to change playback volume",
+            "synopsis": ["/volume <1-100>"],
+            "description": "Sets the current playback volume after a non-admin vote. Admins bypass the vote.",
+            "arguments": ["<level> - volume percentage from 1 to 100."],
+            "examples": ["/volume 20", "/volume 35"],
+            "notes": ["The startup default is 20%.", "Admins can use `/volume_session` for a session hard-set or `/volume_default` for a persistent channel default."],
+            "errors": ["Level outside 1-100.", "Bot is not in voice.", "You must be in the bot's voice channel."],
+        },
+        "now": {
+            "purpose": "show the current song",
+            "synopsis": ["/now"],
+            "description": "Shows the currently playing track title and YouTube video id.",
+            "arguments": ["none"],
+            "examples": ["/now"],
+            "notes": ["Alias: /nytsoi.", "This intentionally stays compact and does not show the full URL."],
+            "errors": ["No song is currently playing."],
+        },
+        "nytsoi": {
+            "purpose": "Finnish alias for now",
+            "synopsis": ["/nytsoi"],
+            "description": "Shows the currently playing track title and YouTube video id, same as `/now`.",
+            "arguments": ["none"],
+            "examples": ["/nytsoi"],
+            "notes": ["Use `/help command:now` for the non-alias page."],
+            "errors": ["No song is currently playing."],
+        },
+        "getqueue": {
+            "purpose": "show session song history",
+            "synopsis": ["/getqueue"],
+            "description": "Lists songs requested since the bot joined voice and marks each as playing, queued, played, or removed.",
+            "arguments": ["none"],
+            "examples": ["/getqueue"],
+            "notes": ["This is session memory, not persistent storage."],
+            "errors": ["No songs have been requested this session."],
+        },
+        "clear_queue": {
+            "purpose": "clear the upcoming queue",
+            "synopsis": ["/clear_queue"],
+            "description": "Clears the current upcoming queue and keeps a short in-memory backup for `/restorequeue`. Admins are asked whether to delete downloaded files too.",
+            "arguments": ["none"],
+            "examples": ["/clear_queue"],
+            "notes": ["Does not stop the currently playing song.", "Non-admins cannot delete files from disk."],
+            "errors": ["Queue is already empty.", "You must be in the bot's voice channel."],
+        },
+        "restorequeue": {
+            "purpose": "restore a recently cleared or reboot-saved queue",
+            "synopsis": ["/restorequeue"],
+            "description": "Restores a queue from the short in-memory clear backup or from a reboot backup file if it is still fresh.",
+            "arguments": ["none"],
+            "examples": ["/restorequeue"],
+            "notes": ["Admin only.", "The restore window is 10 minutes.", "The current queue must be empty."],
+            "errors": ["No backup available.", "Backup is too old.", "Queue is not empty."],
+        },
+        "cachestatus": {
+            "purpose": "inspect media cache usage",
+            "synopsis": ["/cachestatus"],
+            "description": "Shows cache directory, safe media file count, size against hard cap, and playlist cache policy.",
+            "arguments": ["none"],
+            "examples": ["/cachestatus"],
+            "notes": ["Admin only.", "Only validated media files are counted."],
+            "errors": ["Admin permission required."],
+        },
+        "purgecache": {
+            "purpose": "delete validated cache files",
+            "synopsis": ["/purgecache"],
+            "description": "Deletes safe media files from cache while keeping the current playing file. Reports scanned, removed, skipped, failed, bytes freed, and stale metadata cleanup counts.",
+            "arguments": ["none"],
+            "examples": ["/purgecache"],
+            "notes": ["Admin only.", "Unsafe paths and non-media files are skipped.", "Detailed audit lines are written to output.log."],
+            "errors": ["Admin permission required.", "Some files may fail to delete due to OS permissions."],
+        },
+        "purgequeue": {
+            "purpose": "delete tracked downloaded files without changing the queue",
+            "synopsis": ["/purgequeue"],
+            "description": "Removes tracked downloaded files from disk but leaves queued song entries intact. The current playing file is skipped.",
+            "arguments": ["none"],
+            "examples": ["/purgequeue"],
+            "notes": ["Admin only.", "Deletion uses the safe media-file validation helper."],
+            "errors": ["Admin permission required."],
+        },
+        "setdeletetime": {
+            "purpose": "set delayed download cleanup time",
+            "synopsis": ["/setdeletetime <seconds>"],
+            "description": "Controls how long played downloaded songs wait before delayed cleanup removes their cache file.",
+            "arguments": ["<seconds> - value between the configured minimum and maximum."],
+            "examples": ["/setdeletetime 600", "/setdeletetime 0"],
+            "notes": ["Admin only.", "Already scheduled deletion tasks keep their original timer."],
+            "errors": ["Seconds outside allowed range.", "Admin permission required."],
+        },
+        "autoleave": {
+            "purpose": "leave voice when nobody is listening",
+            "synopsis": ["/autoleave <enabled> [delay_seconds]"],
+            "description": "When enabled, the bot waits while alone in voice, saves the current song and queue, disconnects, and lets users restore with `/play last`.",
+            "arguments": ["enabled - true or false.", "delay_seconds - optional delay before leaving."],
+            "examples": ["/autoleave true 10", "/autoleave false"],
+            "notes": ["Admin only.", "The bot cancels the pending leave when a human rejoins voice."],
+            "errors": ["Delay outside allowed range.", "Admin permission required."],
+        },
+        "volume_session": {
+            "purpose": "admin session volume hard-set",
+            "synopsis": ["/volume_session <1-100>"],
+            "description": "Sets the bot's current session volume immediately and keeps it until the bot disconnects.",
+            "arguments": ["<level> - volume percentage from 1 to 100."],
+            "examples": ["/volume_session 20"],
+            "notes": ["Admin only.", "This overrides channel defaults for the current connection only."],
+            "errors": ["Bot is not connected to voice.", "Level outside 1-100.", "Admin permission required."],
+        },
+        "volume_default": {
+            "purpose": "save a persistent channel volume default",
+            "synopsis": ["/volume_default <1-100>"],
+            "description": "Stores the default volume for the current voice channel in channel-volume-config.json.",
+            "arguments": ["<level> - volume percentage from 1 to 100."],
+            "examples": ["/volume_default 20"],
+            "notes": ["Admin only.", "Applied when the bot joins that voice channel unless a session hard-set is active."],
+            "errors": ["No voice channel context.", "Level outside 1-100.", "Config write failed."],
+        },
+        "togglelog": {
+            "purpose": "toggle server debug logging",
+            "synopsis": ["/togglelog", "/togglelog debug", "/togglelog normal"],
+            "description": "Turns DEBUG logging on or off. Debug mode also enables sanitized editable `/play` download debug messages.",
+            "arguments": ["mode - toggle, debug, normal, or off."],
+            "examples": ["/togglelog debug", "/togglelog normal"],
+            "notes": ["Admin only.", "Debug messages can be collapsed with the cleanup reaction.", "Do not leave verbose logs on forever in production."],
+            "errors": ["Admin permission required."],
+        },
+        "toggledownload": {
+            "purpose": "switch download mode",
+            "synopsis": ["/toggledownload"],
+            "description": "Switches between download-and-play mode and stream-only mode.",
+            "arguments": ["none"],
+            "examples": ["/toggledownload"],
+            "notes": ["Admin only.", "Download mode is more stable after extraction succeeds; stream-only uses less disk."],
+            "errors": ["Admin permission required."],
+        },
+        "disablelinks": {
+            "purpose": "toggle queue link display",
+            "synopsis": ["/disablelinks"],
+            "description": "Turns YouTube link display on or off in queue-style views, including `/queue links:true` and the now-playing queue section.",
+            "arguments": ["none"],
+            "examples": ["/disablelinks"],
+            "notes": ["Admin only.", "The command toggles the current session setting."],
+            "errors": ["Admin permission required."],
+        },
+        "reboot": {
+            "purpose": "save queue and restart the bot process",
+            "synopsis": ["/reboot"],
+            "description": "Asks for reaction confirmation, writes current queue/current track to queue_backup.json, disconnects, and exits the process.",
+            "arguments": ["none"],
+            "examples": ["/reboot"],
+            "notes": ["Admin only.", "Use `/restorequeue` after the process starts again."],
+            "errors": ["Confirmation timed out.", "Backup write failed - check output.log."],
+        },
+        "backup_teekkari_quotes": {
+            "purpose": "back up configured quote channel",
+            "synopsis": ["/backup_teekkari_quotes"],
+            "description": "Scans the configured quotes channel and rewrites quotes.txt through quotes.py.",
+            "arguments": ["none"],
+            "examples": ["/backup_teekkari_quotes"],
+            "notes": ["Requires QUOTES_ID to point at an accessible channel.", "QUOTES_ID=0 disables quote backup."],
+            "errors": ["Quotes channel disabled or inaccessible."],
+        },
+        "random_quote": {
+            "purpose": "show a random saved quote",
+            "synopsis": ["/random_quote"],
+            "description": "Returns one random quote from quotes.txt using the quote persistence helper.",
+            "arguments": ["none"],
+            "examples": ["/random_quote"],
+            "notes": ["Run `/backup_teekkari_quotes` first if the quote file is empty."],
+            "errors": ["Quote storage empty or unavailable."],
+        },
+        "help": {
+            "purpose": "show command help",
+            "synopsis": ["/help", "/help command:<command>", "/help topic:playlist command:<subcommand>"],
+            "description": "Shows compact help, a command-specific manpage, or playlist topic help.",
+            "arguments": ["topic - optional topic such as playlist.", "command - command or playlist subcommand name."],
+            "examples": ["/help", "/help command:nytsoi", "/help topic:playlist command:new"],
+            "notes": ["Use command names without the leading slash.", "Playlist subcommands can be addressed as `playlist new` or with topic:playlist."],
+            "errors": ["Unknown command - check spelling or run `/help`."],
+        },
+        "status": {
+            "purpose": "show runtime status and session audit",
+            "synopsis": ["/status", "/status latest", "/status session", "/status commands"],
+            "description": "Shows runtime mode, queue/cache state, warning summary, latest suggestion, session suggestions, or recent commands.",
+            "arguments": ["view - latest, session, or commands."],
+            "examples": ["/status", "/status session"],
+            "notes": ["Admin only.", "Session audit lives in memory and resets when the bot restarts."],
+            "errors": ["Admin permission required."],
+        },
+    }
+
+def command_aliases() -> dict:
+    return {
+        "play:last": "play",
+        "/play:last": "play",
+        "playlist:list": "playlist list",
+        "playlist:new": "playlist new",
+        "playlist:edit": "playlist edit",
+        "playlist:show": "playlist show",
+        "playlist:play": "playlist play",
+        "playlist:add": "playlist add",
+        "playlist:fill": "playlist fill",
+        "playlist:addmod": "playlist addmod",
+        "playlist:remove": "playlist remove",
+        "playlist:delete": "playlist delete",
+        "playlist:rescue": "playlist rescue",
+        "playlist:removesong": "playlist removesong",
+        "playlist:move": "playlist move",
+        "playlist:rename": "playlist rename",
+        "playlist:lock": "playlist lock",
+        "playlist:cachemode": "playlist cachemode",
+        "playlist:cacheglobal": "playlist cacheglobal",
+        "playlist:predownload": "playlist predownload",
+    }
+
+def normalize_help_command(command: str) -> str:
+    key = str(command or "").strip().lower()
+    key = key.lstrip("/")
+    key = re.sub(r"\s+", " ", key)
+    key = command_aliases().get(key, key)
+    if key.startswith("playlist ") and len(key.split(" ", 1)) == 2:
+        return key
+    return key.replace(" ", "_")
+
+def format_command_manpage(command: str) -> Optional[str]:
+    key = normalize_help_command(command)
+    if key.startswith("playlist "):
+        _, subcommand = key.split(" ", 1)
+        return format_playlist_manpage(subcommand)
+    page = command_help_pages().get(key)
+    if not page:
+        return None
+    lines = [
+        f"**NAME**\n  {key} - {page['purpose']}",
+        "**SYNOPSIS**",
+        *[f"  {item}" for item in page["synopsis"]],
+        "**DESCRIPTION**",
+        f"  {page['description']}",
+        "**ARGUMENTS**",
+        *[f"  {item}" for item in page["arguments"]],
+        "**EXAMPLES**",
+        *[f"  {item}" for item in page["examples"]],
+        "**NOTES**",
+        *[f"  {item}" for item in page["notes"]],
+        "**COMMON ERRORS**",
+        *[f"  {item}" for item in page["errors"]],
+    ]
+    return "\n".join(lines)
+
 def help_message_for(topic: Optional[str] = None, command: Optional[str] = None) -> Optional[str]:
     topic_key = str(topic or "").strip().lower()
     command_key = str(command or "").strip().lower()
+    if command_key and not topic_key:
+        if normalize_help_command(command_key) in {"playlist", "playlists"}:
+            return playlist_general_help_message()
+        return format_command_manpage(command_key) or f"No help page for `{command}`. Try `/help` for the command list."
     if not topic_key:
         return None
     if topic_key in {"playlist", "playlists"}:
@@ -5356,7 +5745,7 @@ async def random_quote(ctx):
     await ctx.response.send_message(message)
     logger.info("User requested random teekkari quote.")
 
-@app_commands.describe(topic="Help topic, for example playlists", command="Detailed playlist command help")
+@app_commands.describe(topic="Help topic, for example playlists", command="Command name, for example nytsoi, play, or playlist new")
 @app_commands.choices(topic=[
     app_commands.Choice(name="playlists", value="playlists"),
     app_commands.Choice(name="playlist", value="playlist"),
@@ -5401,7 +5790,8 @@ client.tree.add_command(playlist_group)
 @client.tree.error
 async def on_app_command_error(ctx, error):
     # Global error handler for app commands
-    logger.exception(f"Error in /{ctx.command.name}: {error}")
+    command = getattr(getattr(ctx, "command", None), "name", "unknown")
+    logger.exception(f"Error in /{command}: {error}")
     await safe_interaction_send(ctx, "💥  Oops, something went wrong. Please check the bot logs for details.")
 
 if __name__ == "__main__":

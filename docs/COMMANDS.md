@@ -103,8 +103,10 @@ status views:
 
 | command | purpose |
 | --- | --- |
-| `/help` | show the in-discord command summary. |
+| `/help` | show the in-discord command summary. react `📖` to expand it. |
+| `/help command:<command>` | show a manpage-style help page for any root command, for example `/help command:nytsoi`, `/help command:play`, or `/help command:purgecache`. |
+| `/help command:playlist <subcommand>` | show playlist subcommand help without setting a topic, for example `/help command:playlist new`. |
 | `/help topic:playlists` | show the playlist quick-start help page. |
 | `/help topic:playlist command:<subcommand>` | show a manpage-style playlist subcommand help page. available pages: `new`, `list`, `show`, `play`, `edit`, `add`, `fill`, `addmod`, `remove`, `delete`, `rename`, `removesong`, `move`, `lock`, `cachemode`, `cacheglobal`, `rescue`, `predownload`. |
 
-React `📖` on the help message to expand the compact help into the full command list.
+Every slash command has a command-specific help page. Use command names without the leading slash.

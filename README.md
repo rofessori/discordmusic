@@ -104,7 +104,7 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/playlist lock <playlist> <locked>`
   - `/playlist cachemode <playlist> <follow_global|streaming|bounded|keep_cached>` (admin-only)
   - `/playlist cacheglobal <streaming|bounded|keep_cached> [force]` (admin-only)
-  - `/help topic:playlists` and `/help topic:playlist command:new`
+  - `/help command:<command>`, `/help command:playlist new`, `/help topic:playlists`, and `/help topic:playlist command:new`
 
 - **admin-only**:
   - `/cachestatus`

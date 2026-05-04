@@ -79,6 +79,7 @@ Queue reaction completed work:
 - While a playlist block is active, normal song requests should queue after that block and offer a `👍`/`👎` reaction prompt to move the song next instead.
 - Playlist list and edit views are paged with `◀️`/`▶️` reactions and edit their own message even after unrelated chat appears. Only the newest playlist list/edit message remains interactive.
 - `/help` should be compact by default and expand in place with a reaction. New playlist commands should appear in expanded help and docs.
+- Every root slash command should have a detailed `/help command:<command>` page. Playlist subcommands should work through both `/help command:playlist <subcommand>` and `/help topic:playlist command:<subcommand>`.
 - Keep admin-only permanent predownload support feature-flagged off by default. When enabled, files live under root `cache/` as `plst-<cache-key>.<ext>` and use the same path-safety approach as normal downloads.
 
 ## 2026-05-03 Playlist Removal & Blackbox Notes

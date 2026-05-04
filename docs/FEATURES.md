@@ -87,7 +87,7 @@ the bot tries to edit the latest now-playing message when no one has posted afte
 
 the `📜` reaction toggles the current queue above the now-playing block. the queue section uses bold numbered titles, optional italic urls, a divider, and then the current song. admins can use `/disablelinks` to hide urls from queue-style displays for the current bot session. users must be in the same voice channel as the bot to use playback-affecting commands or now-playing reactions, unless they are admins.
 
-playlist list/edit views use `◀️` and `▶️` reactions for pages. only the newest playlist view remains interactive. `/help` is compact by default and expands in place when users react with `📖`. playlist help is available with `/help topic:playlists`, and detailed subcommand pages use `/help topic:playlist command:new` style selectors.
+playlist list/edit views use `◀️` and `▶️` reactions for pages. only the newest playlist view remains interactive. `/help` is compact by default and expands in place when users react with `📖`. every root slash command has a manpage-style page through `/help command:<command>`, for example `/help command:nytsoi`. playlist help is available with `/help topic:playlists`, `/help command:playlist new`, and `/help topic:playlist command:new` style selectors.
 
 ## security hardening
 
