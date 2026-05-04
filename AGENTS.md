@@ -79,6 +79,7 @@ Queue reaction completed work:
 - While a playlist block is active, normal song requests should queue after that block and offer a `👍`/`👎` reaction prompt to move the song next instead.
 - Playlist list and edit views are paged with `◀️`/`▶️` reactions and edit their own message even after unrelated chat appears. Only the newest playlist list/edit message remains interactive.
 - `/help` should be compact by default and expand in place with a reaction. New playlist commands should appear in expanded help and docs.
+- Every root slash command should have a detailed `/help command:<command>` page. Playlist subcommands should work through both `/help command:playlist <subcommand>` and `/help topic:playlist command:<subcommand>`.
 - Keep admin-only permanent predownload support feature-flagged off by default. When enabled, files live under root `cache/` as `plst-<cache-key>.<ext>` and use the same path-safety approach as normal downloads.
 
 ## 2026-05-03 Playlist Removal & Blackbox Notes
@@ -133,3 +134,9 @@ Setup security checks:
 - Non-admin `/skip`, `/stop`, and `/volume` use a reaction vote prompt. Quorum is 50% of current human members in the bot voice channel, rounded up; bots are excluded. Admins bypass votes.
 - The bot starts at 20% volume. Admin `/volume_session` hard-sets volume until disconnect. Admin `/volume_default` saves a voice-channel default in `channel-volume-config.json`; keep that runtime config out of commits.
 - `yt-dlp` already selects `bestaudio`; quality improvements should prioritize download-and-play mode, current `yt-dlp`/JS runtimes, and conservative ffmpeg changes only after listening tests.
+
+## 2026-05-04 Cache Logging & Download Debug Notes
+- `/purgecache` should log a useful audit trail: cache directory, current file kept, every safe file removed with size, unsafe/non-media skips, stale `downloads.json` metadata removals, failure count, and final removed bytes.
+- Cache lookup uses canonical base64 filenames, but exact legacy files named `cache/<youtube-id>.<ext>` or `cache/plst-<youtube-id>.<ext>` are adopted to canonical names when the same YouTube id is requested. Do not adopt arbitrary title filenames.
+- `/togglelog debug` enables DEBUG logging plus sanitized editable `/play` download debug messages. These messages may show track title/id, cache hit/miss/downloaded/stream-only state, yt-dlp format id, progress bytes, speed, and the generic ffmpeg path, but must not expose absolute local paths or tokens.
+- The debug message collapse reaction edits the message down to a normal summary and clears reactions.

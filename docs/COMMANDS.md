@@ -75,8 +75,8 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | command | purpose |
 | --- | --- |
 | `/cachestatus` | show cache directory, size, file count, global playlist cache mode, and force-global state. admin only. |
-| `/purgecache` | delete validated media files from `cache/`, keeping the current playing file if present. admin only. |
-| `/togglelog` | toggle verbose debug logging. admin only. |
+| `/purgecache` | delete validated media files from `cache/`, keeping the current playing file if present, and report scanned/removed/skipped/metadata-cleaned counts. admin only. |
+| `/togglelog [toggle\|debug\|normal\|off]` | toggle verbose debug logging. `debug` also enables editable `/play` download debug messages. admin only. |
 | `/toggledownload` | switch between download-and-play mode and stream-only mode. admin only. |
 | `/disablelinks` | toggle whether queue-style displays are allowed to show youtube links. admin only. |
 | `/volume_session <1-100>` | hard-set this bot session's volume until disconnect. admin only. |
@@ -103,8 +103,10 @@ status views:
 
 | command | purpose |
 | --- | --- |
-| `/help` | show the in-discord command summary. |
+| `/help` | show the in-discord command summary. react `📖` to expand it. |
+| `/help command:<command>` | show a manpage-style help page for any root command, for example `/help command:nytsoi`, `/help command:play`, or `/help command:purgecache`. |
+| `/help command:playlist <subcommand>` | show playlist subcommand help without setting a topic, for example `/help command:playlist new`. |
 | `/help topic:playlists` | show the playlist quick-start help page. |
 | `/help topic:playlist command:<subcommand>` | show a manpage-style playlist subcommand help page. available pages: `new`, `list`, `show`, `play`, `edit`, `add`, `fill`, `addmod`, `remove`, `delete`, `rename`, `removesong`, `move`, `lock`, `cachemode`, `cacheglobal`, `rescue`, `predownload`. |
 
-React `📖` on the help message to expand the compact help into the full command list.
+Every slash command has a command-specific help page. Use command names without the leading slash.

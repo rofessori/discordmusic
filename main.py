@@ -63,6 +63,7 @@ MIN_VOLUME_LEVEL = 1
 MAX_VOLUME_LEVEL = 100
 VOICE_VOTE_TIMEOUT_SECONDS = 45
 HELP_EXPAND_REACTION = "📖"
+DEBUG_COLLAPSE_REACTION = "🧹"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -108,6 +109,9 @@ def path_from_metadata(path: Optional[str]) -> Optional[str]:
 def metadata_path_for_cache_file(file_path: str) -> str:
     return display_path(file_path).replace(os.sep, "/")
 
+def is_valid_cache_key(cache_key: Optional[str]) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{16,256}", str(cache_key or "")))
+
 def is_safe_cache_path(file_path: str, expected_cache_key: Optional[str] = None) -> bool:
     """Only trust media files that resolve inside the root cache directory."""
     if not file_path:
@@ -128,8 +132,12 @@ def is_safe_cache_path(file_path: str, expected_cache_key: Optional[str] = None)
         stem, ext = os.path.splitext(filename)
         if ext.lower() not in SAFE_MEDIA_EXTENSIONS:
             return False
-        if expected_cache_key and expected_cache_key not in stem:
-            return False
+        if expected_cache_key:
+            if not is_valid_cache_key(expected_cache_key):
+                return False
+            allowed_stems = {expected_cache_key, f"plst-{expected_cache_key}"}
+            if stem not in allowed_stems:
+                return False
         return True
     except (OSError, ValueError):
         return False
@@ -353,8 +361,12 @@ def cache_key_for_youtube_url(url: str) -> Optional[str]:
 
 def cache_key_for_track(track: dict) -> Optional[str]:
     cache_key = str(track.get("cache_key") or "").strip()
-    if cache_key:
+    if is_valid_cache_key(cache_key):
         return cache_key
+    if cache_key:
+        logger.warning(
+            f"Ignoring invalid cache key for {track.get('title', 'Unknown title')}: {cache_key[:80]}"
+        )
     video_id = str(track.get("id") or "").strip()
     if video_id:
         return canonical_cache_key_from_video_id(video_id)
@@ -367,6 +379,17 @@ def cache_filename(cache_key: str, ext: str, *, playlist: bool = False) -> str:
 
 def cache_path_for_key(cache_key: str, ext: str, *, playlist: bool = False) -> str:
     return os.path.join(CACHE_DIR, cache_filename(cache_key, ext, playlist=playlist))
+
+def human_bytes(num_bytes: Optional[float]) -> str:
+    try:
+        value = float(num_bytes or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    for unit in units:
+        if abs(value) < 1024.0 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024.0
 
 def cache_file_size(file_path: str) -> int:
     try:
@@ -392,8 +415,58 @@ def cache_total_bytes() -> int:
 def cache_has_room(projected_bytes: int = 0) -> bool:
     return cache_total_bytes() + max(0, projected_bytes or 0) <= CACHE_HARD_LIMIT_BYTES
 
-def find_existing_cache_file(cache_key: Optional[str], *, prefer_playlist: bool = True) -> Optional[str]:
+def find_legacy_cache_file(video_id: Optional[str], *, prefer_playlist: bool = True) -> tuple:
+    if not video_id or not os.path.isdir(CACHE_DIR):
+        return None, False
+    try:
+        filenames = os.listdir(CACHE_DIR)
+    except OSError as exc:
+        logger.warning(f"Could not inspect cache directory for legacy file: {exc}")
+        return None, False
+    stems = [f"plst-{video_id}", video_id] if prefer_playlist else [video_id, f"plst-{video_id}"]
+    for stem in stems:
+        for filename in filenames:
+            file_stem, ext = os.path.splitext(filename)
+            if file_stem != stem or ext.lower() not in SAFE_MEDIA_EXTENSIONS:
+                continue
+            path = os.path.join(CACHE_DIR, filename)
+            if is_safe_cache_path(path):
+                return path, stem.startswith("plst-")
+    return None, False
+
+def adopt_legacy_cache_file(video_id: Optional[str], cache_key: Optional[str], *, prefer_playlist: bool = True) -> Optional[str]:
+    legacy_path, playlist = find_legacy_cache_file(video_id, prefer_playlist=prefer_playlist)
+    if not legacy_path or not cache_key:
+        return None
+    ext = os.path.splitext(legacy_path)[1].lstrip(".").lower()
+    target_path = cache_path_for_key(cache_key, ext, playlist=playlist)
+    if os.path.realpath(legacy_path) == os.path.realpath(target_path):
+        return legacy_path
+    if os.path.exists(target_path):
+        logger.info(
+            f"Legacy cache file exists for {video_id}, but canonical cache file already exists: "
+            f"legacy={metadata_path_for_cache_file(legacy_path)} canonical={metadata_path_for_cache_file(target_path)}"
+        )
+        return target_path if is_safe_cache_path(target_path, cache_key) else None
+    try:
+        os.replace(legacy_path, target_path)
+    except OSError as exc:
+        logger.warning(
+            f"Could not adopt legacy cache file for {video_id}: "
+            f"{metadata_path_for_cache_file(legacy_path)} -> {metadata_path_for_cache_file(target_path)}: {exc}"
+        )
+        return None
+    logger.info(
+        f"Adopted legacy cache file for {video_id}: "
+        f"{metadata_path_for_cache_file(legacy_path)} -> {metadata_path_for_cache_file(target_path)}"
+    )
+    return target_path if is_safe_cache_path(target_path, cache_key) else None
+
+def find_existing_cache_file(cache_key: Optional[str], *, prefer_playlist: bool = True, video_id: Optional[str] = None) -> Optional[str]:
     if not cache_key or not os.path.isdir(CACHE_DIR):
+        return None
+    if not is_valid_cache_key(cache_key):
+        logger.warning(f"Cache lookup skipped invalid cache key: {str(cache_key)[:80]}")
         return None
     try:
         filenames = os.listdir(CACHE_DIR)
@@ -407,7 +480,12 @@ def find_existing_cache_file(cache_key: Optional[str], *, prefer_playlist: bool 
                 continue
             path = os.path.join(CACHE_DIR, filename)
             if is_safe_cache_path(path, cache_key):
+                logger.debug(f"Cache hit for key={cache_key}: {metadata_path_for_cache_file(path)}")
                 return path
+    adopted = adopt_legacy_cache_file(video_id, cache_key, prefer_playlist=prefer_playlist)
+    if adopted:
+        return adopted
+    logger.debug(f"Cache miss for key={cache_key} video_id={video_id or '-'}")
     return None
 
 def apply_cache_fields(track: dict, file_path: Optional[str], *, cache_mode: str):
@@ -428,10 +506,11 @@ def apply_cache_fields(track: dict, file_path: Optional[str], *, cache_mode: str
 
 def cached_file_for_track(track: dict, *, prefer_playlist: bool = True) -> Optional[str]:
     cache_key = cache_key_for_track(track)
+    video_id = str(track.get("id") or "").strip() or None
     cache_path = track.get("cache_path")
     if cache_path and is_safe_cache_path(cache_path, cache_key):
         return path_from_metadata(cache_path)
-    return find_existing_cache_file(cache_key, prefer_playlist=prefer_playlist)
+    return find_existing_cache_file(cache_key, prefer_playlist=prefer_playlist, video_id=video_id)
 
 def youtube_url_for_track(track: dict) -> str:
     return track.get('webpage_url') or youtube_watch_url + str(track.get('id') or '')
@@ -563,6 +642,32 @@ class VoiceVote:
     created_at: float = 0.0
     expires_at: float = 0.0
     task: object = None
+
+@dataclass
+class PurgeCacheResult:
+    scanned: int = 0
+    removed: int = 0
+    removed_bytes: int = 0
+    kept_current: int = 0
+    skipped_unsafe: int = 0
+    failed: int = 0
+    metadata_removed: int = 0
+
+@dataclass
+class DebugPlaybackMessage:
+    message: object
+    normal_content: str
+    stage: str = "starting"
+    title: str = ""
+    video_id: str = ""
+    cache_state: str = ""
+    format_id: str = ""
+    downloaded_bytes: int = 0
+    total_bytes: int = 0
+    speed: Optional[float] = None
+    status: str = "active"
+    error: str = ""
+    last_edit_at: float = 0.0
 
 def run_startup_diagnostics() -> StartupReport:
     report = StartupReport(errors=[], warnings=[], notes=[])
@@ -895,6 +1000,8 @@ class Client(discord.Client):
         self.playlist_creation_sessions = {}
         self.playlist_creation_timeout_tasks = {}
         self.active_voice_votes = {}
+        self.download_debug_messages = False
+        self.debug_playback_messages = {}
         # File deletion task tracking
         self.deletion_tasks = {}              # map video_id -> asyncio.Future
         # Played tracks tracking
@@ -930,6 +1037,7 @@ def build_runtime_status():
         f"- currently playing: **{discord.utils.escape_markdown(str(current))}**",
         f"- volume: `{int(round(client.volume * 100))}%` (`{'session' if client.session_volume_locked else 'channel/default'}`)",
         f"- log level: `{logging.getLevelName(logger.level)}`",
+        f"- download debug messages: `{'enabled' if client.download_debug_messages else 'disabled'}`",
         f"- queue links: `{'disabled' if client.queue_links_disabled else 'enabled'}`",
         f"- song delete delay: `{client.download_delete_delay_seconds}s`",
         f"- auto leave: `{'enabled' if client.auto_leave_enabled else 'disabled'}` (`{client.auto_leave_delay_seconds}s`)",
@@ -958,6 +1066,114 @@ async def safe_interaction_send(ctx, message: str, *, ephemeral: bool = False):
         command_name = getattr(getattr(ctx, "command", None), "name", "unknown")
         logger.warning(f"Could not respond to /{command_name}: {exc}")
         return None
+
+def debug_playback_content(report: DebugPlaybackMessage, *, collapsed: bool = False) -> str:
+    if collapsed:
+        title = discord.utils.escape_markdown(report.title or "track")
+        video_id = discord.utils.escape_markdown(report.video_id or "-")
+        return f"**download debug hidden**\n- track: **{title}** (`{video_id}`)"
+    lines = [
+        "**download debug**",
+        f"- stage: `{discord.utils.escape_markdown(report.stage)}`",
+    ]
+    if report.title or report.video_id:
+        lines.append(
+            f"- track: **{discord.utils.escape_markdown(report.title or 'unknown')}** "
+            f"(`{discord.utils.escape_markdown(report.video_id or '-')}`)"
+        )
+    if report.cache_state:
+        lines.append(f"- cache: `{discord.utils.escape_markdown(report.cache_state)}`")
+    if report.format_id:
+        lines.append(f"- yt-dlp format: `{discord.utils.escape_markdown(report.format_id)}`")
+    if report.total_bytes or report.downloaded_bytes:
+        total = human_bytes(report.total_bytes) if report.total_bytes else "unknown"
+        lines.append(f"- downloaded: `{human_bytes(report.downloaded_bytes)} / {total}`")
+    if report.speed:
+        lines.append(f"- speed: `{human_bytes(report.speed)}/s`")
+    if report.error:
+        lines.append(f"- internal error: `{discord.utils.escape_markdown(truncate_text(sanitize_debug_text(report.error), 140))}`")
+        lines.append("- user error: `normal command error was sent separately`")
+    if report.status in {"done", "error"}:
+        if report.status == "done":
+            lines.append("- ffmpeg: `audio-only (-vn), Discord PCM volume transformer`")
+        lines.append(f"_react {DEBUG_COLLAPSE_REACTION} to hide debug details._")
+    return "\n".join(lines)
+
+def sanitize_debug_text(value: str) -> str:
+    text = str(value or "")
+    replacements = [
+        (CACHE_DIR, "cache"),
+        (BASE_DIR, "<repo>"),
+    ]
+    for absolute, label in replacements:
+        if absolute:
+            text = text.replace(absolute, label)
+    return text
+
+async def edit_debug_playback_message(report: DebugPlaybackMessage, *, force: bool = False):
+    if not report or not report.message:
+        return
+    now = time.time()
+    if not force and now - report.last_edit_at < 1.0:
+        return
+    report.last_edit_at = now
+    try:
+        await report.message.edit(content=debug_playback_content(report))
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+        logger.warning(f"Could not edit debug playback message: {exc}")
+
+def schedule_debug_playback_update(report: Optional[DebugPlaybackMessage], loop, *, force: bool = False):
+    if not report or not loop:
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(edit_debug_playback_message(report, force=force), loop)
+    except RuntimeError as exc:
+        logger.debug(f"Could not schedule debug playback update: {exc}")
+
+async def create_debug_playback_message(ctx, command: str) -> Optional[DebugPlaybackMessage]:
+    if not client.download_debug_messages:
+        return None
+    normal = f"**download debug hidden**\n- command: `/{command}`"
+    try:
+        message = await ctx.followup.send(
+            f"**download debug**\n- command: `/{command}`\n- stage: `starting`",
+            wait=True,
+        )
+        report = DebugPlaybackMessage(message=message, normal_content=normal, stage="starting")
+        client.debug_playback_messages[message.id] = report
+        return report
+    except Exception as exc:
+        logger.warning(f"Could not create debug playback message: {exc}")
+        return None
+
+async def finish_debug_playback_message(report: Optional[DebugPlaybackMessage], *, status: str = "done", error: str = ""):
+    if not report:
+        return
+    report.status = status
+    if error:
+        report.error = error
+        report.stage = "error"
+    elif report.stage not in {"cache-hit", "streaming", "queued", "playing"}:
+        report.stage = status
+    await edit_debug_playback_message(report, force=True)
+    if status in {"done", "error"}:
+        try:
+            await report.message.add_reaction(DEBUG_COLLAPSE_REACTION)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            logger.warning(f"Could not add debug collapse reaction: {exc}")
+
+async def handle_debug_playback_reaction(reaction, user) -> bool:
+    report = client.debug_playback_messages.get(reaction.message.id)
+    if not report:
+        return False
+    if str(reaction.emoji) != DEBUG_COLLAPSE_REACTION:
+        return True
+    try:
+        await reaction.message.edit(content=debug_playback_content(report, collapsed=True))
+        await reaction.message.clear_reactions()
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+        logger.warning(f"Could not collapse debug playback message: {exc}")
+    return True
 
 def user_display(user) -> str:
     return str(getattr(user, "display_name", None) or getattr(user, "name", None) or user)
@@ -2399,6 +2615,7 @@ def compact_help_message() -> str:
         "/playtop <query> - add next",
         "/enqueue <query> (alias /q) - add to queue",
         "/queue - show queue",
+        "/help command:<command> - detailed command help",
         "/help - react 📖 for full help",
     ])
 
@@ -2436,6 +2653,8 @@ def expanded_help_message() -> str:
         "**admin / other**",
         "/clear_queue, /restorequeue, /purgequeue, /purgecache, /cachestatus, /autoleave, /setdeletetime, /volume_session, /volume_default, /togglelog, /toggledownload, /disablelinks, /reboot, /status",
         "/backup_teekkari_quotes, /random_quote",
+        "",
+        "Detailed help: `/help command:play`, `/help command:nytsoi`, `/help command:playlist new`.",
     ])
 
 def playlist_general_help_message() -> str:
@@ -2643,9 +2862,381 @@ def format_playlist_manpage(command: str) -> Optional[str]:
     ]
     return "\n".join(lines)
 
+def command_help_pages() -> dict:
+    return {
+        "join": {
+            "purpose": "connect the bot to your voice channel",
+            "synopsis": ["/join"],
+            "description": "Joins the voice channel you are currently in and resets the session song history for the new listening session.",
+            "arguments": ["none"],
+            "examples": ["/join"],
+            "notes": ["You must already be in a voice channel.", "Playback commands can also connect the bot automatically."],
+            "errors": ["Not in voice - join a voice channel first.", "Discord voice connection failed - check output.log."],
+        },
+        "play": {
+            "purpose": "play or queue YouTube audio",
+            "synopsis": ["/play <youtube url or search>", "/play playlist:<name>", "/play last"],
+            "description": "Resolves YouTube URLs or search text with yt-dlp. If nothing is playing, the track starts immediately; otherwise it is queued. Playlist names can start or queue saved playlists.",
+            "arguments": ["<query> - YouTube URL, YouTube search text, playlist:name, or last/play:last."],
+            "examples": ["/play viidestoista yö", "/play https://youtube.com/watch?v=...", "/play playlist:Roadtrip", "/play last"],
+            "notes": ["Raw non-YouTube URLs are rejected.", "Download mode caches audio under cache/; stream-only mode skips local caching.", "With `/togglelog debug`, /play posts an editable sanitized download debug message."],
+            "errors": ["Need voice channel - join voice first.", "Extraction failed - check yt-dlp, deno/node, and output.log.", "Large download - admin confirmation may be required."],
+        },
+        "playtop": {
+            "purpose": "play a song next",
+            "synopsis": ["/playtop <query>"],
+            "description": "Adds a resolved YouTube track to the front of the queue. If nothing is currently playing, it starts immediately.",
+            "arguments": ["<query> - YouTube URL or search text."],
+            "examples": ["/playtop panzermensch"],
+            "notes": ["This does not interrupt the current track when something is already playing."],
+            "errors": ["Queue limit reached for non-admins.", "Extraction failed - check output.log."],
+        },
+        "enqueue": {
+            "purpose": "add a song or playlist to the end of the queue",
+            "synopsis": ["/enqueue <query>", "/enqueue playlist:<name>"],
+            "description": "Resolves a YouTube query or visible playlist and appends it to the upcoming queue.",
+            "arguments": ["<query> - YouTube URL, search text, playlist:name, or exact playlist name."],
+            "examples": ["/enqueue and one panzermensch", "/enqueue playlist:Roadtrip"],
+            "notes": ["Alias: /q.", "If a playlist is actively playing, normal song requests are placed after that playlist block."],
+            "errors": ["Queue limit reached.", "Large download requires /play confirmation."],
+        },
+        "q": {
+            "purpose": "alias for enqueue",
+            "synopsis": ["/q <query>"],
+            "description": "Short alias for `/enqueue` with the same behavior.",
+            "arguments": ["<query> - YouTube URL, search text, playlist:name, or exact playlist name."],
+            "examples": ["/q viidestoista yö"],
+            "notes": ["Use `/help command:enqueue` for the full behavior."],
+            "errors": ["Same as `/enqueue`."],
+        },
+        "queue": {
+            "purpose": "show the upcoming queue",
+            "synopsis": ["/queue", "/queue links:true"],
+            "description": "Displays upcoming tracks with 1-based positions. Those positions are used by commands like `/queuefirst` and `/playlist add ... queue`.",
+            "arguments": ["links - true shows YouTube links unless an admin disabled queue links."],
+            "examples": ["/queue", "/queue links:true"],
+            "notes": ["Alias: /queuelist.", "The currently playing song is not part of the upcoming queue."],
+            "errors": ["Queue is empty - add songs with /play, /enqueue, or /q."],
+        },
+        "queuelist": {
+            "purpose": "alias for queue",
+            "synopsis": ["/queuelist", "/queuelist links:true"],
+            "description": "Alias for `/queue`.",
+            "arguments": ["links - true shows YouTube links unless links are disabled."],
+            "examples": ["/queuelist links:true"],
+            "notes": ["Use `/help command:queue` for the full behavior."],
+            "errors": ["Same as `/queue`."],
+        },
+        "queuefirst": {
+            "purpose": "move a queued song or playlist to play next",
+            "synopsis": ["/queuefirst <position>", "/queuefirst playlist:<name>"],
+            "description": "Moves an upcoming queue item to position 1, or moves/adds a playlist block to the front of the queue.",
+            "arguments": ["<position> - 1-based queue position.", "<playlist> - visible playlist name, id, or playlist:name."],
+            "examples": ["/queuefirst 3", "/queuefirst playlist:Roadtrip"],
+            "notes": ["Does not interrupt the currently playing track."],
+            "errors": ["Queue is empty.", "Position is outside the queue.", "Playlist is empty or not visible."],
+        },
+        "qfirst": {
+            "purpose": "alias for queuefirst",
+            "synopsis": ["/qfirst <position or playlist>"],
+            "description": "Short alias for `/queuefirst`.",
+            "arguments": ["<target> - queue position or visible playlist."],
+            "examples": ["/qfirst 2"],
+            "notes": ["Use `/help command:queuefirst` for the full behavior."],
+            "errors": ["Same as `/queuefirst`."],
+        },
+        "skip": {
+            "purpose": "skip the current track",
+            "synopsis": ["/skip"],
+            "description": "Requests that the current track stop so the next queued track can start. Non-admins start or join a reaction vote; admins bypass the vote.",
+            "arguments": ["none"],
+            "examples": ["/skip"],
+            "notes": ["Quorum is 50% of current human voice-channel members, rounded up.", "The now-playing ▶️ reaction uses the same vote logic."],
+            "errors": ["No track is playing.", "You must be in the bot's voice channel."],
+        },
+        "pause": {
+            "purpose": "pause playback",
+            "synopsis": ["/pause"],
+            "description": "Pauses the current audio without clearing the queue or disconnecting.",
+            "arguments": ["none"],
+            "examples": ["/pause"],
+            "notes": ["The now-playing ⏸️ reaction can also pause or resume."],
+            "errors": ["No audio is playing.", "Already paused.", "You must be in the bot's voice channel."],
+        },
+        "resume": {
+            "purpose": "resume paused playback",
+            "synopsis": ["/resume"],
+            "description": "Resumes audio that was paused with /pause or the now-playing pause reaction.",
+            "arguments": ["none"],
+            "examples": ["/resume"],
+            "notes": ["Does nothing if audio is already playing."],
+            "errors": ["No audio is paused.", "You must be in the bot's voice channel."],
+        },
+        "stop": {
+            "purpose": "stop playback and leave voice",
+            "synopsis": ["/stop"],
+            "description": "Stops playback, clears the upcoming queue, disconnects from voice, and resets session-only volume. Non-admins vote; admins bypass.",
+            "arguments": ["none"],
+            "examples": ["/stop"],
+            "notes": ["Use `/autoleave` if you want automatic leave when nobody is listening."],
+            "errors": ["Bot is not in voice.", "You must be in the bot's voice channel."],
+        },
+        "volume": {
+            "purpose": "vote to change playback volume",
+            "synopsis": ["/volume <1-100>"],
+            "description": "Sets the current playback volume after a non-admin vote. Admins bypass the vote.",
+            "arguments": ["<level> - volume percentage from 1 to 100."],
+            "examples": ["/volume 20", "/volume 35"],
+            "notes": ["The startup default is 20%.", "Admins can use `/volume_session` for a session hard-set or `/volume_default` for a persistent channel default."],
+            "errors": ["Level outside 1-100.", "Bot is not in voice.", "You must be in the bot's voice channel."],
+        },
+        "now": {
+            "purpose": "show the current song",
+            "synopsis": ["/now"],
+            "description": "Shows the currently playing track title and YouTube video id.",
+            "arguments": ["none"],
+            "examples": ["/now"],
+            "notes": ["Alias: /nytsoi.", "This intentionally stays compact and does not show the full URL."],
+            "errors": ["No song is currently playing."],
+        },
+        "nytsoi": {
+            "purpose": "Finnish alias for now",
+            "synopsis": ["/nytsoi"],
+            "description": "Shows the currently playing track title and YouTube video id, same as `/now`.",
+            "arguments": ["none"],
+            "examples": ["/nytsoi"],
+            "notes": ["Use `/help command:now` for the non-alias page."],
+            "errors": ["No song is currently playing."],
+        },
+        "getqueue": {
+            "purpose": "show session song history",
+            "synopsis": ["/getqueue"],
+            "description": "Lists songs requested since the bot joined voice and marks each as playing, queued, played, or removed.",
+            "arguments": ["none"],
+            "examples": ["/getqueue"],
+            "notes": ["This is session memory, not persistent storage."],
+            "errors": ["No songs have been requested this session."],
+        },
+        "clear_queue": {
+            "purpose": "clear the upcoming queue",
+            "synopsis": ["/clear_queue"],
+            "description": "Clears the current upcoming queue and keeps a short in-memory backup for `/restorequeue`. Admins are asked whether to delete downloaded files too.",
+            "arguments": ["none"],
+            "examples": ["/clear_queue"],
+            "notes": ["Does not stop the currently playing song.", "Non-admins cannot delete files from disk."],
+            "errors": ["Queue is already empty.", "You must be in the bot's voice channel."],
+        },
+        "restorequeue": {
+            "purpose": "restore a recently cleared or reboot-saved queue",
+            "synopsis": ["/restorequeue"],
+            "description": "Restores a queue from the short in-memory clear backup or from a reboot backup file if it is still fresh.",
+            "arguments": ["none"],
+            "examples": ["/restorequeue"],
+            "notes": ["Admin only.", "The restore window is 10 minutes.", "The current queue must be empty."],
+            "errors": ["No backup available.", "Backup is too old.", "Queue is not empty."],
+        },
+        "cachestatus": {
+            "purpose": "inspect media cache usage",
+            "synopsis": ["/cachestatus"],
+            "description": "Shows cache directory, safe media file count, size against hard cap, and playlist cache policy.",
+            "arguments": ["none"],
+            "examples": ["/cachestatus"],
+            "notes": ["Admin only.", "Only validated media files are counted."],
+            "errors": ["Admin permission required."],
+        },
+        "purgecache": {
+            "purpose": "delete validated cache files",
+            "synopsis": ["/purgecache"],
+            "description": "Deletes safe media files from cache while keeping the current playing file. Reports scanned, removed, skipped, failed, bytes freed, and stale metadata cleanup counts.",
+            "arguments": ["none"],
+            "examples": ["/purgecache"],
+            "notes": ["Admin only.", "Unsafe paths and non-media files are skipped.", "Detailed audit lines are written to output.log."],
+            "errors": ["Admin permission required.", "Some files may fail to delete due to OS permissions."],
+        },
+        "purgequeue": {
+            "purpose": "delete tracked downloaded files without changing the queue",
+            "synopsis": ["/purgequeue"],
+            "description": "Removes tracked downloaded files from disk but leaves queued song entries intact. The current playing file is skipped.",
+            "arguments": ["none"],
+            "examples": ["/purgequeue"],
+            "notes": ["Admin only.", "Deletion uses the safe media-file validation helper."],
+            "errors": ["Admin permission required."],
+        },
+        "setdeletetime": {
+            "purpose": "set delayed download cleanup time",
+            "synopsis": ["/setdeletetime <seconds>"],
+            "description": "Controls how long played downloaded songs wait before delayed cleanup removes their cache file.",
+            "arguments": ["<seconds> - value between the configured minimum and maximum."],
+            "examples": ["/setdeletetime 600", "/setdeletetime 0"],
+            "notes": ["Admin only.", "Already scheduled deletion tasks keep their original timer."],
+            "errors": ["Seconds outside allowed range.", "Admin permission required."],
+        },
+        "autoleave": {
+            "purpose": "leave voice when nobody is listening",
+            "synopsis": ["/autoleave <enabled> [delay_seconds]"],
+            "description": "When enabled, the bot waits while alone in voice, saves the current song and queue, disconnects, and lets users restore with `/play last`.",
+            "arguments": ["enabled - true or false.", "delay_seconds - optional delay before leaving."],
+            "examples": ["/autoleave true 10", "/autoleave false"],
+            "notes": ["Admin only.", "The bot cancels the pending leave when a human rejoins voice."],
+            "errors": ["Delay outside allowed range.", "Admin permission required."],
+        },
+        "volume_session": {
+            "purpose": "admin session volume hard-set",
+            "synopsis": ["/volume_session <1-100>"],
+            "description": "Sets the bot's current session volume immediately and keeps it until the bot disconnects.",
+            "arguments": ["<level> - volume percentage from 1 to 100."],
+            "examples": ["/volume_session 20"],
+            "notes": ["Admin only.", "This overrides channel defaults for the current connection only."],
+            "errors": ["Bot is not connected to voice.", "Level outside 1-100.", "Admin permission required."],
+        },
+        "volume_default": {
+            "purpose": "save a persistent channel volume default",
+            "synopsis": ["/volume_default <1-100>"],
+            "description": "Stores the default volume for the current voice channel in channel-volume-config.json.",
+            "arguments": ["<level> - volume percentage from 1 to 100."],
+            "examples": ["/volume_default 20"],
+            "notes": ["Admin only.", "Applied when the bot joins that voice channel unless a session hard-set is active."],
+            "errors": ["No voice channel context.", "Level outside 1-100.", "Config write failed."],
+        },
+        "togglelog": {
+            "purpose": "toggle server debug logging",
+            "synopsis": ["/togglelog", "/togglelog debug", "/togglelog normal"],
+            "description": "Turns DEBUG logging on or off. Debug mode also enables sanitized editable `/play` download debug messages.",
+            "arguments": ["mode - toggle, debug, normal, or off."],
+            "examples": ["/togglelog debug", "/togglelog normal"],
+            "notes": ["Admin only.", "Debug messages can be collapsed with the cleanup reaction.", "Do not leave verbose logs on forever in production."],
+            "errors": ["Admin permission required."],
+        },
+        "toggledownload": {
+            "purpose": "switch download mode",
+            "synopsis": ["/toggledownload"],
+            "description": "Switches between download-and-play mode and stream-only mode.",
+            "arguments": ["none"],
+            "examples": ["/toggledownload"],
+            "notes": ["Admin only.", "Download mode is more stable after extraction succeeds; stream-only uses less disk."],
+            "errors": ["Admin permission required."],
+        },
+        "disablelinks": {
+            "purpose": "toggle queue link display",
+            "synopsis": ["/disablelinks"],
+            "description": "Turns YouTube link display on or off in queue-style views, including `/queue links:true` and the now-playing queue section.",
+            "arguments": ["none"],
+            "examples": ["/disablelinks"],
+            "notes": ["Admin only.", "The command toggles the current session setting."],
+            "errors": ["Admin permission required."],
+        },
+        "reboot": {
+            "purpose": "save queue and restart the bot process",
+            "synopsis": ["/reboot"],
+            "description": "Asks for reaction confirmation, writes current queue/current track to queue_backup.json, disconnects, and exits the process.",
+            "arguments": ["none"],
+            "examples": ["/reboot"],
+            "notes": ["Admin only.", "Use `/restorequeue` after the process starts again."],
+            "errors": ["Confirmation timed out.", "Backup write failed - check output.log."],
+        },
+        "backup_teekkari_quotes": {
+            "purpose": "back up configured quote channel",
+            "synopsis": ["/backup_teekkari_quotes"],
+            "description": "Scans the configured quotes channel and rewrites quotes.txt through quotes.py.",
+            "arguments": ["none"],
+            "examples": ["/backup_teekkari_quotes"],
+            "notes": ["Requires QUOTES_ID to point at an accessible channel.", "QUOTES_ID=0 disables quote backup."],
+            "errors": ["Quotes channel disabled or inaccessible."],
+        },
+        "random_quote": {
+            "purpose": "show a random saved quote",
+            "synopsis": ["/random_quote"],
+            "description": "Returns one random quote from quotes.txt using the quote persistence helper.",
+            "arguments": ["none"],
+            "examples": ["/random_quote"],
+            "notes": ["Run `/backup_teekkari_quotes` first if the quote file is empty."],
+            "errors": ["Quote storage empty or unavailable."],
+        },
+        "help": {
+            "purpose": "show command help",
+            "synopsis": ["/help", "/help command:<command>", "/help topic:playlist command:<subcommand>"],
+            "description": "Shows compact help, a command-specific manpage, or playlist topic help.",
+            "arguments": ["topic - optional topic such as playlist.", "command - command or playlist subcommand name."],
+            "examples": ["/help", "/help command:nytsoi", "/help topic:playlist command:new"],
+            "notes": ["Use command names without the leading slash.", "Playlist subcommands can be addressed as `playlist new` or with topic:playlist."],
+            "errors": ["Unknown command - check spelling or run `/help`."],
+        },
+        "status": {
+            "purpose": "show runtime status and session audit",
+            "synopsis": ["/status", "/status latest", "/status session", "/status commands"],
+            "description": "Shows runtime mode, queue/cache state, warning summary, latest suggestion, session suggestions, or recent commands.",
+            "arguments": ["view - latest, session, or commands."],
+            "examples": ["/status", "/status session"],
+            "notes": ["Admin only.", "Session audit lives in memory and resets when the bot restarts."],
+            "errors": ["Admin permission required."],
+        },
+    }
+
+def command_aliases() -> dict:
+    return {
+        "play:last": "play",
+        "/play:last": "play",
+        "playlist:list": "playlist list",
+        "playlist:new": "playlist new",
+        "playlist:edit": "playlist edit",
+        "playlist:show": "playlist show",
+        "playlist:play": "playlist play",
+        "playlist:add": "playlist add",
+        "playlist:fill": "playlist fill",
+        "playlist:addmod": "playlist addmod",
+        "playlist:remove": "playlist remove",
+        "playlist:delete": "playlist delete",
+        "playlist:rescue": "playlist rescue",
+        "playlist:removesong": "playlist removesong",
+        "playlist:move": "playlist move",
+        "playlist:rename": "playlist rename",
+        "playlist:lock": "playlist lock",
+        "playlist:cachemode": "playlist cachemode",
+        "playlist:cacheglobal": "playlist cacheglobal",
+        "playlist:predownload": "playlist predownload",
+    }
+
+def normalize_help_command(command: str) -> str:
+    key = str(command or "").strip().lower()
+    key = key.lstrip("/")
+    key = re.sub(r"\s+", " ", key)
+    key = command_aliases().get(key, key)
+    if key.startswith("playlist ") and len(key.split(" ", 1)) == 2:
+        return key
+    return key.replace(" ", "_")
+
+def format_command_manpage(command: str) -> Optional[str]:
+    key = normalize_help_command(command)
+    if key.startswith("playlist "):
+        _, subcommand = key.split(" ", 1)
+        return format_playlist_manpage(subcommand)
+    page = command_help_pages().get(key)
+    if not page:
+        return None
+    lines = [
+        f"**NAME**\n  {key} - {page['purpose']}",
+        "**SYNOPSIS**",
+        *[f"  {item}" for item in page["synopsis"]],
+        "**DESCRIPTION**",
+        f"  {page['description']}",
+        "**ARGUMENTS**",
+        *[f"  {item}" for item in page["arguments"]],
+        "**EXAMPLES**",
+        *[f"  {item}" for item in page["examples"]],
+        "**NOTES**",
+        *[f"  {item}" for item in page["notes"]],
+        "**COMMON ERRORS**",
+        *[f"  {item}" for item in page["errors"]],
+    ]
+    return "\n".join(lines)
+
 def help_message_for(topic: Optional[str] = None, command: Optional[str] = None) -> Optional[str]:
     topic_key = str(topic or "").strip().lower()
     command_key = str(command or "").strip().lower()
+    if command_key and not topic_key:
+        if normalize_help_command(command_key) in {"playlist", "playlists"}:
+            return playlist_general_help_message()
+        return format_command_manpage(command_key) or f"No help page for `{command}`. Try `/help` for the command list."
     if not topic_key:
         return None
     if topic_key in {"playlist", "playlists"}:
@@ -2673,13 +3264,37 @@ def estimate_total_downloaded_bytes() -> int:
                 continue
     return total
 
-async def download_youtube_to_cache(video_url: str, cache_key: str, *, playlist: bool = False) -> tuple:
+async def download_youtube_to_cache(
+    video_url: str,
+    cache_key: str,
+    *,
+    playlist: bool = False,
+    debug_report: Optional[DebugPlaybackMessage] = None,
+) -> tuple:
     prefix = "plst-" if playlist else ""
     temp_token = secrets.token_hex(4)
     cache_bytes_before = cache_total_bytes()
     options = dict(ytdl_options)
     options["outtmpl"] = os.path.join(CACHE_DIR, f".download-{prefix}{cache_key}-{temp_token}.%(ext)s")
     loop = asyncio.get_event_loop()
+    if debug_report:
+        debug_report.stage = "downloading"
+        debug_report.cache_state = "miss"
+        await edit_debug_playback_message(debug_report, force=True)
+
+        def debug_progress_hook(status):
+            if not isinstance(status, dict):
+                return
+            debug_report.stage = str(status.get("status") or "downloading")
+            debug_report.downloaded_bytes = int(status.get("downloaded_bytes") or 0)
+            debug_report.total_bytes = int(status.get("total_bytes") or status.get("total_bytes_estimate") or 0)
+            debug_report.speed = status.get("speed")
+            info = status.get("info_dict") or {}
+            if info.get("format_id"):
+                debug_report.format_id = str(info.get("format_id"))
+            schedule_debug_playback_update(debug_report, loop)
+
+        options["progress_hooks"] = [debug_progress_hook]
     downloader = yt_dlp.YoutubeDL(options)
     data = await loop.run_in_executor(None, lambda: downloader.extract_info(video_url, download=True))
     if data is None:
@@ -2689,6 +3304,10 @@ async def download_youtube_to_cache(video_url: str, cache_key: str, *, playlist:
     if data is None:
         raise Exception("No playable result found during download")
     temp_path = downloader.prepare_filename(data)
+    if debug_report:
+        debug_report.format_id = str(data.get("format_id") or debug_report.format_id or "")
+        debug_report.stage = "downloaded"
+        await edit_debug_playback_message(debug_report, force=True)
     ext = os.path.splitext(temp_path)[1].lstrip(".").lower()
     target_path = cache_path_for_key(cache_key, ext, playlist=playlist)
     if not is_safe_cache_path(temp_path):
@@ -2704,7 +3323,7 @@ async def download_youtube_to_cache(video_url: str, cache_key: str, *, playlist:
         raise Exception("Final cache file failed safety validation.")
     return target_path, ext, data
 
-async def fetch_track(query: str, requested_by=None):
+async def fetch_track(query: str, requested_by=None, debug_report: Optional[DebugPlaybackMessage] = None):
     """
     Fetches YouTube track info for the given query (URL or search term).
     If download_mode is True, downloads the audio (unless cached) and returns track info with file path.
@@ -2716,13 +3335,22 @@ async def fetch_track(query: str, requested_by=None):
     video_url, video_id = normalize_youtube_query(query)
 
     cache_key = canonical_cache_key_from_video_id(video_id) if video_id else None
+    if debug_report:
+        debug_report.stage = "normalizing"
+        await edit_debug_playback_message(debug_report, force=True)
 
     # If we have a video_id and it's cached (and in download mode), use the cached file.
     if video_id and client.download_mode:
-        existing_cache = find_existing_cache_file(cache_key, prefer_playlist=True)
+        existing_cache = find_existing_cache_file(cache_key, prefer_playlist=True, video_id=video_id)
         info = downloaded.get(video_id, {})
         if existing_cache and info.get('title'):
             title = info.get('title', 'Unknown title')
+            if debug_report:
+                debug_report.title = title
+                debug_report.video_id = video_id
+                debug_report.cache_state = "hit"
+                debug_report.stage = "cache-hit"
+                await edit_debug_playback_message(debug_report, force=True)
             page_url = youtube_watch_url + video_id
             cache_mode = "playlist" if os.path.basename(existing_cache).startswith("plst-") else "shortterm"
             if cache_mode != "playlist":
@@ -2762,6 +3390,10 @@ async def fetch_track(query: str, requested_by=None):
     # Not cached or not using cache: fetch metadata (and download if needed)
     try:
         logger.debug(f"Fetching track info for query: {query}")
+        if debug_report:
+            debug_report.stage = "resolving"
+            debug_report.cache_state = "checking"
+            await edit_debug_playback_message(debug_report, force=True)
         loop = asyncio.get_event_loop()
         # Always extract metadata without downloading first (to get info like duration and size)
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(video_url, download=False))
@@ -2776,6 +3408,11 @@ async def fetch_track(query: str, requested_by=None):
         page_url = data.get('webpage_url', video_url)
         if not video_id:
             raise Exception("Resolved track is missing a YouTube video id.")
+        if debug_report:
+            debug_report.title = title
+            debug_report.video_id = video_id
+            debug_report.format_id = str(data.get("format_id") or "")
+            await edit_debug_playback_message(debug_report, force=True)
         page_url = canonical_youtube_url(video_id)
         cache_key = canonical_cache_key_from_video_id(video_id)
         duration = data.get('duration', 0) or 0  # duration in seconds
@@ -2799,9 +3436,13 @@ async def fetch_track(query: str, requested_by=None):
         if duration and duration > MAX_LENGTH_ADMIN:
             raise Exception("Track duration exceeds 5 hours (admin limit).")
 
-        existing_cache = find_existing_cache_file(cache_key, prefer_playlist=True)
+        existing_cache = find_existing_cache_file(cache_key, prefer_playlist=True, video_id=video_id)
         if existing_cache and client.download_mode:
             cache_mode = "playlist" if os.path.basename(existing_cache).startswith("plst-") else "shortterm"
+            if debug_report:
+                debug_report.cache_state = f"hit:{cache_mode}"
+                debug_report.stage = "cache-hit"
+                await edit_debug_playback_message(debug_report, force=True)
             if cache_mode != "playlist":
                 downloaded[video_id] = {
                     'title': title,
@@ -2854,11 +3495,15 @@ async def fetch_track(query: str, requested_by=None):
         if not client.download_mode:
             # Stream-only mode: do not download, just return info (no 'file' key)
             logger.info(f"Using stream-only mode for '{title}' ({video_id}).")
+            if debug_report:
+                debug_report.cache_state = "stream-only"
+                debug_report.stage = "streaming"
+                await edit_debug_playback_message(debug_report, force=True)
             return {'id': video_id, 'title': title, 'webpage_url': page_url, 'cache_key': cache_key, 'cache_mode': 'streaming', 'cache_path': None}
 
         # Download mode: download the audio file using yt_dlp
         logger.info(f"Downloading track '{title}' ({video_id})...")
-        file_path, ext, _ = await download_youtube_to_cache(video_url, cache_key, playlist=False)
+        file_path, ext, _ = await download_youtube_to_cache(video_url, cache_key, playlist=False, debug_report=debug_report)
         # Cache the downloaded file info
         downloaded[video_id] = {
             'title': title,
@@ -2870,6 +3515,10 @@ async def fetch_track(query: str, requested_by=None):
         }
         save_downloads_metadata("track download")
         logger.info(f"Downloaded '{title}' ({video_id}) to {file_path}")
+        if debug_report:
+            debug_report.cache_state = "downloaded"
+            debug_report.stage = "cached"
+            await edit_debug_playback_message(debug_report, force=True)
         return {
             'id': video_id,
             'title': title,
@@ -2881,6 +3530,9 @@ async def fetch_track(query: str, requested_by=None):
             'ext': ext,
         }
     except Exception as e:
+        if debug_report:
+            debug_report.error = str(e)
+            await finish_debug_playback_message(debug_report, status="error", error=str(e))
         logger.error(f"yt_dlp error for {query}: {e}")
         raise
 
@@ -3007,7 +3659,7 @@ async def cache_playlist_track(track: dict, *, playlist_cache: bool, projected_l
     video_id = str(track.get("id") or "").strip()
     if not cache_key or not video_id:
         return False, 0
-    existing = find_existing_cache_file(cache_key, prefer_playlist=True)
+    existing = find_existing_cache_file(cache_key, prefer_playlist=True, video_id=video_id)
     if existing:
         apply_cache_fields(track, existing, cache_mode="playlist" if os.path.basename(existing).startswith("plst-") else "shortterm")
         return False, 0
@@ -3045,7 +3697,7 @@ async def prepare_playlist_cache_for_playback(ctx, playlist: dict, tracks: list)
     playlist_tracks = playlist.get("tracks", [])
     for index, queue_track in enumerate(tracks):
         cache_key = cache_key_for_track(queue_track)
-        existing = find_existing_cache_file(cache_key, prefer_playlist=True)
+        existing = find_existing_cache_file(cache_key, prefer_playlist=True, video_id=str(queue_track.get("id") or "").strip() or None)
         if existing:
             apply_cache_fields(queue_track, existing, cache_mode="playlist" if os.path.basename(existing).startswith("plst-") else "shortterm")
             if index < len(playlist_tracks):
@@ -3561,6 +4213,8 @@ async def on_reaction_add(reaction, user):
         return  # ignore the bot's own reactions
     if await handle_playlist_pager_reaction(reaction, user):
         return
+    if await handle_debug_playback_reaction(reaction, user):
+        return
     if client.help_message_id and reaction.message.id == client.help_message_id and str(reaction.emoji) == HELP_EXPAND_REACTION:
         try:
             client.help_expanded = not client.help_expanded
@@ -3743,9 +4397,10 @@ async def play(ctx, *, url: str):
             client.current_voice_channel = voice
             if not await require_voice_control(ctx, "start playback"):
                 return
+        debug_report = await create_debug_playback_message(ctx, "play")
         try:
             suggestion = record_suggestion(ctx, "play", url)
-            track = await fetch_track(url, requested_by=ctx.user)
+            track = await fetch_track(url, requested_by=ctx.user, debug_report=debug_report)
             update_suggestion(suggestion, track)
             # If admin needs to confirm a large download
             if track.get('needs_confirm'):
@@ -3763,13 +4418,15 @@ async def play(ctx, *, url: str):
                 try:
                     reaction, user = await client.wait_for('reaction_add', timeout=15.0, check=check)
                 except asyncio.TimeoutError:
+                    await finish_debug_playback_message(debug_report, status="error", error="large download confirmation timed out")
                     await ctx.followup.send("Confirmation timed out. Cancelling the play request.")
                     return
                 if str(reaction.emoji) == "👍":
                     # Admin confirmed download: fetch again with download (this time no 'needs_confirm')
-                    track = await fetch_track(track['webpage_url'], requested_by=ctx.user)
+                    track = await fetch_track(track['webpage_url'], requested_by=ctx.user, debug_report=debug_report)
                     update_suggestion(suggestion, track)
                 else:
+                    await finish_debug_playback_message(debug_report, status="error", error="large download cancelled by user")
                     await ctx.followup.send("Download canceled.")
                     return
             player = await build_audio_player(track)
@@ -3786,25 +4443,35 @@ async def play(ctx, *, url: str):
                 acknowledge=ctx.followup.send,
             )
             logger.info(f"Playing now: {track['title']} ({track['id']})")
+            if debug_report:
+                debug_report.stage = "playing"
+                await finish_debug_playback_message(debug_report)
         except Exception as e:
             logger.error(f"/play error: {e}")
+            await finish_debug_playback_message(debug_report, status="error", error=str(e))
             await ctx.followup.send("Failed to play the requested track.")
     else:
         # If something is already playing, add the requested song to the queue
         if not await require_queue_room(ctx):
             return
+        debug_report = await create_debug_playback_message(ctx, "play")
         try:
             suggestion = record_suggestion(ctx, "play", url)
-            track = await fetch_track(url, requested_by=ctx.user)
+            track = await fetch_track(url, requested_by=ctx.user, debug_report=debug_report)
             update_suggestion(suggestion, track)
             if track.get('needs_confirm'):
                 # Cannot queue a large download without confirmation; instruct admin to use /play
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
+                await finish_debug_playback_message(debug_report, status="error", error="large download requires /play confirmation")
                 await ctx.followup.send(f"Track **{track['title']}** (~{filesize_mb:.1f} MB) is too large to queue without confirmation. Please use /play to confirm.")
                 return
             await enqueue_track_with_playlist_prompt(ctx, track, "play")
+            if debug_report:
+                debug_report.stage = "queued"
+                await finish_debug_playback_message(debug_report)
         except Exception as e:
             logger.error(f"/play queue error: {e}")
+            await finish_debug_playback_message(debug_report, status="error", error=str(e))
             await ctx.followup.send("Failed to add track to queue.")
 
 @app_commands.describe(query="YouTube URL or search term")
@@ -4534,34 +5201,58 @@ async def playlist_predownload(ctx, playlist: str):
         ephemeral=True,
     )
 
-def purge_cache_files(*, keep_current: bool = True) -> int:
+def purge_cache_files(*, keep_current: bool = True) -> PurgeCacheResult:
+    result = PurgeCacheResult()
     current_file = None
     if keep_current and client.current_track_info:
         current_file = cached_file_for_track(client.current_track_info)
         current_file = os.path.realpath(current_file) if current_file else None
-    count = 0
     if not os.path.isdir(CACHE_DIR):
-        return 0
+        logger.info(f"Cache purge skipped because cache directory does not exist: {CACHE_DIR}")
+        return result
+    logger.info(
+        f"Cache purge started by admin: dir={CACHE_DIR} keep_current={keep_current} "
+        f"current_file={metadata_path_for_cache_file(current_file) if current_file else '-'}"
+    )
     for filename in os.listdir(CACHE_DIR):
         file_path = os.path.join(CACHE_DIR, filename)
+        result.scanned += 1
         if not is_safe_cache_path(file_path):
+            result.skipped_unsafe += 1
+            logger.info(f"Cache purge skipped unsafe/non-media file: {metadata_path_for_cache_file(file_path)}")
             continue
         if current_file and os.path.realpath(file_path) == current_file:
+            result.kept_current += 1
+            logger.info(f"Cache purge kept current playing file: {metadata_path_for_cache_file(file_path)}")
             continue
+        size = cache_file_size(file_path)
         try:
             os.remove(file_path)
-            count += 1
+            result.removed += 1
+            result.removed_bytes += size
+            logger.info(f"Cache purge removed file: {metadata_path_for_cache_file(file_path)} size={human_bytes(size)}")
         except OSError as exc:
+            result.failed += 1
             logger.warning(f"Failed to purge cache file {file_path}: {exc}")
     for vid, info in list(downloaded.items()):
         file_path = info.get("filepath")
         if not file_path or not is_safe_cache_path(file_path):
             downloaded.pop(vid, None)
+            result.metadata_removed += 1
+            logger.info(f"Cache purge removed stale metadata entry for {vid}: invalid path {file_path or '-'}")
             continue
         if not os.path.isfile(path_from_metadata(file_path)):
             downloaded.pop(vid, None)
+            result.metadata_removed += 1
+            logger.info(f"Cache purge removed stale metadata entry for {vid}: missing file {file_path}")
     save_downloads_metadata("cache purge")
-    return count
+    logger.info(
+        "Cache purge completed: "
+        f"scanned={result.scanned} removed={result.removed} removed_bytes={human_bytes(result.removed_bytes)} "
+        f"kept_current={result.kept_current} skipped_unsafe={result.skipped_unsafe} "
+        f"failed={result.failed} metadata_removed={result.metadata_removed}"
+    )
+    return result
 
 @client.tree.command()
 async def cachestatus(ctx):
@@ -4594,8 +5285,17 @@ async def purgecache(ctx):
     if not is_user_admin(ctx.user):
         await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
-    count = purge_cache_files(keep_current=True)
-    await ctx.response.send_message(f"Purged {count} cache file(s). The current playing file was kept if present.", ephemeral=True)
+    before_bytes = cache_total_bytes()
+    result = purge_cache_files(keep_current=True)
+    after_bytes = cache_total_bytes()
+    await ctx.response.send_message(
+        "\n".join([
+            f"Purged {result.removed} cache file(s), freeing {human_bytes(result.removed_bytes)}.",
+            f"Scanned {result.scanned}; kept current {result.kept_current}; skipped {result.skipped_unsafe}; failed {result.failed}.",
+            f"Metadata entries cleaned: {result.metadata_removed}. Cache is now {human_bytes(after_bytes)} (was {human_bytes(before_bytes)}).",
+        ]),
+        ephemeral=True,
+    )
 
 @client.tree.command()
 async def purgequeue(ctx):
@@ -4805,20 +5505,39 @@ async def stop(ctx):
     record_command(ctx)
     await request_voice_vote(ctx.user, ctx.channel, "stop", "stop playback")
 
+@app_commands.describe(mode="debug enables verbose logs and /play download debug messages; normal disables them")
+@app_commands.choices(mode=[
+    app_commands.Choice(name="toggle", value="toggle"),
+    app_commands.Choice(name="debug", value="debug"),
+    app_commands.Choice(name="normal", value="normal"),
+    app_commands.Choice(name="off", value="off"),
+])
 @client.tree.command()
-async def togglelog(ctx):
-    """Toggles verbose (DEBUG level) logging on or off (admin only)."""
+async def togglelog(ctx, mode: Optional[str] = "toggle"):
+    """Toggles verbose (DEBUG level) logging and optional download debug UI (admin only)."""
     record_command(ctx)
     if not is_user_admin(ctx.user):
         await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
-    client.log_verbose = not client.log_verbose
+    mode = str(mode or "toggle").lower()
+    if mode == "debug":
+        client.log_verbose = True
+        client.download_debug_messages = True
+    elif mode in {"normal", "off"}:
+        client.log_verbose = False
+        client.download_debug_messages = False
+    else:
+        client.log_verbose = not client.log_verbose
+        client.download_debug_messages = client.log_verbose
     if client.log_verbose:
         logger.setLevel(logging.DEBUG)
-        msg = "Verbose logging enabled."
+        msg = (
+            "Verbose logging enabled."
+            + (" Download debug messages enabled for `/play`." if client.download_debug_messages else "")
+        )
     else:
         logger.setLevel(logging.INFO)
-        msg = "Verbose logging disabled."
+        msg = "Verbose logging disabled. Download debug messages disabled."
     await ctx.response.send_message(msg)
     logger.info(f"Logging level toggled by admin: {msg}")
 
@@ -5026,7 +5745,7 @@ async def random_quote(ctx):
     await ctx.response.send_message(message)
     logger.info("User requested random teekkari quote.")
 
-@app_commands.describe(topic="Help topic, for example playlists", command="Detailed playlist command help")
+@app_commands.describe(topic="Help topic, for example playlists", command="Command name, for example nytsoi, play, or playlist new")
 @app_commands.choices(topic=[
     app_commands.Choice(name="playlists", value="playlists"),
     app_commands.Choice(name="playlist", value="playlist"),
@@ -5071,7 +5790,8 @@ client.tree.add_command(playlist_group)
 @client.tree.error
 async def on_app_command_error(ctx, error):
     # Global error handler for app commands
-    logger.exception(f"Error in /{ctx.command.name}: {error}")
+    command = getattr(getattr(ctx, "command", None), "name", "unknown")
+    logger.exception(f"Error in /{command}: {error}")
     await safe_interaction_send(ctx, "💥  Oops, something went wrong. Please check the bot logs for details.")
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ download mode exists to make playback more stable after extraction succeeds: onc
 
 - reuses cached files when the same youtube video is requested again.
 - prefers playlist long-term cache files named `cache/plst-<cache-key>.<ext>` before normal cache files named `cache/<cache-key>.<ext>`.
+- adopts exact legacy cache filenames such as `cache/<youtube-id>.<ext>` and `cache/plst-<youtube-id>.<ext>` into the canonical cache-key filename when that video is requested.
 - removes cached files older than one hour on startup.
 - schedules played files for deletion after playback. the default delay is 600 seconds and can be changed with `DOWNLOAD_DELETE_DELAY_SECONDS` or at runtime by admins with `/setdeletetime <seconds>`.
 - enforces duration and cache-size limits, with stricter behavior for non-admin users.
@@ -33,9 +34,13 @@ download mode exists to make playback more stable after extraction succeeds: onc
 
 cache keys are url-safe base64 of the canonical youtube watch URL. raw youtube titles and user-provided text are not used in downloaded filenames. the hard cache cap is 20 GB; when the cap is reached, new downloads are skipped and playback falls back to streaming.
 
+`/purgecache` logs and reports the important purge counts: files scanned, removed, bytes freed, current file kept, unsafe or non-media entries skipped, failed deletions, and stale metadata removed.
+
 ## stream-only mode
 
 admins can use `/toggledownload` to switch between download-and-play and stream-only mode. stream-only mode skips the local file cache and asks `yt-dlp` for a direct stream url. this uses less disk space, but playback depends more directly on the remote stream staying healthy.
+
+admins can use `/togglelog debug` to enable verbose logs and editable `/play` download debug messages. those messages show sanitized track id, cache state, format id, downloaded amount, speed, and final ffmpeg playback path without exposing local absolute file paths. reacting with the cleanup emoji collapses the debug message back to a normal summary.
 
 ## queue and playback flow
 
@@ -82,7 +87,7 @@ the bot tries to edit the latest now-playing message when no one has posted afte
 
 the `📜` reaction toggles the current queue above the now-playing block. the queue section uses bold numbered titles, optional italic urls, a divider, and then the current song. admins can use `/disablelinks` to hide urls from queue-style displays for the current bot session. users must be in the same voice channel as the bot to use playback-affecting commands or now-playing reactions, unless they are admins.
 
-playlist list/edit views use `◀️` and `▶️` reactions for pages. only the newest playlist view remains interactive. `/help` is compact by default and expands in place when users react with `📖`. playlist help is available with `/help topic:playlists`, and detailed subcommand pages use `/help topic:playlist command:new` style selectors.
+playlist list/edit views use `◀️` and `▶️` reactions for pages. only the newest playlist view remains interactive. `/help` is compact by default and expands in place when users react with `📖`. every root slash command has a manpage-style page through `/help command:<command>`, for example `/help command:nytsoi`. playlist help is available with `/help topic:playlists`, `/help command:playlist new`, and `/help topic:playlist command:new` style selectors.
 
 ## security hardening
 
