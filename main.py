@@ -1992,6 +1992,109 @@ def playlist_created_message(playlist: dict) -> str:
         f"Play it with `/playlist play {playlist.get('name')}`."
     )
 
+def playlist_track_identity(track: dict) -> Optional[str]:
+    video_id = str(track.get("id") or "").strip()
+    if video_id:
+        return f"id:{video_id}"
+    url = str(track.get("webpage_url") or "").strip()
+    if not url:
+        return None
+    parsed_id = parse_youtube_video_id(url)
+    if parsed_id:
+        return f"id:{parsed_id}"
+    return f"url:{url.lower()}"
+
+def playlist_existing_track_identities(playlist: dict) -> set:
+    identities = set()
+    for track in playlist.get("tracks", []):
+        identity = playlist_track_identity(track)
+        if identity:
+            identities.add(identity)
+    return identities
+
+def playlist_name_error(name: str, user=None) -> Optional[str]:
+    safe_name = normalize_playlist_name(name)
+    if not safe_name:
+        return "I need a playlist name. Try `/playlist new` for guided setup."
+    if len(safe_name) > PLAYLIST_NAME_MAX_LENGTH:
+        return f"Playlist names must be {PLAYLIST_NAME_MAX_LENGTH} characters or shorter."
+    if resolve_playlist_reference(safe_name, user, require_visible=False):
+        return "A playlist with that name already exists. Choose another name or remove the old playlist first."
+    return None
+
+def extract_youtube_urls(text: str) -> list:
+    urls = []
+    for match in re.findall(r"https?://[^\s<>()]+", str(text or "")):
+        candidate = match.rstrip(".,);]>")
+        try:
+            validate_media_query(candidate)
+        except ValueError:
+            continue
+        if parse_youtube_video_id(candidate) and candidate not in urls:
+            urls.append(candidate)
+    return urls
+
+def playlist_session_key(user, channel) -> tuple:
+    guild = getattr(channel, "guild", None)
+    guild_id = getattr(guild, "id", 0) or 0
+    return (guild_id, getattr(channel, "id", 0), user_id_value(user))
+
+def expire_playlist_creation_sessions():
+    now = time.time()
+    expired = [
+        key for key, session in client.playlist_creation_sessions.items()
+        if now - session.updated_at > PLAYLIST_CREATION_TIMEOUT_SECONDS
+    ]
+    for key in expired:
+        client.playlist_creation_sessions.pop(key, None)
+        task = client.playlist_creation_timeout_tasks.pop(key, None)
+        if task:
+            task.cancel()
+
+def queue_tracks_for_playlist_import(user) -> list:
+    tracks = []
+    for track in queue:
+        if track.get("webpage_url") or track.get("id"):
+            tracks.append(playlist_track_from_track(track, user))
+    return tracks
+
+def queue_tracks_missing_from_playlist(playlist: dict, user) -> tuple:
+    existing = playlist_existing_track_identities(playlist)
+    additions = []
+    skipped_duplicates = 0
+    skipped_missing = 0
+    for track in queue:
+        if not (track.get("webpage_url") or track.get("id")):
+            skipped_missing += 1
+            continue
+        candidate = playlist_track_from_track(track, user)
+        identity = playlist_track_identity(candidate)
+        if not identity:
+            skipped_missing += 1
+            continue
+        if identity in existing:
+            skipped_duplicates += 1
+            continue
+        existing.add(identity)
+        additions.append(candidate)
+    return additions, skipped_duplicates, skipped_missing
+
+def save_new_playlist(name: str, owner, tracks: Optional[list] = None, visibility: str = "private") -> dict:
+    playlist = make_playlist_metadata(name, owner, visibility)
+    playlist["tracks"] = tracks or []
+    save_playlist(playlist)
+    append_playlist_blackbox_event("created", playlist, owner)
+    logger.info(f"Playlist created: {playlist['name']} ({playlist['id']}) by {user_display(owner)}")
+    return playlist
+
+def playlist_created_message(playlist: dict) -> str:
+    name = discord.utils.escape_markdown(str(playlist.get("name", "playlist")))
+    count = len(playlist.get("tracks", []))
+    return (
+        f"Created playlist **{name}** with {count} track(s). "
+        f"Play it with `/playlist play {playlist.get('name')}`."
+    )
+
 def playlist_to_queue_tracks(playlist: dict, *, block_id: Optional[str] = None) -> list:
     tracks = playlist.get("tracks", [])
     block_id = block_id or generate_playlist_id()
