@@ -16,11 +16,11 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/queuelist [links]` | alias for `/queue`. |
 | `/queuefirst <position or playlist:name>` | move an existing queued song or playlist to the front of the queue. |
 | `/qfirst <position or playlist:name>` | alias for `/queuefirst`. |
-| `/skip` | skip the current track and continue to the next queued track. requires the same voice channel unless the user is an admin. |
-| `/stop` | stop playback, clear the queue, and disconnect from voice. requires the same voice channel unless the user is an admin. |
+| `/skip` | vote to skip the current track and continue to the next queued track. admins bypass the vote. |
+| `/stop` | vote to stop playback, clear the queue, and disconnect from voice. admins bypass the vote. |
 | `/pause` | pause the current playing audio. requires the same voice channel unless the user is an admin. |
 | `/resume` | resume paused audio. requires the same voice channel unless the user is an admin. |
-| `/volume <1-100>` | set playback volume from 1 to 100 percent. requires the same voice channel unless the user is an admin. |
+| `/volume <1-100>` | vote to set playback volume from 1 to 100 percent. admins bypass the vote. |
 | `/now` | show the currently playing song. |
 | `/nytsoi` | finnish alias for `/now`. |
 | `/getqueue` | list all songs requested in the current session and show whether they are playing, queued, played, or removed. |
@@ -29,9 +29,9 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 
 | reaction | purpose |
 | --- | --- |
-| `◀️` | replay the previous track when one is available. requires the same voice channel unless the user is an admin. |
+| `◀️` | vote to replay the previous track when one is available. admins bypass the vote. |
 | `⏸️` | pause or resume playback. requires the same voice channel unless the user is an admin. |
-| `▶️` | skip to the next track. requires the same voice channel unless the user is an admin. |
+| `▶️` | vote to skip to the next track. admins bypass the vote. |
 | `📜` | toggle the current queue above the now-playing message. requires the same voice channel unless the user is an admin. |
 
 ## queue management
@@ -49,8 +49,9 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/playlist list` | list your playlists first, then visible public playlists, with reaction pages. |
 | `/playlist new` | start a guided playlist creation flow that asks for the name and youtube urls. |
 | `/playlist new <name> [visibility]` | create an empty private or public playlist. |
-| `/playlist new <name> currentqueue` | create a playlist from the upcoming queue. |
-| `/playlist new <name> jono` | finnish alias for `currentqueue`. |
+| `/playlist new <name> current` | create a playlist from the upcoming queue immediately, then keep a short add-more URL flow open. |
+| `/playlist new <name> currentqueue` | alias for `current`. |
+| `/playlist new <name> jono` | finnish alias for `current`. |
 | `/playlist show <name>` | show readable playlist details without requiring edit permission. |
 | `/playlist play <name>` | start a playlist now, or queue it if something is already playing. |
 | `/playlist edit <name> [flags]` | show editable playlist details and song pages. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
@@ -65,15 +66,21 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/playlist removesong <playlist> <position> [flags]` | remove a song from a playlist you can edit. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
 | `/playlist move <playlist> <from> <to> [flags]` | reorder songs inside a playlist you can edit. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
 | `/playlist lock <playlist> <locked>` | lock or unlock manager edits. owner/admin only. |
-| `/playlist predownload <playlist>` | admin-only future hook for permanent playlist downloads. disabled by default. |
+| `/playlist cachemode <playlist> <mode>` | set one playlist's cache behavior. admin only. modes: `follow_global`, `streaming`, `bounded`, `keep_cached`. |
+| `/playlist cacheglobal <mode> [force]` | set the persistent global playlist cache behavior. admin only. modes: `streaming`, `bounded`, `keep_cached`; `force:true` makes playlists ignore their own mode. |
+| `/playlist predownload <playlist>` | admin-only hook for permanent playlist downloads into `cache/plst-<cache-key>.<ext>`. disabled by default. |
 
 ## admin
 
 | command | purpose |
 | --- | --- |
+| `/cachestatus` | show cache directory, size, file count, global playlist cache mode, and force-global state. admin only. |
+| `/purgecache` | delete validated media files from `cache/`, keeping the current playing file if present. admin only. |
 | `/togglelog` | toggle verbose debug logging. admin only. |
 | `/toggledownload` | switch between download-and-play mode and stream-only mode. admin only. |
 | `/disablelinks` | toggle whether queue-style displays are allowed to show youtube links. admin only. |
+| `/volume_session <1-100>` | hard-set this bot session's volume until disconnect. admin only. |
+| `/volume_default <1-100>` | save the current voice channel's default volume in `channel-volume-config.json`. admin only. |
 | `/autoleave <enabled> [delay_seconds]` | when enabled, save the current song and queue and leave if the bot is alone in voice for the configured delay. admin only. |
 | `/setdeletetime <seconds>` | set how long downloaded song files wait after playback before delayed cleanup deletes them. admin only. |
 | `/reboot` | save the queue, ask for confirmation, disconnect, and exit the bot process. admin only. |
@@ -98,6 +105,6 @@ status views:
 | --- | --- |
 | `/help` | show the in-discord command summary. |
 | `/help topic:playlists` | show the playlist quick-start help page. |
-| `/help topic:playlist command:<subcommand>` | show a manpage-style playlist subcommand help page. available pages: `new`, `list`, `show`, `play`, `edit`, `add`, `fill`, `addmod`, `remove`, `delete`, `rename`, `removesong`, `move`, `lock`, `rescue`, `predownload`. |
+| `/help topic:playlist command:<subcommand>` | show a manpage-style playlist subcommand help page. available pages: `new`, `list`, `show`, `play`, `edit`, `add`, `fill`, `addmod`, `remove`, `delete`, `rename`, `removesong`, `move`, `lock`, `cachemode`, `cacheglobal`, `rescue`, `predownload`. |
 
 React `📖` on the help message to expand the compact help into the full command list.

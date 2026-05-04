@@ -4,6 +4,7 @@ a discord music bot for playing audio from any youtube video in your server’s 
 
 also has commands for handling, saving, and displaying quotes from a specific channel.
 also supports local saved playlists with owners, managers, public/private visibility, and playlist playback.
+downloaded media is stored under `cache/`; playlist folders under `playlists/` contain metadata only.
 
 ## docs
 
@@ -45,12 +46,20 @@ QUOTES_ID=0  # optional quotes channel id, or 0 to disable quotes
 
 # admin configuration
 ADMIN_USER_ID=your_discord_user_id
-ADMIN_ROLE_NAME=Bottiadmin
 ADMIN_ROLE_ID=optional_admin_role_id
+# Production admin access should use ADMIN_USER_ID or ADMIN_ROLE_ID.
+# Role-name admin is for development/compatibility only.
+ADMIN_ROLE_NAME=Bottiadmin
+ALLOW_ADMIN_ROLE_NAME=false
 
 # optional runtime tuning
 DOWNLOAD_DELETE_DELAY_SECONDS=600
+YTDLP_NO_CHECK_CERTIFICATE=false
+MAX_PLAYLIST_TRACKS=100
+MAX_URLS_PER_MESSAGE=10
 ```
+
+Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS certificates. Set it to `true` only as a temporary debug override. Guided `/playlist new` accepts up to `MAX_URLS_PER_MESSAGE` YouTube links per message and stores up to `MAX_PLAYLIST_TRACKS` tracks per playlist creation session. The bot starts at 20% volume unless a voice-channel default has been saved by an admin.
 
 ---
 
@@ -65,10 +74,10 @@ DOWNLOAD_DELETE_DELAY_SECONDS=600
   - `/queue [links]` (alias: `/queuelist`)
   - `/queuefirst <position|playlist:name>` (alias: `/qfirst`)
   - react `📜` on now-playing to toggle the queue above the current song
-  - `/skip`
+  - `/skip` (non-admins vote)
   - `/pause` / `/resume`
-  - `/stop`
-  - `/volume <1–100>`
+  - `/stop` (non-admins vote)
+  - `/volume <1–100>` (non-admins vote)
   - `/now` (alias `/nytsoi`)
   - `/getqueue`
 
@@ -79,7 +88,7 @@ DOWNLOAD_DELETE_DELAY_SECONDS=600
 - **playlists**:
   - `/playlist list`
   - `/playlist new` guided creation flow
-  - `/playlist new <name> currentqueue` (also accepts `jono`)
+  - `/playlist new <name> current` (also accepts `currentqueue` and `jono`)
   - `/playlist new <name> [private|public]`
   - `/playlist edit <name>`
   - `/playlist show <name>`
@@ -93,13 +102,19 @@ DOWNLOAD_DELETE_DELAY_SECONDS=600
   - `/playlist removesong <playlist> <position>`
   - `/playlist move <playlist> <from_position> <to_position>`
   - `/playlist lock <playlist> <locked>`
+  - `/playlist cachemode <playlist> <follow_global|streaming|bounded|keep_cached>` (admin-only)
+  - `/playlist cacheglobal <streaming|bounded|keep_cached> [force]` (admin-only)
   - `/help topic:playlists` and `/help topic:playlist command:new`
 
 - **admin-only**:
+  - `/cachestatus`
+  - `/purgecache`
   - `/purgequeue`
   - `/playlist predownload <playlist>` (disabled unless `PLAYLIST_PREDOWNLOAD_ENABLED=true`)
   - `/autoleave <enabled> [delay_seconds]`
   - `/setdeletetime <seconds>`
+  - `/volume_session <1–100>`
+  - `/volume_default <1–100>`
   - `/togglelog`
   - `/toggledownload`
   - `/disablelinks`
@@ -134,6 +149,15 @@ tail -f output.log
 
 - **non-youtube urls rejected**:
   public users can provide youtube links or normal search text. raw non-youtube URLs, local URLs, and private-network URLs are rejected before `yt-dlp` runs to reduce SSRF and local-network probing risk.
+
+- **runtime media cache**:
+  downloaded audio lives in `cache/`, not the repository root. normal `/play` downloads use `cache/<base64url-canonical-youtube-url>.<ext>`. playlist long-term cache files use `cache/plst-<base64url-canonical-youtube-url>.<ext>`. raw youtube titles and user input are not used in cache filenames.
+
+- **playlist storage**:
+  playlists are metadata-first. each playlist folder contains `metadata.json`; audio files do not live under `playlists/`. track entries include youtube metadata plus cache fields such as `cache_key`, `cache_mode`, `cache_path`, and `ext` so playback can stream or reuse a safe file in `cache/`.
+
+- **playlist cache limits**:
+  playlist caching defaults to bounded mode: at most 15 tracks or 3 GB are cached per playlist play operation, and remaining tracks stream when needed. admins can change the persistent global mode with `/playlist cacheglobal`, override a playlist with `/playlist cachemode`, inspect cache with `/cachestatus`, and purge safe cache files with `/purgecache`. the hard cache cap is 20 GB; when it is reached, new downloads fall back to streaming.
 
 - **startup warning: no deno or node executable found in path**:
   install Deno on the host and make sure the bot process can find it:

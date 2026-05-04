@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Core runtime logic lives in `main.py`, which wires Discord intents, audio queueing, and yt-dlp downloads. Quote persistence is isolated in `quotes.py`, producing `quotes.txt` at runtime. Runtime artifacts such as `downloads.json`, `queue_backup.json`, and `queue_backup.tmp` live at the repo root; keep them out of commits unless they are fixtures. Environment secrets belong in `.env`; if `.env` already exists, do not add or recreate an `.env.example` template unless the user explicitly asks for one. Deployment helpers live in `start.sh.example`, `stop.sh.example`, and `bot.service.example` for systemd setups.
+Core runtime logic lives in `main.py`, which wires Discord intents, audio queueing, and yt-dlp downloads. Quote persistence is isolated in `quotes.py`, producing `quotes.txt` at runtime. Runtime artifacts such as `downloads.json`, `queue_backup.json`, `queue_backup.tmp`, and `channel-volume-config.json` live at the repo root; keep them out of commits unless they are fixtures. Environment secrets belong in `.env`; if `.env` already exists, do not add or recreate an `.env.example` template unless the user explicitly asks for one. Deployment helpers live in `start.sh.example`, `stop.sh.example`, and `bot.service.example` for systemd setups.
 
 ## Build, Test, and Development Commands
 Use a virtualenv to keep yt-dlp, discord.py, and PyNaCl pinned:
@@ -66,7 +66,7 @@ Queue reaction completed work:
 - User media input is intentionally YouTube-only for raw URLs, while normal search text still works. Reject non-YouTube URLs before `yt-dlp` sees them to reduce SSRF and local-network probing risk.
 - `ADMIN_USERNAME` is ignored at runtime; use `ADMIN_USER_ID` or `ADMIN_ROLE_NAME` for admin privileges.
 - `/purgequeue` is admin-only. Non-admin playback controls and now-playing reactions require the user to be in the same voice channel as the bot.
-- Download cleanup must use `remove_download_file()`, which validates that the path is a tracked YouTube media file inside the bot directory before removal.
+- Download cleanup must use `remove_download_file()` or cache-specific safe helpers, which validate that the path is a tracked YouTube media file inside `cache/` before removal.
 - Downloaded song delayed cleanup defaults to `DOWNLOAD_DELETE_DELAY_SECONDS=600` and can be adjusted at runtime by admins with `/setdeletetime <seconds>`. The runtime command affects future cleanup schedules; already scheduled deletion tasks keep their original timer.
 - Auto-leave is controlled by admin `/autoleave <enabled> [delay_seconds]`. When enabled, if the bot is alone in voice it saves `current_track_info` plus the upcoming queue to `last_session_queue.tmp.json`, disconnects, and tells users to restore with `/play:last`. The slash command still routes through `/play` with `last`, `play:last`, or `/play:last` as the option value because Discord slash command names cannot contain `:`.
 - Keep `aiohttp>=3.13.4,<4.0` and `python-dotenv>=1.2.2,<2.0` in `requirements.txt` to satisfy the 2026 DoS/symlink security advisories without moving to aiohttp 4 prereleases.
@@ -79,7 +79,7 @@ Queue reaction completed work:
 - While a playlist block is active, normal song requests should queue after that block and offer a `👍`/`👎` reaction prompt to move the song next instead.
 - Playlist list and edit views are paged with `◀️`/`▶️` reactions and edit their own message even after unrelated chat appears. Only the newest playlist list/edit message remains interactive.
 - `/help` should be compact by default and expand in place with a reaction. New playlist commands should appear in expanded help and docs.
-- Keep admin-only permanent predownload support feature-flagged off by default. When enabled, files live under the playlist folder and use the same path-safety approach as normal downloads.
+- Keep admin-only permanent predownload support feature-flagged off by default. When enabled, files live under root `cache/` as `plst-<cache-key>.<ext>` and use the same path-safety approach as normal downloads.
 
 ## 2026-05-03 Playlist Removal & Blackbox Notes
 - `/playlist remove` removes a whole playlist, not an individual song. Keep song removal on `/playlist removesong`.
@@ -96,7 +96,7 @@ Projectwide bugcheck follow-up:
 
 ## 2026-05-03 Playlist UX Redesign Notes
 - `/playlist new` with no arguments starts a guided playlist creation session scoped by guild, channel, and user. The session asks for a name, accepts YouTube URLs, supports `done`/`finish`/`valmis`/`loppu`/`stop`, supports `cancel`/`peru`/`abort`, expires after five minutes of inactivity, and saves only when the user finishes.
-- `/playlist new <name> currentqueue` imports the upcoming queue into a new playlist. `/playlist new <name> jono` is the Finnish alias for the same import mode. Queue import skips entries that have neither a URL nor video id and refuses to create an empty playlist.
+- `/playlist new <name> current` imports the upcoming queue into a new playlist. `/playlist new <name> currentqueue` and `/playlist new <name> jono` are aliases for the same import mode. Queue import skips entries that have neither a URL nor video id and refuses to create an empty playlist.
 - Playlist creation should reject empty, too-long, path-unsafe, or duplicate names before writing storage. Do not silently overwrite an existing playlist.
 - `/playlist show`, `/playlist play`, `/playlist delete`, and `/playlist rename` are user-friendly aliases/direct commands layered on the existing storage and permission model.
 - `/playlist add` supports `current`, `queue`, and `url` sources. URL additions must go through the existing YouTube-only extraction path and should not store unresolved arbitrary URLs.
@@ -118,3 +118,18 @@ Setup security checks:
 - Do not write generated systemd service previews into the repository. Render the preview in memory and, if installing, copy it through a private temporary file that is deleted afterwards.
 - Do not use `ADMIN_USERNAME` for privileges; it is only a setup note and remains ignored by the bot runtime.
 - The systemd service generator should point at the repo's venv Python and append stdout/stderr to `output.log`.
+
+## 2026-05-03 Playlist Cache Architecture Notes
+- Runtime media files now belong in root `cache/`; playlist folders under `playlists/` remain metadata-only and contain `metadata.json`.
+- Cache filenames are deterministic URL-safe base64 of the canonical YouTube watch URL. Normal cache files are `cache/<cache-key>.<ext>` and playlist long-term cache files are `cache/plst-<cache-key>.<ext>`.
+- Playlist track metadata should include `cache_key`, `cache_mode`, `cache_path`, and `ext` when available. Unsafe or missing `cache_path` values must be ignored and logged, never trusted directly from JSON.
+- Playlist cache policy is admin-controlled. The persistent global default is `bounded`, per-playlist default is `follow_global`, and admins can use `/playlist cacheglobal`, `/playlist cachemode`, `/cachestatus`, and `/purgecache`.
+- Bounded playlist caching may cache at most 15 tracks or 3 GB per playlist play operation. The hard root cache cap is 20 GB; when reached, playback should stream instead of downloading.
+- Full playlist predownload remains explicit/admin-only through `/playlist predownload` and must use `cache/plst-<cache-key>.<ext>`, not playlist folders.
+
+## 2026-05-03 Vote Controls & Playlist Current Import Notes
+- `/playlist new <name> current` is the preferred queue-import command. `currentqueue` and `jono` remain aliases. The playlist is saved immediately from the upcoming queue, then the same channel/user gets a short add-more URL flow that appends to the saved playlist until `done` or `cancel`.
+- `/playlist new` with no arguments must remain guided creation, and `/playlist new <name>` must remain empty private playlist creation.
+- Non-admin `/skip`, `/stop`, and `/volume` use a reaction vote prompt. Quorum is 50% of current human members in the bot voice channel, rounded up; bots are excluded. Admins bypass votes.
+- The bot starts at 20% volume. Admin `/volume_session` hard-sets volume until disconnect. Admin `/volume_default` saves a voice-channel default in `channel-volume-config.json`; keep that runtime config out of commits.
+- `yt-dlp` already selects `bestaudio`; quality improvements should prioritize download-and-play mode, current `yt-dlp`/JS runtimes, and conservative ffmpeg changes only after listening tests.

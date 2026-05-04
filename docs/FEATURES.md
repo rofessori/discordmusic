@@ -18,17 +18,20 @@ the bot joins a discord voice channel, resolves youtube urls or search text with
 
 ## download-and-play mode
 
-download mode is enabled by default. in this mode the bot downloads audio before playback and stores metadata in `downloads.json`.
+download mode is enabled by default. in this mode the bot downloads audio before playback, stores media files under `cache/`, and stores metadata in `downloads.json`.
 
 download mode exists to make playback more stable after extraction succeeds: once the file is local, discord playback reads from disk instead of relying on a live youtube stream for the whole song. the bot also:
 
 - reuses cached files when the same youtube video is requested again.
+- prefers playlist long-term cache files named `cache/plst-<cache-key>.<ext>` before normal cache files named `cache/<cache-key>.<ext>`.
 - removes cached files older than one hour on startup.
 - schedules played files for deletion after playback. the default delay is 600 seconds and can be changed with `DOWNLOAD_DELETE_DELAY_SECONDS` or at runtime by admins with `/setdeletetime <seconds>`.
 - enforces duration and cache-size limits, with stricter behavior for non-admin users.
 - asks admins to confirm unusually large downloads instead of downloading silently.
 - refuses downloads when free disk space is below the configured safety floor.
-- deletes only validated yt-dlp media files from the bot download directory.
+- deletes only validated media files from `cache/`.
+
+cache keys are url-safe base64 of the canonical youtube watch URL. raw youtube titles and user-provided text are not used in downloaded filenames. the hard cache cap is 20 GB; when the cap is reached, new downloads are skipped and playback falls back to streaming.
 
 ## stream-only mode
 
@@ -40,13 +43,17 @@ the queue is an in-memory list of upcoming track dictionaries. `/play` starts pl
 
 when a track ends or is skipped, the bot pops the next queued track and starts it. session history is also kept so `/getqueue` can show whether requested songs are playing, queued, played, or removed. non-admin queueing is capped to limit public-server abuse.
 
+`/skip`, `/stop`, and `/volume` are vote-based for non-admins in the bot's voice channel. quorum is 50% of the current human members in that voice channel, rounded up, and bots are excluded. admins bypass votes. the bot starts at 20% volume, admins can hard-set the current session with `/volume_session`, and admins can save a voice-channel default with `/volume_default` in `channel-volume-config.json`.
+
 admins can enable `/autoleave` so that if the bot is alone in voice for the configured delay, it saves the current song plus upcoming queue to `last_session_queue.tmp.json`, disconnects, and reports that the session can be started again with `/play:last`. the saved session is restored by running `/play` with `last`, `play:last`, or `/play:last` as the value.
 
 ## playlists
 
-playlists are stored locally under `playlists/<safe-name>-<playlistid>/metadata.json`. each playlist has an 8-character url-safe id, name, generated timestamp, lock state, visibility, owner discord id/name, manager user ids, and ordered track entries.
+playlists are stored locally under `playlists/<safe-name>-<playlistid>/metadata.json`. each playlist has an 8-character url-safe id, name, generated timestamp, lock state, visibility, owner discord id/name, manager user ids, cache mode, and ordered track entries. playlist folders are metadata-only; downloaded audio files never live under `playlists/`.
 
-users can create private or public playlists with `/playlist new`. without arguments it starts a guided flow: the bot asks for a playlist name, accepts one or more youtube urls, supports `done`/`finish`/`valmis`/`loppu`/`stop`, and saves only when the user finishes. users can also import the upcoming queue directly with `/playlist new <name> currentqueue`; `jono` is a finnish alias for that import mode.
+track entries include the youtube id, canonical youtube URL, cache key, cache mode, optional `cache_path`, media extension, and added-by metadata. if `cache_path` is missing or unsafe, playback ignores it and streams or downloads through the normal safe path.
+
+users can create private or public playlists with `/playlist new`. without arguments it starts a guided flow: the bot asks for a playlist name, accepts one or more youtube urls, supports `done`/`finish`/`valmis`/`loppu`/`stop`, and saves only when the user finishes. users can also import the upcoming queue directly with `/playlist new <name> current`; `currentqueue` and `jono` are aliases for that import mode. queue import creates the playlist immediately, then keeps a short add-more flow open for extra youtube urls.
 
 users can browse playlists with `/playlist list`, inspect with `/playlist show`, inspect/edit with `/playlist edit`, play directly with `/playlist play`, add the current song, a queued song, or a youtube url with `/playlist add`, and bulk-fill a playlist from queued songs with `/playlist fill current <name>`. fill skips songs already in that playlist. owners can allow another user to manage the playlist with `/playlist addmod`. owners and admins can rename playlists with `/playlist rename` and lock playlists so managers cannot edit them.
 
@@ -58,7 +65,9 @@ playlist references accept both `playlist:name` and exact playlist names. `/play
 
 while a playlist is actively playing, normal song requests are placed after the active playlist block and the requester gets a `👍`/`👎` prompt to move the song next instead.
 
-the admin-only `/playlist predownload` command is disabled by default. enabling `PLAYLIST_PREDOWNLOAD_ENABLED=true` lets admins permanently download a playlist into its playlist folder without exposing that capability to normal users.
+playlist cache behavior is admin-controlled. the persistent global default is bounded caching, where a playlist play operation may cache up to 15 tracks or 3 GB and streams the rest. admins can use `/playlist cacheglobal` to change the global default, `/playlist cachemode` to override a playlist, `/cachestatus` to inspect cache use, and `/purgecache` to delete validated cache files. per-playlist modes are `follow_global`, `streaming`, `bounded`, and `keep_cached`.
+
+the admin-only `/playlist predownload` command is disabled by default. enabling `PLAYLIST_PREDOWNLOAD_ENABLED=true` lets admins permanently download playlist audio into `cache/` with `plst-<cache-key>.<ext>` names without exposing that capability to normal users.
 
 ## now-playing controls
 
@@ -80,7 +89,7 @@ playlist list/edit views use `◀️` and `▶️` reactions for pages. only the
 - media input is youtube-only for URLs; plain search text is still supported.
 - local, private-network, and non-youtube URLs are rejected before `yt-dlp` runs.
 - admin privileges come from `ADMIN_ROLE_NAME` or numeric `ADMIN_USER_ID`; username-based admin overrides are ignored.
-- `/purgequeue` is admin-only and all downloaded-file deletion goes through path validation.
+- `/purgequeue` and `/purgecache` are admin-only and all downloaded-file deletion goes through path validation.
 - dependency minimums include `aiohttp>=3.13.4,<4.0` for 2026 DoS fixes and `python-dotenv>=1.2.2,<2.0` for the `.env` symlink rewrite fix.
 
 ## status and session audit
