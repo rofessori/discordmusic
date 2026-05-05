@@ -39,6 +39,7 @@ LAST_SESSION_QUEUE_FILE = os.path.join(BASE_DIR, "last_session_queue.tmp.json")
 PLAYLISTS_DIR = os.path.join(BASE_DIR, "playlists")
 PLAYLIST_BLACKBOX_FILE = os.path.join(BASE_DIR, "playlists-blackbox.json")
 QUEUE_BLACKBOX_FILE = os.path.join(BASE_DIR, "queue-blackbox.json")
+RUNTIME_AUDIT_FILE = os.path.join(BASE_DIR, "runtime-audit.json")
 PLAYLIST_CACHE_POLICY_FILE = os.path.join(BASE_DIR, "playlist-cache-policy.json")
 CHANNEL_VOLUME_CONFIG_FILE = os.path.join(BASE_DIR, "channel-volume-config.json")
 USER_PERMISSIONS_FILE = os.path.join(BASE_DIR, "user-permissions.json")
@@ -81,7 +82,8 @@ REPEAT_TOGGLE_RECENT_SECONDS = 300
 REPEAT_TOGGLE_VOTE_THRESHOLD = 2
 HELP_EXPAND_REACTION = "📖"
 DEBUG_COLLAPSE_REACTION = "🧹"
-CONFIG_REACTIONS = ("🎧", "📥", "🔍", "🧭", "🔗", "🚪", "⭐", "🌐", "📦", "🏃", "⏱️", "📊")
+HELP_PAGE_REACTIONS = ("◀️", "▶️")
+CONFIG_REACTIONS = ("🎧", "📥", "🔍", "🧭", "🔗", "🚪", "⭐", "🌐", "📦", "🏃", "⏱️", "📊", "🗳️")
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -176,10 +178,21 @@ def remove_download_file(file_path: str, *, video_id: Optional[str] = None, reas
             f"Skipped unsafe download deletion path for {video_id or 'unknown'} "
             f"during {reason or 'cleanup'}: {file_path}"
         )
+        append_runtime_audit_event("media-delete-skipped", details={
+            "video_id": video_id,
+            "reason": reason or "cleanup",
+            "path": file_path,
+            "safe": False,
+        })
         return False
     try:
         os.remove(file_path)
         logger.info(f"Removed downloaded media file during {reason or 'cleanup'}: {file_path}")
+        append_runtime_audit_event("media-file-deleted", details={
+            "video_id": video_id,
+            "reason": reason or "cleanup",
+            "path": file_path,
+        })
         return True
     except Exception as e:
         logger.error(f"Error removing downloaded media file {file_path}: {e}")
@@ -206,6 +219,66 @@ def write_json_atomic(path: str, payload: dict):
         except OSError:
             pass
         raise
+
+SENSITIVE_AUDIT_KEY_PARTS = ("token", "secret", "password", "cookie", "authorization")
+
+def sanitize_audit_value(key: str, value):
+    key_lower = str(key or "").lower()
+    if any(part in key_lower for part in SENSITIVE_AUDIT_KEY_PARTS):
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {
+            str(item_key)[:80]: sanitize_audit_value(str(item_key), item_value)
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [sanitize_audit_value(key, item) for item in list(value)[:50]]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    text = str(value)
+    if key_lower.endswith("path") or key_lower in {"file", "file_path", "cache_file", "cache_path"}:
+        candidate = path_from_metadata(text)
+        try:
+            real_base = os.path.realpath(BASE_DIR)
+            real_path = os.path.realpath(candidate)
+            if os.path.commonpath([real_base, real_path]) == real_base:
+                return display_path(real_path).replace(os.sep, "/")
+        except Exception:
+            pass
+    bot_token = globals().get("BOT_TOKEN")
+    cookiefile = globals().get("YTDLP_COOKIEFILE")
+    text = text.replace(bot_token, "<bot-token>") if bot_token else text
+    text = text.replace(cookiefile, "<yt-dlp-cookiefile>") if cookiefile else text
+    return truncate_text(text, 500) if "truncate_text" in globals() else text[:500]
+
+def sanitize_audit_details(details: Optional[dict]) -> dict:
+    if not isinstance(details, dict):
+        return {}
+    return {str(key)[:80]: sanitize_audit_value(str(key), value) for key, value in details.items()}
+
+def append_runtime_audit_event(action: str, *, actor=None, details: Optional[dict] = None):
+    entry = {
+        "timestamp": time.time(),
+        "action": str(action or "unknown"),
+        "boot_id": getattr(globals().get("client"), "boot_id", None),
+        "actor_user_id": user_id_value(actor) if actor else None,
+        "actor_discord_name": user_display(actor) if actor else None,
+        "details": sanitize_audit_details(details),
+    }
+    try:
+        events = []
+        if os.path.isfile(RUNTIME_AUDIT_FILE):
+            with open(RUNTIME_AUDIT_FILE, "r") as f:
+                loaded = json.load(f)
+            if not isinstance(loaded, list):
+                logger.error("Runtime audit file is not a JSON list; preserving it without appending.")
+                return
+            events = loaded
+        events.append(entry)
+        write_json_atomic(RUNTIME_AUDIT_FILE, events)
+        logger.info(f"Runtime audit: {entry['action']} details={entry['details']}")
+    except Exception as exc:
+        logger.error(f"Failed to append runtime audit event: {exc}")
 
 def canonical_youtube_url(video_id: str) -> str:
     return youtube_watch_url + str(video_id or "").strip()
@@ -259,11 +332,15 @@ ytdl_options = {
 }
 if YTDLP_NO_CHECK_CERTIFICATE:
     ytdl_options['nocheckcertificate'] = True
-YTDLP_JS_RUNTIMES = {'deno': {}}
+YTDLP_JS_RUNTIMES = {}
+deno_path = shutil.which("deno")
+if deno_path:
+    YTDLP_JS_RUNTIMES['deno'] = {'path': deno_path}
 node_path = shutil.which("node")
 if node_path:
     YTDLP_JS_RUNTIMES['node'] = {'path': node_path}
-ytdl_options['js_runtimes'] = YTDLP_JS_RUNTIMES
+if YTDLP_JS_RUNTIMES:
+    ytdl_options['js_runtimes'] = YTDLP_JS_RUNTIMES
 YTDLP_COOKIEFILE = os.getenv("YTDLP_COOKIEFILE") or os.getenv("ytdlp_cookiefile")
 if YTDLP_COOKIEFILE:
     if not os.path.isabs(YTDLP_COOKIEFILE):
@@ -1064,6 +1141,7 @@ def config_panel_message() -> str:
         f"🏃 playspeed for everyone: `{bool_status(client.playspeed_allow_all)}`",
         f"⏱️ nowplaying cooldown: `{client.nowplaying_cooldown_seconds}s`",
         f"📊 public `/status play`: `{bool_status(client.status_play_public)}`",
+        f"🗳️ voice votes: `{bool_status(client.voice_votes_enabled)}`",
         "",
         "_Config changes are runtime changes unless that setting already has a persistent policy file._",
     ]
@@ -1122,7 +1200,19 @@ async def apply_config_reaction(emoji: str) -> str:
     if emoji == "📊":
         client.status_play_public = not client.status_play_public
         save_runtime_permissions_config()
+        append_runtime_audit_event("config-toggle", details={
+            "setting": "status_play_public",
+            "enabled": client.status_play_public,
+        })
         return f"`/status play` public access is now `{bool_status(client.status_play_public)}`."
+    if emoji == "🗳️":
+        client.voice_votes_enabled = not client.voice_votes_enabled
+        save_runtime_permissions_config()
+        append_runtime_audit_event("config-toggle", details={
+            "setting": "voice_votes_enabled",
+            "enabled": client.voice_votes_enabled,
+        })
+        return f"voice votes are now `{bool_status(client.voice_votes_enabled)}`."
     return "unknown config reaction."
 
 async def handle_config_reaction(reaction, user) -> bool:
@@ -1250,6 +1340,7 @@ def load_user_permissions_config() -> dict:
             "playspeed_allow_all": False,
             "nowplaying_cooldown_seconds": DEFAULT_NOWPLAYING_COOLDOWN_SECONDS,
             "status_play_public": False,
+            "voice_votes_enabled": True,
         },
         "favorites_cache": {
             "enabled": False,
@@ -1287,6 +1378,7 @@ def load_user_permissions_config() -> dict:
         if isinstance(runtime, dict):
             config["runtime"]["playspeed_allow_all"] = bool(runtime.get("playspeed_allow_all", False))
             config["runtime"]["status_play_public"] = bool(runtime.get("status_play_public", False))
+            config["runtime"]["voice_votes_enabled"] = bool(runtime.get("voice_votes_enabled", True))
             try:
                 cooldown = int(runtime.get("nowplaying_cooldown_seconds", DEFAULT_NOWPLAYING_COOLDOWN_SECONDS))
             except (TypeError, ValueError):
@@ -1336,6 +1428,7 @@ def runtime_permissions_config() -> dict:
     runtime.setdefault("playspeed_allow_all", False)
     runtime.setdefault("nowplaying_cooldown_seconds", DEFAULT_NOWPLAYING_COOLDOWN_SECONDS)
     runtime.setdefault("status_play_public", False)
+    runtime.setdefault("voice_votes_enabled", True)
     return runtime
 
 def save_runtime_permissions_config():
@@ -1343,6 +1436,7 @@ def save_runtime_permissions_config():
     runtime["playspeed_allow_all"] = bool(getattr(client, "playspeed_allow_all", False))
     runtime["nowplaying_cooldown_seconds"] = int(getattr(client, "nowplaying_cooldown_seconds", DEFAULT_NOWPLAYING_COOLDOWN_SECONDS))
     runtime["status_play_public"] = bool(getattr(client, "status_play_public", False))
+    runtime["voice_votes_enabled"] = bool(getattr(client, "voice_votes_enabled", True))
     save_user_permissions_config()
 
 class YTDLSource(discord.PCMVolumeTransformer):
@@ -1400,6 +1494,7 @@ class Client(discord.Client):
         runtime_config = self.user_permissions_config.get("runtime", {})
         self.playspeed_allow_all = bool(runtime_config.get("playspeed_allow_all", False))
         self.status_play_public = bool(runtime_config.get("status_play_public", False))
+        self.voice_votes_enabled = bool(runtime_config.get("voice_votes_enabled", True))
         self.playback_speed = 1.0
         self.nowplaying_cooldown_seconds = int(
             runtime_config.get("nowplaying_cooldown_seconds", DEFAULT_NOWPLAYING_COOLDOWN_SECONDS)
@@ -1422,6 +1517,7 @@ class Client(discord.Client):
         self.playlist_pager = None
         self.help_message_id = None
         self.help_expanded = False
+        self.help_page = 0
         self.config_panel_message_id = None
         self.config_panel_user_id = None
         self.playlist_delete_tasks = {}
@@ -1479,6 +1575,7 @@ def build_runtime_status():
         f"- repeat current track: `{'enabled' if client.repeat_current_track else 'disabled'}`",
         f"- queue links: `{'disabled' if client.queue_links_disabled else 'enabled'}`",
         f"- public /status play: `{'enabled' if client.status_play_public else 'disabled'}`",
+        f"- voice votes: `{'enabled' if client.voice_votes_enabled else 'disabled'}`",
         f"- song delete delay: `{client.download_delete_delay_seconds}s`",
         f"- auto leave: `{'enabled' if client.auto_leave_enabled else 'disabled'}` (`{client.auto_leave_delay_seconds}s`)",
         f"- nowplaying cooldown: `{client.nowplaying_cooldown_seconds}s`",
@@ -2237,6 +2334,19 @@ async def set_repeat_current_track(enabled: bool, user=None, *, record_disable: 
 async def perform_repeat_off_action() -> str:
     return await set_repeat_current_track(False, record_disable=False)
 
+async def perform_voice_control_action(action: str, value: Optional[int] = None) -> str:
+    if action == "skip":
+        return await perform_skip_action()
+    if action == "previous":
+        return await perform_previous_action()
+    if action == "stop":
+        return await perform_stop_action()
+    if action == "volume" and value is not None:
+        return await perform_volume_action(value)
+    if action == "repeat_off":
+        return await perform_repeat_off_action()
+    return "Unknown vote action."
+
 async def handle_repeat_reaction(user, text_channel) -> str:
     track_id = current_repeat_track_id()
     if not track_id:
@@ -2279,18 +2389,14 @@ async def apply_voice_vote(vote: VoiceVote):
         if vote.message:
             await vote.message.channel.send("Vote cancelled because the current track changed.")
         return
-    if vote.action == "skip":
-        result = await perform_skip_action()
-    elif vote.action == "previous":
-        result = await perform_previous_action()
-    elif vote.action == "stop":
-        result = await perform_stop_action()
-    elif vote.action == "volume" and vote.value is not None:
-        result = await perform_volume_action(vote.value)
-    elif vote.action == "repeat_off":
-        result = await perform_repeat_off_action()
-    else:
-        result = "Unknown vote action."
+    result = await perform_voice_control_action(vote.action, vote.value)
+    append_runtime_audit_event("voice-vote-passed", details={
+        "action": vote.action,
+        "value": vote.value,
+        "yes": len(vote.votes),
+        "no": len(vote.no_votes),
+        "track_id": vote.track_id,
+    })
     await finish_voice_vote(vote, "passed")
     if vote.message:
         await vote.message.channel.send(result)
@@ -2350,19 +2456,17 @@ async def request_voice_vote(user, text_channel, action: str, title: str, *, val
         else:
             await text_channel.send("No track is currently playing.")
         return False
-    if is_user_admin(user):
-        if action == "skip":
-            result = await perform_skip_action()
-        elif action == "previous":
-            result = await perform_previous_action()
-        elif action == "stop":
-            result = await perform_stop_action()
-        elif action == "volume" and value is not None:
-            result = await perform_volume_action(value)
-        elif action == "repeat_off":
-            result = await perform_repeat_off_action()
-        else:
-            result = "Unknown vote action."
+    direct_reason = "admin" if is_user_admin(user) else None
+    if not direct_reason and not getattr(client, "voice_votes_enabled", True):
+        direct_reason = "voice_votes_disabled"
+    if direct_reason:
+        result = await perform_voice_control_action(action, value)
+        append_runtime_audit_event("voice-control-direct", actor=user, details={
+            "action": action,
+            "value": value,
+            "reason": direct_reason,
+            "track_id": client.current_track_id,
+        })
         if ctx:
             await safe_interaction_send(ctx, result)
         else:
@@ -2394,16 +2498,13 @@ async def request_voice_vote(user, text_channel, action: str, title: str, *, val
         expires_at=now + VOICE_VOTE_TIMEOUT_SECONDS,
     )
     if len(vote.votes) >= voice_vote_quorum(voice_channel):
-        if action == "skip":
-            result = await perform_skip_action()
-        elif action == "stop":
-            result = await perform_stop_action()
-        elif action == "previous":
-            result = await perform_previous_action()
-        elif action == "repeat_off":
-            result = await perform_repeat_off_action()
-        else:
-            result = await perform_volume_action(value)
+        result = await perform_voice_control_action(action, value)
+        append_runtime_audit_event("voice-vote-immediate", actor=user, details={
+            "action": action,
+            "value": value,
+            "track_id": client.current_track_id,
+            "quorum": voice_vote_quorum(voice_channel),
+        })
         if ctx:
             await safe_interaction_send(ctx, f"Vote passed immediately. {result}")
         else:
@@ -2441,6 +2542,35 @@ async def handle_voice_vote_reaction(reaction, user) -> bool:
             await reaction.message.remove_reaction(reaction.emoji, user)
         except Exception as exc:
             logger.warning(f"Failed to remove denied skip vote reaction: {exc}")
+        return True
+    if vote.action == "volume" and user_has_group(user, "novolumechange"):
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception as exc:
+            logger.warning(f"Failed to remove denied volume vote reaction: {exc}")
+        return True
+    if vote.action == "repeat_off" and user_has_group(user, "norepeat"):
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception as exc:
+            logger.warning(f"Failed to remove denied repeat vote reaction: {exc}")
+        return True
+    if is_user_admin(user):
+        if emoji == "👍":
+            append_runtime_audit_event("voice-vote-admin-bypass", actor=user, details={
+                "action": vote.action,
+                "value": vote.value,
+                "track_id": vote.track_id,
+            })
+            vote.votes.add(user_id_value(user))
+            await apply_voice_vote(vote)
+        else:
+            client.active_voice_votes.pop(vote.key, None)
+            await finish_voice_vote(vote, "rejected")
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception as exc:
+            logger.warning(f"Failed to remove admin vote reaction: {exc}")
         return True
     if not user_in_bot_voice_channel(user):
         try:
@@ -3897,48 +4027,112 @@ def compact_help_message() -> str:
     ])
 
 def expanded_help_message() -> str:
-    return "\n".join([
-        "**music playback**",
-        "/join - Join your voice channel.",
-        "/play <YouTube URL, playlist URL, search, or playlist:name> [repeat] - Play now or queue; single tracks can repeat.",
-        "/play -favorites username - Play a user's public favorites; admins get a warning prompt for private favorites.",
-        "/play:last - Restore the last auto-saved voice session.",
-        "/playtop <query or playlist URL> - Play next.",
-        "/enqueue <query, playlist URL, or playlist:name> (alias: /q) - Add to queue.",
-        "/queue [links] (alias: /queuelist) - Show upcoming songs.",
-        "/queuefirst <position, playlist URL, or playlist:name> (alias: /qfirst) - Move a song or playlist to play next.",
-        f"/skip, /pause, /resume, /stop, /volume <1-{SAFE_VOLUME_MAX_LEVEL}> - Playback controls; skip/stop/volume use votes for non-admins.",
-        f"Now-playing reactions: {FAVORITE_REACTION} favorite, ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat-one, {QUEUE_REACTION} queue.",
-        "/nowplaying, /now (alias: /nytsoi), /getqueue - Current/session info.",
-        "/favorites play [user], /favorites list [user], /favorites privacy <public|private>, /favorites status.",
-        "/whatsnew - Show recent bot updates from RECENT_UPDATES.md.",
-        "",
-        "**playlists**",
-        "/playlist list - Browse your playlists and visible public playlists.",
-        "/playlist new - Guided playlist creation.",
-        "/playlist new <name> <private|public|current|currentqueue|jono> - Create or import.",
-        "/playlist show <name> - Show playlist details.",
-        "/playlist play <name> - Play or queue a playlist.",
-        "/playlist edit <name> - Show editable playlist details.",
-        "/playlist add <playlist> <current|queue|url> [queue_position] [url] - Add a song.",
-        "/playlist fill current <playlist> - Add queued songs missing from a playlist.",
-        "/playlist addmod <playlist> <user> - Add manager (owner only).",
-        "/playlist remove <playlist> [flags] (alias delete) - Remove a playlist with 600s rescue.",
-        "/playlist rename <playlist> <new_name> - Rename a playlist.",
-        "/playlist removesong <playlist> <position> - Remove a song.",
-        "/playlist move <playlist> <from> <to> - Reorder songs.",
-        "/playlist lock <playlist> <locked> - Lock or unlock edits.",
-        "/playlist cachemode <playlist> <mode> - Admin cache policy for one playlist.",
-        "/playlist cacheglobal <mode> [force] - Admin global playlist cache policy.",
-        "",
-        "**admin / other**",
-        "/favorites cacheglobal, /favorites cacheuser, /usergroup add/remove/list, /permissions",
-        "/config show, /userstats <user> - Admin debug panels.",
-        "/clear_queue, /restorequeue, /cachequeue, /purgequeue, /purgecache, /cachestatus, /autoleave, /setdeletetime, /volume_session, /volume_default, /volume_force, /togglelog, /toggledownload, /disablelinks, /reboot, /status",
-        "/backup_teekkari_quotes, /random_quote",
-        "",
-        "Detailed help: `/help command:play`, `/help command:nytsoi`, `/help command:playlist new`.",
-    ])
+    return expanded_help_pages()[0]
+
+def expanded_help_pages() -> list:
+    pages = [
+        "\n".join([
+            "**music playback**",
+            "/join - Join your voice channel.",
+            "/play <YouTube URL, playlist URL, search, or playlist:name> [repeat] - Play now or queue; single tracks can repeat.",
+            "/play -favorites username - Play a user's public favorites; admins get a warning prompt for private favorites.",
+            "/play:last - Restore the last auto-saved voice session.",
+            "/playtop <query or playlist URL> - Play next.",
+            "/enqueue <query, playlist URL, or playlist:name> (alias: /q) - Add to queue.",
+            "/queue [links] (alias: /queuelist) - Show upcoming songs.",
+            "/queuefirst <position, playlist URL, or playlist:name> (alias: /qfirst) - Move a song or playlist to play next.",
+            f"/skip, /pause, /resume, /stop, /volume <1-{SAFE_VOLUME_MAX_LEVEL}> - Controls. Admins bypass votes; disabling voice votes makes same-channel users direct.",
+            f"Now-playing reactions: {FAVORITE_REACTION} favorite toggle, ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat-one, {QUEUE_REACTION} queue.",
+            "/nowplaying, /now (alias: /nytsoi), /getqueue - Current/session info.",
+            "/favorites play/list/privacy/status - Per-user favorites.",
+            "/whatsnew - Show recent bot updates from RECENT_UPDATES.md.",
+        ]),
+        "\n".join([
+            "**playlists**",
+            "/playlist list - Browse your playlists and visible public playlists.",
+            "/playlist new - Guided playlist creation.",
+            "/playlist new <name> <private|public|current|currentqueue|jono> - Create or import.",
+            "/playlist show <name> - Show playlist details.",
+            "/playlist play <name> - Play or queue a playlist.",
+            "/playlist edit <name> - Show editable playlist details.",
+            "/playlist add <playlist> <current|queue|url> [queue_position] [url] - Add a song.",
+            "/playlist fill current <playlist> - Add queued songs missing from a playlist.",
+            "/playlist addmod <playlist> <user> - Add manager (owner only).",
+            "/playlist remove <playlist> [flags] (alias delete) - Remove with 600s rescue.",
+            "/playlist rename <playlist> <new_name> - Rename a playlist.",
+            "/playlist removesong <playlist> <position> - Remove a song.",
+            "/playlist move <playlist> <from> <to> - Reorder songs.",
+            "/playlist lock <playlist> <locked> - Lock or unlock edits.",
+            "/playlist cachemode <playlist> <mode> - Admin cache policy for one playlist.",
+            "/playlist cacheglobal <mode> [force] - Admin global playlist cache policy.",
+        ]),
+        "\n".join([
+            "**admin / other**",
+            "/favorites cacheglobal, /favorites cacheuser - Favorites cache policy.",
+            "/usergroup add/remove/list, /permissions - Restriction groups.",
+            "/config show - Reaction-toggle runtime config, including voice votes and public `/status play`.",
+            "/userstats <user> - Admin user diagnostics.",
+            "/clear_queue, /restorequeue, /cachequeue - Queue cleanup/recovery/cache.",
+            "/purgequeue, /purgecache, /cachestatus - Cache and disk tools.",
+            "/autoleave, /setdeletetime - Recovery and cleanup timers.",
+            "/volume_session, /volume_default, /volume_force - Admin volume controls.",
+            "/togglelog, /toggledownload, /disablelinks, /reboot, /status - Runtime controls.",
+            "/backup_teekkari_quotes, /random_quote - Quote tools.",
+            "",
+            "Detailed help: `/help command:play`, `/help command:nytsoi`, `/help command:playlist new`.",
+        ]),
+    ]
+    return [trim_discord_message(page) for page in pages]
+
+def trim_discord_message(content: str) -> str:
+    if len(content) <= DISCORD_MESSAGE_SAFE_LIMIT:
+        return content
+    suffix = "\n\n_This help page was shortened to fit Discord._"
+    return content[:DISCORD_MESSAGE_SAFE_LIMIT - len(suffix)].rstrip() + suffix
+
+def help_message_content(*, expanded: bool, page: int = 0) -> str:
+    if not expanded:
+        return compact_help_message()
+    pages = expanded_help_pages()
+    page = max(0, min(page, len(pages) - 1))
+    footer = f"\n\n_page {page + 1}/{len(pages)} - react {HELP_EXPAND_REACTION} to close, ◀️/▶️ to change page_"
+    content = pages[page] + footer
+    return trim_discord_message(content)
+
+async def handle_help_reaction(reaction, user) -> bool:
+    if not client.help_message_id or reaction.message.id != client.help_message_id:
+        return False
+    emoji = str(reaction.emoji)
+    if emoji not in {HELP_EXPAND_REACTION, *HELP_PAGE_REACTIONS}:
+        return True
+    pages = expanded_help_pages()
+    if emoji == HELP_EXPAND_REACTION:
+        client.help_expanded = not client.help_expanded
+        client.help_page = 0
+    elif client.help_expanded and emoji == "◀️":
+        client.help_page = max(0, getattr(client, "help_page", 0) - 1)
+    elif client.help_expanded and emoji == "▶️":
+        client.help_page = min(len(pages) - 1, getattr(client, "help_page", 0) + 1)
+    else:
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception as exc:
+            logger.warning(f"Failed to remove inactive help reaction: {exc}")
+        return True
+    try:
+        await reaction.message.edit(content=help_message_content(
+            expanded=client.help_expanded,
+            page=getattr(client, "help_page", 0),
+        ))
+        if client.help_expanded:
+            for page_emoji in HELP_PAGE_REACTIONS:
+                await reaction.message.add_reaction(page_emoji)
+        await reaction.message.remove_reaction(reaction.emoji, user)
+        state = "expanded" if client.help_expanded else "compacted"
+        logger.info(f"{state.title()} help message {reaction.message.id} page={getattr(client, 'help_page', 0)}.")
+    except Exception as exc:
+        logger.warning(f"Failed to update help message: {exc}")
+    return True
 
 def playlist_general_help_message() -> str:
     return "\n".join([
@@ -6061,15 +6255,7 @@ async def on_reaction_add(reaction, user):
         return
     if await handle_config_reaction(reaction, user):
         return
-    if client.help_message_id and reaction.message.id == client.help_message_id and str(reaction.emoji) == HELP_EXPAND_REACTION:
-        try:
-            client.help_expanded = not client.help_expanded
-            await reaction.message.edit(content=expanded_help_message() if client.help_expanded else compact_help_message())
-            await reaction.message.remove_reaction(reaction.emoji, user)
-            state = "expanded" if client.help_expanded else "compacted"
-            logger.info(f"{state.title()} help message {reaction.message.id}.")
-        except Exception as exc:
-            logger.warning(f"Failed to toggle help message: {exc}")
+    if await handle_help_reaction(reaction, user):
         return
     if await handle_voice_vote_reaction(reaction, user):
         return
@@ -8158,6 +8344,7 @@ async def help(ctx, topic: Optional[str] = None, command: Optional[str] = None):
     message = await ctx.original_response()
     client.help_message_id = message.id
     client.help_expanded = False
+    client.help_page = 0
     try:
         await message.add_reaction(HELP_EXPAND_REACTION)
     except Exception as exc:
