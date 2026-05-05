@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-Core runtime logic lives in `main.py`, which wires Discord intents, audio queueing, and yt-dlp downloads. Quote persistence is isolated in `quotes.py`, producing `quotes.txt` at runtime. Runtime artifacts such as `downloads.json`, `queue_backup.json`, `queue_backup.tmp`, and `channel-volume-config.json` live at the repo root; keep them out of commits unless they are fixtures. Environment secrets belong in `.env`; if `.env` already exists, do not add or recreate an `.env.example` template unless the user explicitly asks for one. Deployment helpers live in `start.sh.example`, `stop.sh.example`, and `bot.service.example` for systemd setups.
+Core runtime logic lives in `main.py`, which wires Discord intents, audio queueing, and yt-dlp downloads. Quote persistence is isolated in `quotes.py`, producing `quotes.txt` at runtime. Runtime artifacts such as `downloads.json`, `queue_backup.json`, `queue_backup.tmp`, `channel-volume-config.json`, and `user-permissions.json` live at the repo root; keep them out of commits unless they are fixtures. Environment secrets belong in `.env`; if `.env` already exists, do not add or recreate an `.env.example` template unless the user explicitly asks for one. Deployment helpers live in `start.sh.example`, `stop.sh.example`, and `bot.service.example` for systemd setups.
 
 ## Build, Test, and Development Commands
 Use a virtualenv to keep yt-dlp, discord.py, and PyNaCl pinned:
@@ -149,3 +149,12 @@ Setup security checks:
 - Keep local saved playlists and YouTube playlist URL blocks distinct: local playlists use persisted metadata under `playlists/`, while YouTube playlist URL blocks are session queue entries with `playlist_id` prefixed as `youtube:<list-id>`.
 - `/togglelog admin` and `/togglelog all` enable the larger sanitized user-space `/play` progress message. The message should be sent before voice join/extraction and then edited through voice connection, metadata, cache, download, and ffmpeg events without exposing absolute paths or secrets.
 - The now-playing `🔂` reaction toggles repeat-one. Repeat-off is instant until two other recent repeat-off toggles for the same current song exist; after that, non-admins use the normal half-channel voice quorum, while admins bypass.
+
+## 2026-05-05 Favorites & User Restriction Notes
+- Favorites are special saved playlists, not normal editable playlists. They live under `playlists/favorites-<user-id>/metadata.json` with `type: "favorites"` and should be managed through `⭐` and `/favorites`, not generic `/playlist` edit/remove flows.
+- The `⭐` now-playing reaction is intentionally the first playback reaction. Starring dedupes by YouTube identity, updates the user's favorites metadata, and edits the active now-playing message with a short notice naming the user. Reset that notice whenever a new now-playing song is published.
+- Favorites privacy is a social bot setting, not strong secrecy. Public favorites can be played/listed by other users; private favorites are denied to normal users; admins can play private favorites only after a `👍`/`👎` warning prompt. Anyone with filesystem access can still read metadata.
+- Favorites media must stay in root `cache/` using the existing safe cache-key helpers and `plst-<cache-key>.<ext>` names. Never put media files in `playlists/` or trust `cache_path` from metadata without `is_safe_cache_path()`.
+- Favorites autocache defaults off. Global favorites cache is capped at 6 GiB and should be balanced round-robin across eligible users, with 30 tracks per user as the default cache pass and 100 stored favorites per user as the supported maximum.
+- `user-permissions.json` is runtime configuration and must stay ignored. It stores restriction groups and per-user favorites cache eligibility keyed by Discord user id.
+- Restriction groups are behavior gates: `nodownload` forces that user's requests to stream and prevents favorite cache entries; `novolumechange` blocks `/volume`; `noplaylistcreate` blocks playlist creation/import; `noqueueskip` blocks queue jump/reorder commands; `noskip` blocks skip commands/reactions/votes; `norepeat` blocks repeat reactions.

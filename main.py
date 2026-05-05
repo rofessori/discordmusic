@@ -40,6 +40,7 @@ PLAYLISTS_DIR = os.path.join(BASE_DIR, "playlists")
 PLAYLIST_BLACKBOX_FILE = os.path.join(BASE_DIR, "playlists-blackbox.json")
 PLAYLIST_CACHE_POLICY_FILE = os.path.join(BASE_DIR, "playlist-cache-policy.json")
 CHANNEL_VOLUME_CONFIG_FILE = os.path.join(BASE_DIR, "channel-volume-config.json")
+USER_PERMISSIONS_FILE = os.path.join(BASE_DIR, "user-permissions.json")
 youtube_base_url = 'https://www.youtube.com/'
 youtube_base_url_2 = 'https://youtu.be/'
 youtube_watch_url = youtube_base_url + 'watch?v='
@@ -58,6 +59,10 @@ DEFAULT_PLAYLIST_CACHE_MODE = "bounded"
 PLAYLIST_CACHE_BOUNDED_TRACK_LIMIT = 15
 PLAYLIST_CACHE_BOUNDED_BYTES = 3 * 1024 * 1024 * 1024
 CACHE_HARD_LIMIT_BYTES = 20 * 1024 * 1024 * 1024
+FAVORITES_CACHE_DEFAULT_MAX_BYTES = 6 * 1024 * 1024 * 1024
+FAVORITES_CACHE_MAX_BYTES = 6 * 1024 * 1024 * 1024
+FAVORITES_CACHE_DEFAULT_TRACKS_PER_USER = 30
+FAVORITES_MAX_TRACKS_PER_USER = 100
 DEFAULT_VOLUME_LEVEL = 20
 MIN_VOLUME_LEVEL = 1
 MAX_VOLUME_LEVEL = 100
@@ -282,9 +287,10 @@ def coerce_int(value, label):
 
 # Initialize constants and global state
 queue = []  # list of track dicts for upcoming songs
+FAVORITE_REACTION = "⭐"
 QUEUE_REACTION = "📜"
 REPEAT_REACTION = "🔂"
-CONTROL_REACTIONS = ("◀️", "⏸️", "▶️", REPEAT_REACTION, QUEUE_REACTION)
+CONTROL_REACTIONS = (FAVORITE_REACTION, "◀️", "⏸️", "▶️", REPEAT_REACTION, QUEUE_REACTION)
 DISCORD_MESSAGE_SAFE_LIMIT = 1900
 MAX_QUEUE_LENGTH = 50
 MIN_FREE_DOWNLOAD_MB = 512
@@ -306,6 +312,15 @@ ADMIN_ROLE_NAME = get_env_value("ADMIN_ROLE_NAME", "admin_role_name", default="B
 ADMIN_USER_ID   = get_env_value("ADMIN_USER_ID", "admin_user_id", required=False)
 ADMIN_USER_ID   = coerce_int(ADMIN_USER_ID, "ADMIN_USER_ID") if ADMIN_USER_ID else None
 ADMIN_USERNAME  = get_env_value("ADMIN_USERNAME", "admin_username", required=False)
+
+USER_RESTRICTION_GROUPS = {
+    "nodownload",
+    "novolumechange",
+    "noplaylistcreate",
+    "noqueueskip",
+    "noskip",
+    "norepeat",
+}
 
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{27,}$")
 MIN_DISCORD_PY_VERSION = (2, 6, 0)
@@ -820,6 +835,16 @@ def run_startup_diagnostics() -> StartupReport:
     except OSError as exc:
         report.errors.append(f"Cannot write channel volume config in {BASE_DIR}: {exc}")
 
+    try:
+        os.makedirs(BASE_DIR, exist_ok=True)
+        test_path = os.path.join(BASE_DIR, f".user-permissions-write-test-{os.getpid()}")
+        with open(test_path, "w") as f:
+            f.write("ok")
+        os.remove(test_path)
+        report.notes.append("User permissions config storage available.")
+    except OSError as exc:
+        report.errors.append(f"Cannot write user permissions config in {BASE_DIR}: {exc}")
+
     if QUOTES_ID == 0:
         report.notes.append("Quotes channel disabled with QUOTES_ID=0.")
     else:
@@ -853,6 +878,10 @@ def is_user_admin(user) -> bool:
     """Check if the given user has admin privileges (role or specific user)."""
     if user is None:
         return False
+    if isinstance(user, int):
+        return bool(ADMIN_USER_ID and user == ADMIN_USER_ID)
+    if isinstance(user, str) and user.isdigit():
+        return bool(ADMIN_USER_ID and int(user) == ADMIN_USER_ID)
     # 1) role-based check
     for role in getattr(user, "roles", []):
         if ADMIN_ROLE_ID and getattr(role, "id", None) == ADMIN_ROLE_ID:
@@ -882,7 +911,79 @@ def can_control_voice(user) -> bool:
     return user_in_bot_voice_channel(user)
 
 def user_id_value(user) -> int:
+    if isinstance(user, int):
+        return user
+    if isinstance(user, str) and user.isdigit():
+        return int(user)
     return int(getattr(user, "id", 0) or 0)
+
+def user_permissions_entry(user, *, create: bool = False) -> dict:
+    uid = user_id_value(user)
+    if not uid:
+        return {}
+    users = client.user_permissions_config.setdefault("users", {})
+    key = str(uid)
+    if create:
+        return users.setdefault(key, {"groups": [], "favorite_cache_enabled": None})
+    return users.get(key, {})
+
+def user_groups(user) -> set:
+    entry = user_permissions_entry(user)
+    return {
+        str(group).lower()
+        for group in entry.get("groups", [])
+        if str(group).lower() in USER_RESTRICTION_GROUPS
+    }
+
+def user_has_group(user, group: str) -> bool:
+    return str(group).lower() in user_groups(user)
+
+def favorite_cache_allowed_for_user(user) -> bool:
+    entry = user_permissions_entry(user)
+    value = entry.get("favorite_cache_enabled")
+    return False if value is False else True
+
+def add_user_group(user, group: str, actor=None):
+    group = str(group or "").lower()
+    if group not in USER_RESTRICTION_GROUPS:
+        raise ValueError("Unknown user group.")
+    entry = user_permissions_entry(user, create=True)
+    groups = set(entry.get("groups", []))
+    groups.add(group)
+    entry["groups"] = sorted(groups)
+    entry["updated_at"] = time.time()
+    entry["updated_by_user_id"] = user_id_value(actor) if actor else None
+    entry["updated_by_discord_name"] = user_display(actor) if actor else None
+    save_user_permissions_config()
+
+def remove_user_group(user, group: str, actor=None):
+    group = str(group or "").lower()
+    if group not in USER_RESTRICTION_GROUPS:
+        raise ValueError("Unknown user group.")
+    entry = user_permissions_entry(user, create=True)
+    groups = set(entry.get("groups", []))
+    groups.discard(group)
+    entry["groups"] = sorted(groups)
+    entry["updated_at"] = time.time()
+    entry["updated_by_user_id"] = user_id_value(actor) if actor else None
+    entry["updated_by_discord_name"] = user_display(actor) if actor else None
+    save_user_permissions_config()
+
+async def require_not_restricted(ctx, group: str, action: str) -> bool:
+    if not user_has_group(ctx.user, group):
+        return True
+    logger.warning(
+        f"Denied /{command_name(ctx)} by {user_display(ctx.user)} "
+        f"({user_id_value(ctx.user)}): user is in restriction group {group}."
+    )
+    await safe_interaction_send(ctx, f"You cannot {action} because your account is in `{group}`.", ephemeral=True)
+    return False
+
+def permissions_summary_for(user) -> str:
+    groups = sorted(user_groups(user))
+    if not groups:
+        return "normal user"
+    return ", ".join(f"`{group}`" for group in groups)
 
 async def require_voice_control(ctx, action: str = "control playback") -> bool:
     if can_control_voice(ctx.user):
@@ -976,6 +1077,64 @@ def load_channel_volume_config() -> dict:
         logger.error(f"Failed to load channel volume config: {exc}")
     return config
 
+def load_user_permissions_config() -> dict:
+    config = {
+        "users": {},
+        "favorites_cache": {
+            "enabled": False,
+            "max_bytes": FAVORITES_CACHE_DEFAULT_MAX_BYTES,
+            "per_user_tracks": FAVORITES_CACHE_DEFAULT_TRACKS_PER_USER,
+        },
+    }
+    if not os.path.isfile(USER_PERMISSIONS_FILE):
+        return config
+    try:
+        with open(USER_PERMISSIONS_FILE, "r") as f:
+            loaded = json.load(f)
+        if not isinstance(loaded, dict):
+            logger.error("User permissions config is not a JSON object; using defaults.")
+            return config
+        users = loaded.get("users", {})
+        if isinstance(users, dict):
+            for raw_user_id, entry in users.items():
+                user_id = str(raw_user_id)
+                if not user_id.isdigit() or not isinstance(entry, dict):
+                    continue
+                groups = [
+                    str(group).lower()
+                    for group in entry.get("groups", [])
+                    if str(group).lower() in USER_RESTRICTION_GROUPS
+                ]
+                config["users"][user_id] = {
+                    "groups": sorted(set(groups)),
+                    "favorite_cache_enabled": entry.get("favorite_cache_enabled"),
+                    "updated_at": entry.get("updated_at", 0),
+                    "updated_by_user_id": entry.get("updated_by_user_id"),
+                    "updated_by_discord_name": entry.get("updated_by_discord_name"),
+                }
+        cache = loaded.get("favorites_cache", {})
+        if isinstance(cache, dict):
+            config["favorites_cache"]["enabled"] = bool(cache.get("enabled", False))
+            try:
+                max_bytes = int(cache.get("max_bytes", FAVORITES_CACHE_DEFAULT_MAX_BYTES))
+            except (TypeError, ValueError):
+                max_bytes = FAVORITES_CACHE_DEFAULT_MAX_BYTES
+            config["favorites_cache"]["max_bytes"] = max(
+                0,
+                min(max_bytes, FAVORITES_CACHE_MAX_BYTES),
+            )
+            try:
+                per_user_tracks = int(cache.get("per_user_tracks", FAVORITES_CACHE_DEFAULT_TRACKS_PER_USER))
+            except (TypeError, ValueError):
+                per_user_tracks = FAVORITES_CACHE_DEFAULT_TRACKS_PER_USER
+            config["favorites_cache"]["per_user_tracks"] = max(
+                0,
+                min(per_user_tracks, FAVORITES_MAX_TRACKS_PER_USER),
+            )
+    except Exception as exc:
+        logger.error(f"Failed to load user permissions config: {exc}")
+    return config
+
 def save_playlist_cache_policy():
     write_json_atomic(PLAYLIST_CACHE_POLICY_FILE, {
         "default_mode": client.playlist_cache_default_mode,
@@ -985,6 +1144,9 @@ def save_playlist_cache_policy():
 
 def save_channel_volume_config():
     write_json_atomic(CHANNEL_VOLUME_CONFIG_FILE, client.channel_volume_config)
+
+def save_user_permissions_config():
+    write_json_atomic(USER_PERMISSIONS_FILE, client.user_permissions_config)
 
 class YTDLSource(discord.PCMVolumeTransformer):
     """
@@ -1035,6 +1197,7 @@ class Client(discord.Client):
         self.playlist_cache_default_mode = playlist_cache_policy["default_mode"]
         self.force_global_playlist_cache_mode = playlist_cache_policy["force_global"]
         self.channel_volume_config = load_channel_volume_config()
+        self.user_permissions_config = load_user_permissions_config()
         self.download_delete_delay_seconds = DEFAULT_DOWNLOAD_DELETE_DELAY_SECONDS
         self.auto_leave_enabled = False
         self.auto_leave_delay_seconds = AUTO_LEAVE_DEFAULT_DELAY_SECONDS
@@ -1059,6 +1222,7 @@ class Client(discord.Client):
         self.repeat_current_track = False
         self.repeat_track_id = None
         self.repeat_disable_history = []
+        self.current_track_favorite_notice = ""
         # File deletion task tracking
         self.deletion_tasks = {}              # map video_id -> asyncio.Future
         # Played tracks tracking
@@ -1086,6 +1250,8 @@ def build_runtime_status():
     current = client.current_track_info.get('title', 'Unknown title') if client.current_track_info else "Idle"
     cache_mb = cache_total_bytes() / (1024 * 1024)
     cache_limit_mb = CACHE_HARD_LIMIT_BYTES // (1024 * 1024)
+    favorites_cache = client.user_permissions_config.get("favorites_cache", {})
+    fav_cache_mb = int(favorites_cache.get("max_bytes", FAVORITES_CACHE_DEFAULT_MAX_BYTES)) // (1024 * 1024)
     lines = [
         "**runtime**",
         f"- mode: `{mode}`",
@@ -1103,6 +1269,7 @@ def build_runtime_status():
         f"- cache: `{cache_mb:.1f} MB / {cache_limit_mb} MB`",
         f"- playlist cache default: `{client.playlist_cache_default_mode}`",
         f"- force global playlist cache: `{client.force_global_playlist_cache_mode}`",
+        f"- favorites cache: `{'enabled' if favorites_cache.get('enabled') else 'disabled'}` (`{fav_cache_mb} MB`, `{favorites_cache.get('per_user_tracks', FAVORITES_CACHE_DEFAULT_TRACKS_PER_USER)}` tracks/user)",
     ]
     latest_suggestion = format_suggestion_record(client.suggestion_history[-1]) if client.suggestion_history else None
     lines.append("")
@@ -1584,6 +1751,9 @@ async def handle_repeat_reaction(user, text_channel) -> str:
     track_id = current_repeat_track_id()
     if not track_id:
         return "No track is currently playing."
+    if user_has_group(user, "norepeat"):
+        logger.warning(f"Denied repeat reaction by {user_display(user)} ({user_id_value(user)}): norepeat.")
+        return "You cannot use repeat because your account is in `norepeat`."
     if not client.repeat_current_track or client.repeat_track_id != track_id:
         return await set_repeat_current_track(True, user)
     if is_user_admin(user):
@@ -1648,6 +1818,22 @@ async def maybe_apply_voice_vote(vote: VoiceVote):
     return False
 
 async def request_voice_vote(user, text_channel, action: str, title: str, *, value: Optional[int] = None, ctx=None) -> bool:
+    if action == "skip" and user_has_group(user, "noskip"):
+        message = "You cannot skip because your account is in `noskip`."
+        logger.warning(f"Denied skip request by {user_display(user)} ({user_id_value(user)}): noskip.")
+        if ctx:
+            await safe_interaction_send(ctx, message, ephemeral=True)
+        else:
+            await text_channel.send(message)
+        return False
+    if action == "volume" and user_has_group(user, "novolumechange"):
+        message = "You cannot change volume because your account is in `novolumechange`."
+        logger.warning(f"Denied volume request by {user_display(user)} ({user_id_value(user)}): novolumechange.")
+        if ctx:
+            await safe_interaction_send(ctx, message, ephemeral=True)
+        else:
+            await text_channel.send(message)
+        return False
     voice = client.current_voice_channel
     voice_channel = getattr(voice, "channel", None)
     if voice is None or not voice.is_connected() or voice_channel is None:
@@ -1754,6 +1940,12 @@ async def handle_voice_vote_reaction(reaction, user) -> bool:
         return False
     emoji = str(reaction.emoji)
     if emoji not in {"👍", "👎"}:
+        return True
+    if vote.action == "skip" and user_has_group(user, "noskip"):
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception as exc:
+            logger.warning(f"Failed to remove denied skip vote reaction: {exc}")
         return True
     if not user_in_bot_voice_channel(user):
         try:
@@ -2020,6 +2212,7 @@ def load_playlists(*, include_deleted: bool = False, purge_expired: bool = True)
             playlist.setdefault("manager_user_ids", [])
             playlist.setdefault("visibility", "private")
             playlist.setdefault("locked", False)
+            playlist.setdefault("type", "playlist")
             playlist.setdefault("folder", os.path.basename(root))
             playlist.setdefault("cache_mode", "follow_global")
             for track in playlist.get("tracks", []):
@@ -2196,7 +2389,10 @@ def can_manage_playlist(user, playlist: dict) -> bool:
 
 def visible_playlists_for(user) -> list:
     uid = user_id_value(user)
-    playlists = [playlist for playlist in load_playlists() if can_view_playlist(user, playlist)]
+    playlists = [
+        playlist for playlist in load_playlists()
+        if not is_favorites_playlist(playlist) and can_view_playlist(user, playlist)
+    ]
     return sorted(
         playlists,
         key=lambda playlist: (
@@ -2211,6 +2407,8 @@ def resolve_playlist_reference(reference: str, user=None, *, require_visible: bo
         return None
     candidates = []
     for playlist in load_playlists(include_deleted=include_deleted):
+        if is_favorites_playlist(playlist):
+            continue
         names = {playlist.get("id", "").lower(), playlist.get("name", "").lower()}
         if lookup in names:
             if require_visible and user is not None and not can_view_playlist(user, playlist):
@@ -2377,6 +2575,232 @@ def playlist_created_message(playlist: dict) -> str:
         f"Created playlist **{name}** with {count} track(s). "
         f"Play it with `/playlist play {playlist.get('name')}`."
     )
+
+def favorite_playlist_folder(user_id: int) -> str:
+    return f"favorites-{int(user_id)}"
+
+def make_favorites_metadata(user, visibility: str = "private") -> dict:
+    uid = user_id_value(user)
+    now = time.time()
+    return {
+        "id": f"fav-{uid}",
+        "name": f"{user_display(user)} favorites",
+        "type": "favorites",
+        "generated_at": now,
+        "updated_at": now,
+        "locked": True,
+        "visibility": visibility,
+        "owner_user_id": uid,
+        "owner_discord_name": user_display(user),
+        "manager_user_ids": [],
+        "tracks": [],
+        "folder": favorite_playlist_folder(uid),
+        "cache_mode": "favorites",
+        "predownloaded": False,
+        "deleted": False,
+    }
+
+def is_favorites_playlist(playlist: dict) -> bool:
+    return playlist.get("type") == "favorites" or str(playlist.get("id", "")).startswith("fav-")
+
+def favorites_playlist_for_user(user, *, create: bool = False) -> Optional[dict]:
+    uid = user_id_value(user)
+    if not uid:
+        return None
+    for playlist in load_playlists(include_deleted=False):
+        if is_favorites_playlist(playlist) and playlist_owner_id(playlist) == uid:
+            if user_display(user) and playlist.get("owner_discord_name") != user_display(user):
+                playlist["owner_discord_name"] = user_display(user)
+                playlist["name"] = f"{user_display(user)} favorites"
+                save_playlist(playlist)
+            return playlist
+    if not create:
+        return None
+    playlist = make_favorites_metadata(user)
+    save_playlist(playlist)
+    append_playlist_blackbox_event("favorites-created", playlist, user)
+    logger.info(f"Favorites playlist created for {user_display(user)} ({uid}).")
+    return playlist
+
+def favorites_track_limit() -> int:
+    return FAVORITES_MAX_TRACKS_PER_USER
+
+def favorites_cache_policy() -> dict:
+    return client.user_permissions_config.setdefault("favorites_cache", {
+        "enabled": False,
+        "max_bytes": FAVORITES_CACHE_DEFAULT_MAX_BYTES,
+        "per_user_tracks": FAVORITES_CACHE_DEFAULT_TRACKS_PER_USER,
+    })
+
+def set_favorites_cache_policy(enabled: bool, *, max_gb: Optional[float] = None, per_user_tracks: Optional[int] = None):
+    policy = favorites_cache_policy()
+    policy["enabled"] = bool(enabled)
+    if max_gb is not None:
+        max_bytes = int(float(max_gb) * 1024 * 1024 * 1024)
+        policy["max_bytes"] = max(0, min(max_bytes, FAVORITES_CACHE_MAX_BYTES))
+    else:
+        policy.setdefault("max_bytes", FAVORITES_CACHE_DEFAULT_MAX_BYTES)
+    if per_user_tracks is not None:
+        policy["per_user_tracks"] = max(0, min(int(per_user_tracks), FAVORITES_MAX_TRACKS_PER_USER))
+    else:
+        policy.setdefault("per_user_tracks", FAVORITES_CACHE_DEFAULT_TRACKS_PER_USER)
+    save_user_permissions_config()
+
+def favorite_cache_bytes() -> int:
+    total = 0
+    seen = set()
+    for playlist in load_playlists():
+        if not is_favorites_playlist(playlist):
+            continue
+        for track in playlist.get("tracks", []):
+            cache_key = cache_key_for_track(track)
+            file_path = path_from_metadata(track.get("cache_path"))
+            if not file_path or file_path in seen:
+                continue
+            if is_safe_cache_path(file_path, cache_key) and os.path.basename(file_path).startswith("plst-"):
+                try:
+                    total += os.path.getsize(file_path)
+                    seen.add(file_path)
+                except OSError:
+                    continue
+    return total
+
+async def prepare_favorites_cache_round_robin() -> dict:
+    policy = favorites_cache_policy()
+    if not policy.get("enabled"):
+        return {"enabled": False, "downloaded": 0, "reused": 0, "bytes": 0, "capped": False}
+    max_bytes = min(int(policy.get("max_bytes", FAVORITES_CACHE_DEFAULT_MAX_BYTES)), FAVORITES_CACHE_MAX_BYTES)
+    per_user_tracks = max(0, min(int(policy.get("per_user_tracks", FAVORITES_CACHE_DEFAULT_TRACKS_PER_USER)), FAVORITES_MAX_TRACKS_PER_USER))
+    favorites = [
+        playlist for playlist in load_playlists()
+        if is_favorites_playlist(playlist)
+        and favorite_cache_allowed_for_user(playlist_owner_id(playlist))
+        and not user_has_group(playlist_owner_id(playlist), "nodownload")
+    ]
+    favorites.sort(key=lambda item: (item.get("generated_at", 0), playlist_owner_id(item)))
+    current_bytes = favorite_cache_bytes()
+    result = {"enabled": True, "downloaded": 0, "reused": 0, "bytes": current_bytes, "capped": False}
+    changed = set()
+    for index in range(per_user_tracks):
+        for playlist in favorites:
+            tracks = playlist.get("tracks", [])
+            if index >= len(tracks):
+                continue
+            if current_bytes >= max_bytes:
+                result["capped"] = True
+                continue
+            track = tracks[index]
+            normalize_playlist_track_cache_fields(track)
+            cache_key = cache_key_for_track(track)
+            existing = find_existing_cache_file(cache_key, prefer_playlist=True, video_id=str(track.get("id") or "").strip() or None)
+            if existing and os.path.basename(existing).startswith("plst-"):
+                apply_cache_fields(track, existing, cache_mode="playlist")
+                result["reused"] += 1
+                changed.add(playlist.get("id"))
+                continue
+            try:
+                did_download, size = await cache_playlist_track(
+                    track,
+                    playlist_cache=True,
+                    projected_limit=max(0, max_bytes - current_bytes),
+                )
+            except Exception as exc:
+                logger.warning(f"Favorites cache download failed for {track.get('id')}: {exc}")
+                continue
+            if did_download:
+                if current_bytes + size > max_bytes:
+                    file_path = track.get("file")
+                    cache_key = cache_key_for_track(track)
+                    if file_path and is_safe_cache_path(file_path, cache_key):
+                        try:
+                            os.remove(file_path)
+                        except OSError as exc:
+                            logger.warning(f"Failed to remove over-limit favorites cache file {file_path}: {exc}")
+                    apply_cache_fields(track, None, cache_mode="streaming")
+                    result["capped"] = True
+                    continue
+                current_bytes += size
+                result["downloaded"] += 1
+                result["bytes"] = current_bytes
+                changed.add(playlist.get("id"))
+            elif size == 0 and current_bytes >= max_bytes:
+                result["capped"] = True
+    for playlist in favorites:
+        if playlist.get("id") in changed:
+            playlist["predownloaded"] = True
+            playlist["predownloaded_at"] = time.time()
+            save_playlist(playlist)
+    return result
+
+def favorite_added_notice(user, *, duplicate: bool = False) -> str:
+    name = discord.utils.escape_markdown(user_display(user))
+    if duplicate:
+        return f"{FAVORITE_REACTION} {name} already had this in their favorites."
+    return f"{FAVORITE_REACTION} {name} added this to their favorites."
+
+async def add_current_track_to_favorites(user) -> tuple:
+    track = client.current_track_info
+    if not track:
+        return False, "No song is currently playing."
+    playlist = favorites_playlist_for_user(user, create=True)
+    if not playlist:
+        return False, "Could not create your favorites playlist."
+    identities = playlist_existing_track_identities(playlist)
+    candidate = playlist_track_from_track(track, user)
+    identity = playlist_track_identity(candidate)
+    if identity and identity in identities:
+        return False, favorite_added_notice(user, duplicate=True)
+    if len(playlist.get("tracks", [])) >= favorites_track_limit():
+        return False, f"Favorites can store up to {favorites_track_limit()} song(s). Remove one before adding more."
+    playlist.setdefault("tracks", []).append(candidate)
+    playlist["updated_at"] = time.time()
+    playlist["owner_discord_name"] = user_display(user)
+    playlist["name"] = f"{user_display(user)} favorites"
+    save_playlist(playlist)
+    logger.info(
+        f"Favorite added: user={user_display(user)} ({user_id_value(user)}) "
+        f"title={candidate.get('title')} id={candidate.get('id')}"
+    )
+    return True, favorite_added_notice(user)
+
+def favorites_list_message(playlist: dict, *, viewer=None) -> str:
+    owner = discord.utils.escape_markdown(str(playlist.get("owner_discord_name", "unknown")))
+    lines = [
+        f"**{owner}'s favorites**",
+        f"- visibility: `{playlist.get('visibility', 'private')}`",
+        f"- tracks: `{len(playlist.get('tracks', []))}/{favorites_track_limit()}`",
+    ]
+    tracks = playlist.get("tracks", [])
+    if not tracks:
+        lines.append("_no favorites saved yet._")
+        return "\n".join(lines)
+    lines.append("")
+    for index, track in enumerate(tracks, start=1):
+        title = discord.utils.escape_markdown(str(track.get("title") or "Unknown title"))
+        video_id = discord.utils.escape_markdown(str(track.get("id") or ""))
+        entry = f"{index}. **{title}** (`{video_id}`)"
+        candidate = "\n".join(lines + [entry, f"_and {len(tracks) - index} more favorite(s) omitted._"])
+        if len(candidate) > DISCORD_MESSAGE_SAFE_LIMIT:
+            lines.append(f"_and {len(tracks) - index + 1} more favorite(s) omitted._")
+            break
+        lines.append(entry)
+    return "\n".join(lines)
+
+def favorites_status_message(user) -> str:
+    playlist = favorites_playlist_for_user(user, create=True)
+    policy = favorites_cache_policy()
+    groups = permissions_summary_for(user)
+    cache_allowed = favorite_cache_allowed_for_user(user) and not user_has_group(user, "nodownload")
+    return "\n".join([
+        "**favorites status**",
+        f"- visibility: `{playlist.get('visibility', 'private')}`",
+        f"- tracks: `{len(playlist.get('tracks', []))}/{favorites_track_limit()}`",
+        f"- cache eligible: `{'yes' if cache_allowed else 'no'}`",
+        f"- global favorites cache: `{'enabled' if policy.get('enabled') else 'disabled'}`",
+        f"- favorites cache cap: `{human_bytes(policy.get('max_bytes', FAVORITES_CACHE_DEFAULT_MAX_BYTES))}`",
+        f"- cache tracks per user: `{policy.get('per_user_tracks', FAVORITES_CACHE_DEFAULT_TRACKS_PER_USER)}`",
+        f"- permissions: {groups}",
+    ])
 
 def playlist_track_identity(track: dict) -> Optional[str]:
     video_id = str(track.get("id") or "").strip()
@@ -2625,6 +3049,8 @@ def format_now_playing(track: dict, *, show_queue: bool = False) -> str:
         now_playing += f"\n_from playlist: **{playlist_name}**_"
     if client.repeat_current_track and client.repeat_track_id == str(track.get("id") or ""):
         now_playing += "\n_repeat: **on**_"
+    if client.current_track_favorite_notice:
+        now_playing += f"\n{client.current_track_favorite_notice}"
     if not show_queue:
         return now_playing
     divider = "━━━━━━━━━━━━"
@@ -2673,6 +3099,7 @@ async def add_control_reactions(message):
 async def publish_now_playing(channel, track: dict, *, send_message=None, acknowledge=None):
     """Edit the active now-playing message when it is still the latest message."""
     old_message = client.current_track_message
+    client.current_track_favorite_notice = ""
     same_channel = old_message and getattr(getattr(old_message, "channel", None), "id", None) == channel.id
     newer_message_exists = await has_newer_message(channel, old_message) if same_channel else None
     can_edit = same_channel and not newer_message_exists
@@ -2738,6 +3165,26 @@ async def toggle_now_playing_queue(message):
     except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
         logger.warning(f"Failed to toggle queue section on now-playing message {message.id}: {exc}")
 
+async def handle_favorite_reaction(user, message):
+    _, notice = await add_current_track_to_favorites(user)
+    if not client.current_track_info:
+        try:
+            await message.channel.send(notice)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        return
+    client.current_track_favorite_notice = notice
+    try:
+        await message.edit(
+            content=format_now_playing(
+                client.current_track_info,
+                show_queue=client.current_track_message_show_queue,
+            )
+        )
+        logger.info(f"Updated now-playing favorite notice on message {message.id}: {notice}")
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+        logger.warning(f"Failed to edit now-playing favorite notice on message {message.id}: {exc}")
+
 async def send_paged_playlist_message(ctx, pages: list):
     if ctx.response.is_done():
         message = await ctx.followup.send(page_with_footer(pages, 0), wait=True)
@@ -2788,6 +3235,8 @@ def compact_help_message() -> str:
         "/playtop <query or playlist url> - add next",
         "/enqueue <query or playlist url> (alias /q) - add to queue",
         "/queue - show queue",
+        "/favorites play - play your starred songs",
+        "/permissions - show your restriction groups",
         "/help command:<command> - detailed command help",
         "/help - react 📖 for full help",
     ])
@@ -2797,14 +3246,16 @@ def expanded_help_message() -> str:
         "**music playback**",
         "/join - Join your voice channel.",
         "/play <YouTube URL, playlist URL, search, or playlist:name> - Play now or queue.",
+        "/play -favorites username - Play a user's public favorites; admins get a warning prompt for private favorites.",
         "/play:last - Restore the last auto-saved voice session.",
         "/playtop <query or playlist URL> - Play next.",
         "/enqueue <query, playlist URL, or playlist:name> (alias: /q) - Add to queue.",
         "/queue [links] (alias: /queuelist) - Show upcoming songs.",
         "/queuefirst <position, playlist URL, or playlist:name> (alias: /qfirst) - Move a song or playlist to play next.",
         "/skip, /pause, /resume, /stop, /volume <1-100> - Playback controls; skip/stop/volume use votes for non-admins.",
-        f"Now-playing reactions: ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat-one, {QUEUE_REACTION} queue.",
+        f"Now-playing reactions: {FAVORITE_REACTION} favorite, ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat-one, {QUEUE_REACTION} queue.",
         "/now (alias: /nytsoi), /getqueue - Current/session info.",
+        "/favorites play [user], /favorites list [user], /favorites privacy <public|private>, /favorites status.",
         "",
         "**playlists**",
         "/playlist list - Browse your playlists and visible public playlists.",
@@ -2825,6 +3276,7 @@ def expanded_help_message() -> str:
         "/playlist cacheglobal <mode> [force] - Admin global playlist cache policy.",
         "",
         "**admin / other**",
+        "/favorites cacheglobal, /favorites cacheuser, /usergroup add/remove/list, /permissions",
         "/clear_queue, /restorequeue, /purgequeue, /purgecache, /cachestatus, /autoleave, /setdeletetime, /volume_session, /volume_default, /togglelog, /toggledownload, /disablelinks, /reboot, /status",
         "/backup_teekkari_quotes, /random_quote",
         "",
@@ -3050,11 +3502,11 @@ def command_help_pages() -> dict:
         },
         "play": {
             "purpose": "play or queue YouTube audio",
-            "synopsis": ["/play <youtube url or search>", "/play <youtube playlist url>", "/play playlist:<name>", "/play last"],
-            "description": "Resolves YouTube URLs, YouTube playlist URLs, or search text with yt-dlp. If nothing is playing, a single track or the selected playlist entry starts immediately; otherwise the result is queued. Playlist names can start or queue saved playlists.",
-            "arguments": ["<query> - YouTube video URL, YouTube playlist URL, YouTube search text, playlist:name, or last/play:last."],
-            "examples": ["/play viidestoista yö", "/play https://youtube.com/watch?v=...", "/play https://youtube.com/playlist?list=...", "/play playlist:Roadtrip", "/play last"],
-            "notes": ["Raw non-YouTube URLs are rejected.", f"YouTube playlist URLs are capped at {MAX_PLAYLIST_TRACKS} track(s) and respect the queue length limit for non-admins.", "A watch URL with both `v=` and `list=` starts from that video when possible, then queues the rest of the playlist block.", "Download mode caches individual tracks when they reach playback; stream-only mode skips local caching.", "With `/togglelog debug`, /play posts an editable sanitized download debug message."],
+            "synopsis": ["/play <youtube url or search>", "/play <youtube playlist url>", "/play playlist:<name>", "/play -favorites <username>", "/play last"],
+            "description": "Resolves YouTube URLs, YouTube playlist URLs, favorites, or search text with yt-dlp. If nothing is playing, a single track or the selected playlist/favorites entry starts immediately; otherwise the result is queued. Playlist names can start or queue saved playlists.",
+            "arguments": ["<query> - YouTube video URL, YouTube playlist URL, YouTube search text, playlist:name, -favorites username, or last/play:last."],
+            "examples": ["/play viidestoista yö", "/play https://youtube.com/watch?v=...", "/play https://youtube.com/playlist?list=...", "/play playlist:Roadtrip", "/play -favorites jantso", "/play last"],
+            "notes": ["Raw non-YouTube URLs are rejected.", f"YouTube playlist URLs are capped at {MAX_PLAYLIST_TRACKS} track(s) and respect the queue length limit for non-admins.", "A watch URL with both `v=` and `list=` starts from that video when possible, then queues the rest of the playlist block.", "Favorites are private by default; public favorites can be played by others, and admins get a confirmation warning before overriding private favorites.", "Users in `nodownload` always stream and do not create normal downloads.", "Download mode caches individual tracks when they reach playback; stream-only mode skips local caching.", "With `/togglelog debug`, /play posts an editable sanitized download debug message."],
             "errors": ["Need voice channel - join voice first.", "Extraction failed - check yt-dlp, deno/node, and output.log.", "Large download - admin confirmation may be required."],
         },
         "playtop": {
@@ -3063,8 +3515,8 @@ def command_help_pages() -> dict:
             "description": "Adds a resolved YouTube track or YouTube playlist block to the front of the queue. If nothing is currently playing, it starts immediately.",
             "arguments": ["<query> - YouTube URL, YouTube playlist URL, or search text."],
             "examples": ["/playtop panzermensch", "/playtop https://youtube.com/playlist?list=..."],
-            "notes": ["This does not interrupt the current track when something is already playing."],
-            "errors": ["Queue limit reached for non-admins.", "Extraction failed - check output.log."],
+            "notes": ["This does not interrupt the current track when something is already playing.", "Users in `noqueueskip` cannot use this to jump songs ahead while playback is active."],
+            "errors": ["Queue limit reached for non-admins.", "Extraction failed - check output.log.", "Restricted by noqueueskip."],
         },
         "enqueue": {
             "purpose": "add a song or playlist to the end of the queue",
@@ -3108,8 +3560,8 @@ def command_help_pages() -> dict:
             "description": "Moves an upcoming queue item to position 1, or moves/adds a saved or YouTube playlist block to the front of the queue.",
             "arguments": ["<position> - 1-based queue position.", "<playlist> - visible playlist name, id, playlist:name, or YouTube playlist URL."],
             "examples": ["/queuefirst 3", "/queuefirst playlist:Roadtrip", "/queuefirst https://youtube.com/playlist?list=..."],
-            "notes": ["Does not interrupt the currently playing track."],
-            "errors": ["Queue is empty.", "Position is outside the queue.", "Playlist is empty or not visible."],
+            "notes": ["Does not interrupt the currently playing track.", "Users in `noqueueskip` cannot reorder the queue."],
+            "errors": ["Queue is empty.", "Position is outside the queue.", "Playlist is empty or not visible.", "Restricted by noqueueskip."],
         },
         "qfirst": {
             "purpose": "alias for queuefirst",
@@ -3126,8 +3578,8 @@ def command_help_pages() -> dict:
             "description": "Requests that the current track stop so the next queued track can start. Non-admins start or join a reaction vote; admins bypass the vote.",
             "arguments": ["none"],
             "examples": ["/skip"],
-            "notes": ["Quorum is 50% of current human voice-channel members, rounded up.", "The now-playing ▶️ reaction uses the same vote logic."],
-            "errors": ["No track is playing.", "You must be in the bot's voice channel."],
+            "notes": ["Quorum is 50% of current human voice-channel members, rounded up.", "The now-playing ▶️ reaction uses the same vote logic.", "Users in `noskip` cannot start skip votes or vote to skip."],
+            "errors": ["No track is playing.", "You must be in the bot's voice channel.", "Restricted by noskip."],
         },
         "pause": {
             "purpose": "pause playback",
@@ -3162,8 +3614,8 @@ def command_help_pages() -> dict:
             "description": "Sets the current playback volume after a non-admin vote. Admins bypass the vote.",
             "arguments": ["<level> - volume percentage from 1 to 100."],
             "examples": ["/volume 20", "/volume 35"],
-            "notes": ["The startup default is 20%.", "Admins can use `/volume_session` for a session hard-set or `/volume_default` for a persistent channel default."],
-            "errors": ["Level outside 1-100.", "Bot is not in voice.", "You must be in the bot's voice channel."],
+            "notes": ["The startup default is 20%.", "Admins can use `/volume_session` for a session hard-set or `/volume_default` for a persistent channel default.", "Users in `novolumechange` cannot use this command."],
+            "errors": ["Level outside 1-100.", "Bot is not in voice.", "You must be in the bot's voice channel.", "Restricted by novolumechange."],
         },
         "now": {
             "purpose": "show the current song",
@@ -3191,6 +3643,33 @@ def command_help_pages() -> dict:
             "examples": ["/getqueue"],
             "notes": ["This is session memory, not persistent storage."],
             "errors": ["No songs have been requested this session."],
+        },
+        "favorites": {
+            "purpose": "play and manage per-user favorites",
+            "synopsis": ["/favorites play [user]", "/favorites list [user]", "/favorites privacy <public|private>", "/favorites status", "/favorites cacheuser <user> <enabled>", "/favorites cacheglobal <enabled> [max_gb] [per_user_tracks]"],
+            "description": "Favorites are special per-user saved playlists. The now-playing star reaction adds the current song to the reacting user's favorites.",
+            "arguments": ["user - optional Discord user for public favorites.", "privacy - public lets others play your favorites, private blocks normal users.", "cacheuser/cacheglobal - admin cache controls."],
+            "examples": ["/favorites play", "/favorites play @friend", "/favorites privacy public", "/favorites cacheglobal true 6 30"],
+            "notes": ["Favorites are private by default.", "Favorites privacy is a social bot setting, not strong secrecy: admins can override with confirmation and anyone with filesystem access can read metadata.", "Favorites media cache uses cache/ only and is capped globally at 6 GiB.", "Each user can store up to 100 favorites; the default cache pass considers 30 per user."],
+            "errors": ["Favorites are private.", "No favorites are saved.", "Admin permission required for cache commands."],
+        },
+        "permissions": {
+            "purpose": "show your restriction groups",
+            "synopsis": ["/permissions"],
+            "description": "Shows `normal user` when no restriction groups are assigned, otherwise lists assigned groups.",
+            "arguments": ["none"],
+            "examples": ["/permissions"],
+            "notes": ["Groups are stored in user-permissions.json runtime config.", "Known groups: nodownload, novolumechange, noplaylistcreate, noqueueskip, noskip, norepeat."],
+            "errors": ["none"],
+        },
+        "usergroup": {
+            "purpose": "admin manage user restriction groups",
+            "synopsis": ["/usergroup add <user> <group>", "/usergroup remove <user> <group>", "/usergroup list <user>"],
+            "description": "Adds, removes, or lists user restriction groups used by playback, queue, playlist, repeat, and download paths.",
+            "arguments": ["user - Discord member.", "group - nodownload, novolumechange, noplaylistcreate, noqueueskip, noskip, or norepeat."],
+            "examples": ["/usergroup add @user nodownload", "/usergroup remove @user noskip", "/usergroup list @user"],
+            "notes": ["Admin only.", "`nodownload` forces that user's requests to stream and prevents favorite cache entries for that user.", "The config is runtime state and should not be committed."],
+            "errors": ["Admin permission required.", "Unknown group."],
         },
         "clear_queue": {
             "purpose": "clear the upcoming queue",
@@ -3369,6 +3848,15 @@ def command_aliases() -> dict:
         "playlist:cachemode": "playlist cachemode",
         "playlist:cacheglobal": "playlist cacheglobal",
         "playlist:predownload": "playlist predownload",
+        "favorites:play": "favorites",
+        "favorites:list": "favorites",
+        "favorites:privacy": "favorites",
+        "favorites:status": "favorites",
+        "favorites:cacheuser": "favorites",
+        "favorites:cacheglobal": "favorites",
+        "usergroup:add": "usergroup",
+        "usergroup:remove": "usergroup",
+        "usergroup:list": "usergroup",
     }
 
 def normalize_help_command(command: str) -> str:
@@ -3629,14 +4117,19 @@ async def fetch_youtube_playlist_tracks(query: str, requested_by=None, debug_rep
 
 async def fetch_media_tracks(query: str, requested_by=None, debug_report: Optional[DebugPlaybackMessage] = None) -> list:
     playlist_tracks = await fetch_youtube_playlist_tracks(query, requested_by=requested_by, debug_report=debug_report)
-    if playlist_tracks:
-        return playlist_tracks
-    return [await fetch_track(query, requested_by=requested_by, debug_report=debug_report)]
+    tracks = playlist_tracks if playlist_tracks else [await fetch_track(query, requested_by=requested_by, debug_report=debug_report)]
+    requester_id = user_id_value(requested_by)
+    if requester_id:
+        for track in tracks:
+            track["requested_by_user_id"] = requester_id
+            track["requested_by_discord_name"] = user_display(requested_by)
+    return tracks
 
 def preserve_playlist_context(original: dict, resolved: dict) -> dict:
     context_keys = (
         "playlist_id", "playlist_name", "playlist_block_id", "playlist_index",
         "playlist_total", "youtube_playlist_id", "youtube_playlist_url",
+        "requested_by_user_id", "requested_by_discord_name",
     )
     for key in context_keys:
         if key in original:
@@ -3649,7 +4142,8 @@ def preserve_playlist_context(original: dict, resolved: dict) -> dict:
 async def resolve_track_for_playback(track: dict, requested_by=None, debug_report: Optional[DebugPlaybackMessage] = None) -> dict:
     if not track.get("needs_refresh"):
         return track
-    resolved = await fetch_track(track.get("webpage_url") or canonical_youtube_url(track.get("id")), requested_by=requested_by, debug_report=debug_report)
+    requester = requested_by or track.get("requested_by_user_id")
+    resolved = await fetch_track(track.get("webpage_url") or canonical_youtube_url(track.get("id")), requested_by=requester, debug_report=debug_report)
     if resolved.get("needs_confirm"):
         raise Exception("Track needs admin confirmation before playback.")
     return preserve_playlist_context(track, resolved)
@@ -3664,6 +4158,9 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
     # Determine the full YouTube URL and video ID for URL inputs. Search text is
     # passed directly to yt-dlp so it can use its own maintained search extractor.
     video_url, video_id = normalize_youtube_query(query)
+    force_stream_only = user_has_group(requested_by, "nodownload")
+    if force_stream_only:
+        logger.info(f"Download/cache disabled for {user_display(requested_by)} ({user_id_value(requested_by)}): nodownload.")
 
     cache_key = canonical_cache_key_from_video_id(video_id) if video_id else None
     if debug_report:
@@ -3672,7 +4169,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
         await edit_debug_playback_message(debug_report, force=True)
 
     # If we have a video_id and it's cached (and in download mode), use the cached file.
-    if video_id and client.download_mode:
+    if video_id and client.download_mode and not force_stream_only:
         existing_cache = find_existing_cache_file(cache_key, prefer_playlist=True, video_id=video_id)
         info = downloaded.get(video_id, {})
         if existing_cache and info.get('title'):
@@ -3707,7 +4204,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
                 'ext': os.path.splitext(existing_cache)[1].lstrip(".").lower(),
             }
 
-    if video_id and video_id in downloaded and client.download_mode:
+    if video_id and video_id in downloaded and client.download_mode and not force_stream_only:
         info = downloaded[video_id]
         file_path = info.get('filepath')
         title = info.get('title', 'Unknown title')
@@ -3772,7 +4269,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
             raise Exception("Track duration exceeds 5 hours (admin limit).")
 
         existing_cache = find_existing_cache_file(cache_key, prefer_playlist=True, video_id=video_id)
-        if existing_cache and client.download_mode:
+        if existing_cache and client.download_mode and not force_stream_only:
             cache_mode = "playlist" if os.path.basename(existing_cache).startswith("plst-") else "shortterm"
             if debug_report:
                 debug_report.cache_state = f"hit:{cache_mode}"
@@ -3804,7 +4301,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
         total_bytes = estimate_total_downloaded_bytes()
 
         # If in download mode, enforce file size and total disk usage limits
-        if client.download_mode:
+        if client.download_mode and not force_stream_only:
             if not enough_disk_for_download():
                 raise Exception(f"Less than {MIN_FREE_DOWNLOAD_MB}MB free on disk; download refused.")
             if not cache_has_room(filesize or 0):
@@ -3828,13 +4325,14 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
                 }
 
         # At this point, the track is within allowed limits
-        if not client.download_mode:
+        if not client.download_mode or force_stream_only:
             # Stream-only mode: do not download, just return info (no 'file' key)
             logger.info(f"Using stream-only mode for '{title}' ({video_id}).")
             if debug_report:
-                debug_report.cache_state = "stream-only"
+                debug_report.cache_state = "nodownload" if force_stream_only else "stream-only"
                 debug_report.stage = "streaming"
-                await append_debug_playback_event(debug_report, "stream-only mode; skipping download", force=True)
+                detail = "nodownload restriction; skipping cache/download" if force_stream_only else "stream-only mode; skipping download"
+                await append_debug_playback_event(debug_report, detail, force=True)
                 await edit_debug_playback_message(debug_report, force=True)
             return {'id': video_id, 'title': title, 'webpage_url': page_url, 'cache_key': cache_key, 'cache_mode': 'streaming', 'cache_path': None}
 
@@ -3900,8 +4398,8 @@ async def ensure_voice_for_playback(ctx):
     return voice
 
 async def build_audio_player(track: dict):
-    await resolve_track_for_playback(track)
-    cached_file = cached_file_for_track(track)
+    await resolve_track_for_playback(track, requested_by=track.get("requested_by_user_id"))
+    cached_file = None if user_has_group(track.get("requested_by_user_id"), "nodownload") else cached_file_for_track(track)
     if cached_file:
         track["file"] = cached_file
         source = discord.FFmpegPCMAudio(cached_file, options='-vn')
@@ -4131,6 +4629,9 @@ async def prepare_playlist_cache_for_playback(ctx, playlist: dict, tracks: list)
 
 async def play_playlist_now(ctx, playlist: dict, command_name: str):
     tracks = playlist_to_queue_tracks(playlist)
+    for track in tracks:
+        track["requested_by_user_id"] = user_id_value(ctx.user)
+        track["requested_by_discord_name"] = user_display(ctx.user)
     if not tracks:
         await ctx.followup.send("That playlist is empty.")
         return
@@ -4142,7 +4643,8 @@ async def play_playlist_now(ctx, playlist: dict, command_name: str):
     voice = await ensure_voice_for_playback(ctx)
     if voice is None:
         return
-    await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
+    if not user_has_group(ctx.user, "nodownload"):
+        await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     if client.currently_playing:
         for track in tracks:
             queue.append(track)
@@ -4157,15 +4659,92 @@ async def play_playlist_now(ctx, playlist: dict, command_name: str):
     await start_track_now(ctx, voice, first)
     logger.info(f"Started playlist via /{command_name}: {playlist['name']} ({playlist['id']})")
 
+def favorites_visible_to_requester(requester, playlist: dict) -> bool:
+    return (
+        playlist_owner_id(playlist) == user_id_value(requester)
+        or is_playlist_public(playlist)
+    )
+
+async def confirm_favorites_admin_override(ctx, playlist: dict, action: str = "play") -> bool:
+    if favorites_visible_to_requester(ctx.user, playlist):
+        return True
+    if not is_user_admin(ctx.user):
+        return False
+    owner = discord.utils.escape_markdown(str(playlist.get("owner_discord_name", "unknown")))
+    return await confirm_with_reactions(
+        ctx,
+        f"**admin privacy override**: **{owner}** has private favorites. Confirm {action} anyway?",
+    )
+
+async def play_favorites_playlist(ctx, playlist: dict, command_name: str):
+    if not await confirm_favorites_admin_override(ctx, playlist, "playing favorites"):
+        await safe_interaction_send(ctx, "Those favorites are private.", ephemeral=True)
+        return
+    if favorites_cache_policy().get("enabled"):
+        result = await prepare_favorites_cache_round_robin()
+        if result.get("enabled") and (result.get("downloaded") or result.get("reused") or result.get("capped")):
+            suffix = " Favorite cache cap reached; later favorites will stream." if result.get("capped") else ""
+            await ctx.followup.send(
+                f"Favorites cache prepared: {result.get('downloaded', 0)} downloaded, "
+                f"{result.get('reused', 0)} already cached.{suffix}"
+            )
+    await play_playlist_now(ctx, playlist, command_name)
+
+def member_matches_text(member, text: str) -> bool:
+    lookup = str(text or "").strip().lower()
+    if not lookup:
+        return False
+    if lookup in {str(getattr(member, "id", "")), f"<@{getattr(member, 'id', '')}>", f"<@!{getattr(member, 'id', '')}>"}:
+        return True
+    names = {
+        str(getattr(member, "display_name", "")).lower(),
+        str(getattr(member, "name", "")).lower(),
+        str(member).lower(),
+    }
+    return lookup in names
+
+def resolve_member_text(ctx, text: str):
+    text = str(text or "").strip()
+    if not text:
+        return ctx.user
+    guild = getattr(ctx, "guild", None)
+    members = getattr(guild, "members", []) if guild else []
+    for member in members:
+        if member_matches_text(member, text):
+            return member
+    return None
+
+def parse_play_favorites_alias(query: str) -> Optional[str]:
+    text = str(query or "").strip()
+    if not text.lower().startswith("-favorites"):
+        return None
+    return text[len("-favorites"):].strip()
+
+async def play_favorites_alias(ctx, user_text: str) -> bool:
+    target_user = resolve_member_text(ctx, user_text)
+    if not target_user:
+        await ctx.followup.send("I could not find that user for favorites playback.", ephemeral=True)
+        return True
+    playlist = favorites_playlist_for_user(target_user, create=False)
+    if not playlist or not playlist.get("tracks"):
+        await ctx.followup.send("That user has no saved favorites yet.", ephemeral=True)
+        return True
+    await play_favorites_playlist(ctx, playlist, "play -favorites")
+    return True
+
 async def enqueue_playlist(ctx, playlist: dict, command_name: str):
     tracks = playlist_to_queue_tracks(playlist)
+    for track in tracks:
+        track["requested_by_user_id"] = user_id_value(ctx.user)
+        track["requested_by_discord_name"] = user_display(ctx.user)
     if not tracks:
         await ctx.followup.send("That playlist is empty.")
         return
     if not is_user_admin(ctx.user) and len(queue) + len(tracks) > MAX_QUEUE_LENGTH:
         await ctx.followup.send(f"Queue limit reached ({MAX_QUEUE_LENGTH} songs). Ask an admin to clear the queue.", ephemeral=True)
         return
-    await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
+    if not user_has_group(ctx.user, "nodownload"):
+        await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     for track in tracks:
         queue.append(track)
         client.song_history.append(track)
@@ -4189,6 +4768,9 @@ async def add_playlist_to_queue_front(ctx, playlist: dict):
         logger.info(f"Moved existing playlist block to front: {playlist['name']} ({playlist['id']})")
         return
     tracks = playlist_to_queue_tracks(playlist)
+    for track in tracks:
+        track["requested_by_user_id"] = user_id_value(ctx.user)
+        track["requested_by_discord_name"] = user_display(ctx.user)
     if not tracks:
         await ctx.response.send_message("That playlist is empty.")
         return
@@ -4197,7 +4779,8 @@ async def add_playlist_to_queue_front(ctx, playlist: dict):
         return
     if not ctx.response.is_done():
         await ctx.response.defer()
-    await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
+    if not user_has_group(ctx.user, "nodownload"):
+        await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     queue[0:0] = tracks
     client.song_history.extend(tracks)
     await ctx.followup.send(
@@ -4370,6 +4953,10 @@ async def handle_playlist_creation_message(msg) -> bool:
     session = client.playlist_creation_sessions.get(key)
     if not session:
         return False
+    if user_has_group(msg.author, "noplaylistcreate"):
+        finish_playlist_creation_session(key)
+        await msg.channel.send("Playlist creation cancelled because your account is in `noplaylistcreate`.")
+        return True
     content = str(msg.content or "").strip()
     lowered = content.lower()
     session.updated_at = time.time()
@@ -4524,7 +5111,8 @@ async def play_next_channel(channel):
     if len(queue) > 0:
         track = queue.pop(0)
         try:
-            cached_file = cached_file_for_track(track)
+            await resolve_track_for_playback(track, requested_by=track.get("requested_by_user_id"))
+            cached_file = None if user_has_group(track.get("requested_by_user_id"), "nodownload") else cached_file_for_track(track)
             if cached_file:
                 track["file"] = cached_file
                 source = discord.FFmpegPCMAudio(cached_file, options='-vn')
@@ -4642,7 +5230,9 @@ async def on_reaction_add(reaction, user):
                 logger.warning(f"Failed to remove denied user reaction: {e}")
             return
         emoji = str(reaction.emoji)
-        if emoji == QUEUE_REACTION:
+        if emoji == FAVORITE_REACTION:
+            await handle_favorite_reaction(user, reaction.message)
+        elif emoji == QUEUE_REACTION:
             await toggle_now_playing_queue(reaction.message)
         elif emoji == "▶️":
             # Skip to next track
@@ -4681,6 +5271,8 @@ async def save_all_channel_messages(channel):
 # Slash commands
 
 playlist_group = app_commands.Group(name="playlist", description="create, browse, and edit saved playlists")
+favorites_group = app_commands.Group(name="favorites", description="play and manage per-user favorites")
+usergroup_group = app_commands.Group(name="usergroup", description="admin user restriction groups")
 
 @client.tree.command()
 async def join(ctx):
@@ -4775,6 +5367,10 @@ async def play(ctx, *, url: str):
     await ctx.response.defer()
     if is_play_last_query(url):
         await restore_last_session(ctx)
+        return
+    favorites_alias_user = parse_play_favorites_alias(url)
+    if favorites_alias_user is not None:
+        await play_favorites_alias(ctx, favorites_alias_user)
         return
     playlist = resolve_playlist_reference(url, ctx.user)
     if playlist:
@@ -4914,6 +5510,8 @@ async def play(ctx, *, url: str):
 async def playtop(ctx, *, query: str):
     """Adds a song to the top of the queue (plays next)."""
     record_command(ctx)
+    if client.currently_playing and not await require_not_restricted(ctx, "noqueueskip", "add songs to the front of the queue"):
+        return
     await ctx.response.defer()
     if not client.currently_playing:
         # Nothing playing, so this will play immediately (similar to /play when queue empty)
@@ -5033,6 +5631,8 @@ async def q_cmd(ctx, *, query: str):
 async def queue_first(ctx, target: str, command_name: str):
     """Move a queued track to the front so it plays next."""
     record_command(ctx)
+    if not await require_not_restricted(ctx, "noqueueskip", "reorder the queue"):
+        return
     if not await require_voice_control(ctx, "reorder the queue"):
         return
     playlist = resolve_playlist_reference(target, ctx.user)
@@ -5133,6 +5733,162 @@ async def queuelist(ctx, links: bool = False):
     record_command(ctx)
     await send_queue_list(ctx, links=links)
 
+@app_commands.describe(user="User whose public favorites should play; omit for your own")
+@favorites_group.command(name="play", description="Play your favorites, or another user's public favorites.")
+async def favorites_play(ctx, user: Optional[discord.Member] = None):
+    record_command(ctx)
+    await ctx.response.defer()
+    target_user = user or ctx.user
+    playlist = favorites_playlist_for_user(target_user, create=user_id_value(target_user) == user_id_value(ctx.user))
+    if not playlist or not playlist.get("tracks"):
+        await ctx.followup.send("No favorites are saved yet.", ephemeral=True)
+        return
+    await play_favorites_playlist(ctx, playlist, "favorites play")
+
+@app_commands.describe(visibility="public lets other users play your favorites; private hides them from normal users")
+@app_commands.choices(visibility=[
+    app_commands.Choice(name="private", value="private"),
+    app_commands.Choice(name="public", value="public"),
+])
+@favorites_group.command(name="privacy", description="Set your favorites visibility.")
+async def favorites_privacy(ctx, visibility: str):
+    record_command(ctx)
+    playlist = favorites_playlist_for_user(ctx.user, create=True)
+    playlist["visibility"] = visibility
+    playlist["updated_at"] = time.time()
+    save_playlist(playlist)
+    await ctx.response.send_message(
+        f"Favorites visibility set to `{visibility}`. This is a social bot setting, not strong secrecy.",
+        ephemeral=True,
+    )
+    logger.info(f"Favorites privacy set to {visibility} by {user_display(ctx.user)} ({user_id_value(ctx.user)}).")
+
+@app_commands.describe(user="User whose public favorites should be listed; omit for your own")
+@favorites_group.command(name="list", description="List your favorites, or another user's public favorites.")
+async def favorites_list(ctx, user: Optional[discord.Member] = None):
+    record_command(ctx)
+    target_user = user or ctx.user
+    playlist = favorites_playlist_for_user(target_user, create=user_id_value(target_user) == user_id_value(ctx.user))
+    if not playlist:
+        await ctx.response.send_message("No favorites are saved yet.", ephemeral=True)
+        return
+    if user_id_value(target_user) != user_id_value(ctx.user) and not is_playlist_public(playlist):
+        await ctx.response.send_message("Those favorites are private.", ephemeral=True)
+        return
+    await ctx.response.send_message(favorites_list_message(playlist), ephemeral=True)
+
+@favorites_group.command(name="status", description="Show your favorites visibility, count, cache, and groups.")
+async def favorites_status(ctx):
+    record_command(ctx)
+    await ctx.response.send_message(favorites_status_message(ctx.user), ephemeral=True)
+
+@app_commands.describe(user="User whose favorite cache eligibility should change", enabled="Whether favorites cache may cache this user's favorites")
+@favorites_group.command(name="cacheuser", description="Admin-only favorite cache allow/deny for one user.")
+async def favorites_cacheuser(ctx, user: discord.Member, enabled: bool):
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    entry = user_permissions_entry(user, create=True)
+    entry["favorite_cache_enabled"] = bool(enabled)
+    entry["updated_at"] = time.time()
+    entry["updated_by_user_id"] = user_id_value(ctx.user)
+    entry["updated_by_discord_name"] = user_display(ctx.user)
+    save_user_permissions_config()
+    state = "allowed" if enabled else "blocked"
+    await ctx.response.send_message(f"Favorites cache is now **{state}** for **{discord.utils.escape_markdown(user_display(user))}**.", ephemeral=True)
+    logger.info(f"Favorites cache eligibility for {user_display(user)} ({user_id_value(user)}) set to {enabled}.")
+
+@app_commands.describe(
+    enabled="Enable or disable global favorites autocache",
+    max_gb="Global favorites cache cap in GiB; max 6",
+    per_user_tracks="How many favorites per user may be cached; max 100",
+)
+@favorites_group.command(name="cacheglobal", description="Admin-only global favorites autocache policy.")
+async def favorites_cacheglobal(ctx, enabled: bool, max_gb: Optional[float] = None, per_user_tracks: Optional[int] = None):
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    if max_gb is not None and max_gb < 0:
+        await ctx.response.send_message("max_gb must be zero or higher.", ephemeral=True)
+        return
+    if per_user_tracks is not None and per_user_tracks < 0:
+        await ctx.response.send_message("per_user_tracks must be zero or higher.", ephemeral=True)
+        return
+    set_favorites_cache_policy(enabled, max_gb=max_gb, per_user_tracks=per_user_tracks)
+    policy = favorites_cache_policy()
+    await ctx.response.send_message(
+        "Favorites cache policy updated: "
+        f"`{'enabled' if policy.get('enabled') else 'disabled'}`, "
+        f"cap `{human_bytes(policy.get('max_bytes'))}`, "
+        f"`{policy.get('per_user_tracks')}` track(s)/user.",
+        ephemeral=True,
+    )
+    logger.info(f"Favorites cache global policy updated by {user_display(ctx.user)}: {policy}")
+
+@client.tree.command(name="permissions")
+async def permissions_cmd(ctx):
+    """Shows the caller's user restriction groups."""
+    record_command(ctx)
+    await ctx.response.send_message(f"Your permissions: {permissions_summary_for(ctx.user)}.", ephemeral=True)
+
+@app_commands.describe(user="User to inspect")
+@usergroup_group.command(name="list", description="Admin-only list of a user's restriction groups.")
+async def usergroup_list(ctx, user: discord.Member):
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    await ctx.response.send_message(
+        f"Groups for **{discord.utils.escape_markdown(user_display(user))}**: {permissions_summary_for(user)}.",
+        ephemeral=True,
+    )
+
+@app_commands.describe(user="User to restrict", group="Restriction group to add")
+@app_commands.choices(group=[
+    app_commands.Choice(name="nodownload", value="nodownload"),
+    app_commands.Choice(name="novolumechange", value="novolumechange"),
+    app_commands.Choice(name="noplaylistcreate", value="noplaylistcreate"),
+    app_commands.Choice(name="noqueueskip", value="noqueueskip"),
+    app_commands.Choice(name="noskip", value="noskip"),
+    app_commands.Choice(name="norepeat", value="norepeat"),
+])
+@usergroup_group.command(name="add", description="Admin-only add a user restriction group.")
+async def usergroup_add(ctx, user: discord.Member, group: str):
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    add_user_group(user, group, ctx.user)
+    await ctx.response.send_message(
+        f"Added `{group}` to **{discord.utils.escape_markdown(user_display(user))}**.",
+        ephemeral=True,
+    )
+    logger.info(f"User group added: {group} -> {user_display(user)} ({user_id_value(user)}) by {user_display(ctx.user)}.")
+
+@app_commands.describe(user="User to update", group="Restriction group to remove")
+@app_commands.choices(group=[
+    app_commands.Choice(name="nodownload", value="nodownload"),
+    app_commands.Choice(name="novolumechange", value="novolumechange"),
+    app_commands.Choice(name="noplaylistcreate", value="noplaylistcreate"),
+    app_commands.Choice(name="noqueueskip", value="noqueueskip"),
+    app_commands.Choice(name="noskip", value="noskip"),
+    app_commands.Choice(name="norepeat", value="norepeat"),
+])
+@usergroup_group.command(name="remove", description="Admin-only remove a user restriction group.")
+async def usergroup_remove(ctx, user: discord.Member, group: str):
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    remove_user_group(user, group, ctx.user)
+    await ctx.response.send_message(
+        f"Removed `{group}` from **{discord.utils.escape_markdown(user_display(user))}**.",
+        ephemeral=True,
+    )
+    logger.info(f"User group removed: {group} -> {user_display(user)} ({user_id_value(user)}) by {user_display(ctx.user)}.")
+
 @playlist_group.command(name="list", description="Browse your playlists and visible public playlists.")
 async def playlist_list(ctx):
     record_command(ctx)
@@ -5150,6 +5906,8 @@ async def playlist_list(ctx):
 @playlist_group.command(name="new", description="Create a playlist.")
 async def playlist_new(ctx, name: Optional[str] = None, visibility: Optional[str] = None):
     record_command(ctx)
+    if not await require_not_restricted(ctx, "noplaylistcreate", "create playlists"):
+        return
     mode = str(visibility or "private").lower()
     if name is None:
         await start_playlist_creation_flow(ctx)
@@ -5864,6 +6622,8 @@ async def autoleave(ctx, enabled: bool, delay_seconds: Optional[int] = None):
 async def volume(ctx, level: int):
     """Sets the audio playback volume (1-100)."""
     record_command(ctx)
+    if not await require_not_restricted(ctx, "novolumechange", "change volume"):
+        return
     error = validate_volume_level(level)
     if error:
         await ctx.response.send_message(error, ephemeral=True)
@@ -6260,6 +7020,8 @@ async def status(ctx, view: str = "latest"):
     await ctx.response.send_message(build_status_message(view), ephemeral=True)
 
 client.tree.add_command(playlist_group)
+client.tree.add_command(favorites_group)
+client.tree.add_command(usergroup_group)
 
 @client.tree.error
 async def on_app_command_error(ctx, error):

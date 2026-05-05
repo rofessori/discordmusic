@@ -6,7 +6,7 @@ discord music bot - youtube-backed voice playback and quote utilities for one di
 
 ## synopsis
 
-the bot joins a discord voice channel, resolves youtube urls, youtube playlist urls, or search text with `yt-dlp`, and plays audio through `ffmpeg`. it keeps an in-memory song queue, tracks the current session history, can cache downloaded audio for playback, supports local saved playlists, and includes quote backup/random quote commands for a configured quotes channel.
+the bot joins a discord voice channel, resolves youtube urls, youtube playlist urls, favorites, or search text with `yt-dlp`, and plays audio through `ffmpeg`. it keeps an in-memory song queue, tracks the current session history, can cache downloaded audio for playback, supports local saved playlists and per-user favorites, and includes quote backup/random quote commands for a configured quotes channel.
 
 ## playback technology
 
@@ -33,6 +33,8 @@ download mode exists to make playback more stable after extraction succeeds: onc
 - deletes only validated media files from `cache/`.
 
 cache keys are url-safe base64 of the canonical youtube watch URL. raw youtube titles and user-provided text are not used in downloaded filenames. the hard cache cap is 20 GB; when the cap is reached, new downloads are skipped and playback falls back to streaming.
+
+users in the runtime `nodownload` group always stream. their requests skip normal cache lookup/download and their favorites are not eligible for favorites autocache.
 
 `/purgecache` logs and reports the important purge counts: files scanned, removed, bytes freed, current file kept, unsafe or non-media entries skipped, failed deletions, and stale metadata removed.
 
@@ -74,6 +76,20 @@ playlist cache behavior is admin-controlled. the persistent global default is bo
 
 the admin-only `/playlist predownload` command is disabled by default. enabling `PLAYLIST_PREDOWNLOAD_ENABLED=true` lets admins permanently download playlist audio into `cache/` with `plst-<cache-key>.<ext>` names without exposing that capability to normal users.
 
+## favorites
+
+favorites are special per-user playlists stored as metadata under `playlists/favorites-<user-id>/metadata.json`. they use the same track metadata shape as normal playlists, but they are managed through `/favorites` and the now-playing `⭐` reaction instead of the generic `/playlist` edit commands.
+
+reacting `⭐` on the current now-playing message adds that song to the reacting user's favorites, deduped by youtube id or URL. the bot edits the now-playing message with a short notice such as `⭐ user added this to their favorites.` and resets that notice when the next now-playing song is published.
+
+favorites are private by default. `/favorites privacy public` lets other users play or list them with `/favorites play user`, `/favorites list user`, or `/play -favorites username`. private favorites are denied to normal users. admins can play private favorites only after accepting a `👍`/`👎` warning prompt.
+
+favorites privacy is not strong secrecy. it is a social bot visibility setting: admins can override it through the bot with confirmation, and anyone with filesystem access can read the metadata files.
+
+favorites autocache is off by default and controlled by admins through `/favorites cacheglobal` and `/favorites cacheuser`. cached favorite media lives in root `cache/` as `plst-<cache-key>.<ext>` files, never in playlist folders. global favorites cache is capped at 6 GiB. the cache pass is balanced round-robin across eligible users so one user's favorites cannot consume the whole cap before other users are considered. by default it considers 30 tracks per user; the system supports up to 100 stored favorites per user.
+
+`/favorites status` shows the caller's visibility, favorite count, cache eligibility, global favorites cache policy, and assigned restriction groups.
+
 ## now-playing controls
 
 the now-playing message is the control surface for playback. it shows:
@@ -81,11 +97,24 @@ the now-playing message is the control surface for playback. it shows:
 - a note emoji.
 - a bold song title.
 - an italic youtube url.
-- reaction controls for previous, pause/resume, next, repeat-one, and queue display.
+- reaction controls for favorite, previous, pause/resume, next, repeat-one, and queue display.
 
 the bot tries to edit the latest now-playing message when no one has posted after it in the same channel. if another message exists after it, the bot sends a new now-playing message and removes playback-control reactions from the old one.
 
 the `📜` reaction toggles the current queue above the now-playing block. the queue section uses bold numbered titles, optional italic urls, a divider, and then the current song. admins can use `/disablelinks` to hide urls from queue-style displays for the current bot session. users must be in the same voice channel as the bot to use playback-affecting commands or now-playing reactions, unless they are admins.
+
+## runtime user restriction groups
+
+admins can assign runtime restriction groups with `/usergroup add`, `/usergroup remove`, and `/usergroup list`. users can see their own status with `/permissions`; users without groups see `normal user`. group state is stored in `user-permissions.json`, which is runtime configuration and should not be committed.
+
+the supported groups are:
+
+- `nodownload`: user requests always stream and do not create normal downloads or favorite cache entries for that user.
+- `novolumechange`: blocks `/volume`.
+- `noplaylistcreate`: blocks guided playlist creation and queue-import playlist creation.
+- `noqueueskip`: blocks `/playtop` while playback is active plus `/queuefirst` and `/qfirst`.
+- `noskip`: blocks `/skip`, skip reactions, and skip vote participation.
+- `norepeat`: blocks repeat reaction use.
 
 playlist list/edit views use `◀️` and `▶️` reactions for pages. only the newest playlist view remains interactive. `/help` is compact by default and expands in place when users react with `📖`. every root slash command has a manpage-style page through `/help command:<command>`, for example `/help command:nytsoi`. playlist help is available with `/help topic:playlists`, `/help command:playlist new`, and `/help topic:playlist command:new` style selectors.
 

@@ -7,7 +7,7 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | command | purpose |
 | --- | --- |
 | `/join` | join the voice channel you are currently in. |
-| `/play <youtube url, youtube playlist url, search, or playlist:name>` | play a youtube result or playlist immediately, or add it to the queue if something is already playing. raw non-youtube urls are rejected. |
+| `/play <youtube url, youtube playlist url, search, playlist:name, or -favorites username>` | play a youtube result, saved playlist, or public favorites immediately, or add it to the queue if something is already playing. raw non-youtube urls are rejected. |
 | `/play:last` | restore the last auto-saved voice session after auto-leave. in Discord slash options this is entered as `/play` with `last`, `play:last`, or `/play:last` as the value. |
 | `/playtop <query or youtube playlist url>` | add a track or youtube playlist block to the front of the queue so it plays next. if nothing is playing, it starts immediately. |
 | `/enqueue <query, youtube playlist url, or playlist:name>` | add a track or playlist to the end of the queue. |
@@ -29,11 +29,26 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 
 | reaction | purpose |
 | --- | --- |
+| `⭐` | add the current song to your favorites. the now-playing message is edited with a short notice naming the user. |
 | `◀️` | vote to replay the previous track when one is available. admins bypass the vote. |
 | `⏸️` | pause or resume playback. requires the same voice channel unless the user is an admin. |
 | `▶️` | vote to skip to the next track. admins bypass the vote. |
 | `🔂` | toggle repeat-one for the current track. admins bypass repeat-off votes; non-admin repeat-off only starts a vote after two other recent repeat-off toggles for that same song. |
 | `📜` | toggle the current queue above the now-playing message. requires the same voice channel unless the user is an admin. |
+
+## favorites
+
+| command | purpose |
+| --- | --- |
+| `/favorites play [user]` | play your favorites, or another user's public favorites. admins can override private favorites only after a confirmation warning. |
+| `/favorites list [user]` | list your favorites, or another user's public favorites. |
+| `/favorites privacy <public\|private>` | set whether normal users can view/play your favorites. private is the default. |
+| `/favorites status` | show your favorites visibility, count, cache eligibility, and restriction groups. |
+| `/favorites cacheuser <user> <enabled>` | admin-only allow or deny favorites autocache for one user. |
+| `/favorites cacheglobal <enabled> [max_gb] [per_user_tracks]` | admin-only global favorites autocache policy. max cap is 6 GiB; default per-user cache pass is 30 tracks and supported storage is 100 favorites/user. |
+| `/play -favorites username` | alias for playing a user's public favorites. |
+
+Favorites are special per-user playlists under `playlists/favorites-<user-id>/metadata.json`. Favorites privacy is not strong secrecy: admins can bypass private favorites with a warning prompt, and filesystem access can read metadata.
 
 ## queue management
 
@@ -71,6 +86,8 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/playlist cacheglobal <mode> [force]` | set the persistent global playlist cache behavior. admin only. modes: `streaming`, `bounded`, `keep_cached`; `force:true` makes playlists ignore their own mode. |
 | `/playlist predownload <playlist>` | admin-only hook for permanent playlist downloads into `cache/plst-<cache-key>.<ext>`. disabled by default. |
 
+Users in `noplaylistcreate` cannot use playlist creation/import commands.
+
 ## admin
 
 | command | purpose |
@@ -86,6 +103,17 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/setdeletetime <seconds>` | set how long downloaded song files wait after playback before delayed cleanup deletes them. admin only. |
 | `/reboot` | save the queue, ask for confirmation, disconnect, and exit the bot process. admin only. |
 | `/status [view]` | show runtime diagnostics, the full suggestion session, or the last five commands. admin only. |
+| `/usergroup add <user> <group>` | add a runtime restriction group to a user. admin only. |
+| `/usergroup remove <user> <group>` | remove a runtime restriction group from a user. admin only. |
+| `/usergroup list <user>` | list a user's runtime restriction groups. admin only. |
+
+restriction groups live in `user-permissions.json`: `nodownload` makes that user's requests stream-only and prevents favorite cache entries for that user, `novolumechange` blocks `/volume`, `noplaylistcreate` blocks playlist creation/import, `noqueueskip` blocks `/playtop` queue jumps and `/queuefirst`/`/qfirst`, `noskip` blocks `/skip` and skip votes, and `norepeat` blocks repeat reactions.
+
+## user permissions
+
+| command | purpose |
+| --- | --- |
+| `/permissions` | show `normal user` when you have no restriction groups, or list assigned groups. |
 
 status views:
 

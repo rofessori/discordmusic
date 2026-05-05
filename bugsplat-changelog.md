@@ -1,4 +1,7 @@
 ## 2026-05-05
+- Added per-user favorites as special playlist metadata: the now-playing `⭐` reaction stores the current song in the reacting user's favorites and edits the now-playing message with a short favorite notice.
+- Added `/favorites play/list/privacy/status/cacheuser/cacheglobal`, `/play -favorites username`, and `/permissions`, plus admin `/usergroup add/remove/list` runtime restriction groups.
+- Added favorites privacy/cache guardrails: favorites are private by default but not strong secrecy, admin private-favorites playback requires confirmation, favorites cache uses root `cache/` only, global favorites cache is capped at 6 GiB, and user restrictions live in ignored `user-permissions.json`.
 - Added YouTube playlist URL ingestion for playback and saved-playlist import flows. `/play`, `/playtop`, `/enqueue`, `/q`, `/queuefirst`, `/qfirst`, guided `/playlist new`, and `/playlist add ... url` now understand `list=` links; watch links with both `v=` and `list=` start from the selected video when possible and keep the rest as one playlist block.
 - Expanded admin logging controls with `/togglelog admin` and `/togglelog all`, which make `/play` post a sanitized progress message before voice join and edit it through voice, metadata, cache, download, and ffmpeg events.
 - Added the now-playing `🔂` repeat-one reaction with admin bypass and a repeat-off quorum guard after two other recent repeat-off toggles for the same song.
