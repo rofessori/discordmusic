@@ -1,4 +1,5 @@
 ## 2026-05-05
+- Fixed regressions from the favorites/user-restriction addition: favorites playback no longer uses the generic playlist cache path unless favorites autocache is enabled, `nodownload` users do not trigger favorites cache work or reuse cached restored tracks, and `noqueueskip` users no longer get the active-playlist move-next prompt.
 - Added per-user favorites as special playlist metadata: the now-playing `⭐` reaction stores the current song in the reacting user's favorites and edits the now-playing message with a short favorite notice.
 - Added `/favorites play/list/privacy/status/cacheuser/cacheglobal`, `/play -favorites username`, and `/permissions`, plus admin `/usergroup add/remove/list` runtime restriction groups.
 - Added favorites privacy/cache guardrails: favorites are private by default but not strong secrecy, admin private-favorites playback requires confirmation, favorites cache uses root `cache/` only, global favorites cache is capped at 6 GiB, and user restrictions live in ignored `user-permissions.json`.

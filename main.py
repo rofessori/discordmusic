@@ -2028,8 +2028,9 @@ def is_play_last_query(value: str) -> bool:
 async def play_saved_track_now(voice, channel, track: dict):
     if not track.get("webpage_url") and track.get("id"):
         track["webpage_url"] = youtube_watch_url + str(track.get("id"))
-    await resolve_track_for_playback(track)
-    cached_file = cached_file_for_track(track)
+    requester = track.get("requested_by_user_id")
+    await resolve_track_for_playback(track, requested_by=requester)
+    cached_file = None if user_has_group(requester, "nodownload") else cached_file_for_track(track)
     if cached_file:
         track["file"] = cached_file
         source = discord.FFmpegPCMAudio(cached_file, options='-vn')
@@ -4472,6 +4473,13 @@ async def enqueue_track_with_playlist_prompt(ctx, track: dict, command_name: str
         insert_after_active_playlist(track)
         client.song_history.append(track)
         logger.info(f"Track queued after active playlist via /{command_name}: {track.get('title')} ({track.get('id')})")
+        if user_has_group(ctx.user, "noqueueskip"):
+            title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
+            await ctx.followup.send(
+                f"Added **{title}** after the active playlist. Queue-jump prompts are disabled for your account.",
+                ephemeral=True,
+            )
+            return
         await prompt_move_track_next(ctx, track, (client.current_track_info or {}).get("playlist_name", "playlist"))
     else:
         queue.append(track)
@@ -4643,7 +4651,7 @@ async def play_playlist_now(ctx, playlist: dict, command_name: str):
     voice = await ensure_voice_for_playback(ctx)
     if voice is None:
         return
-    if not user_has_group(ctx.user, "nodownload"):
+    if not is_favorites_playlist(playlist) and not user_has_group(ctx.user, "nodownload"):
         await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     if client.currently_playing:
         for track in tracks:
@@ -4680,7 +4688,7 @@ async def play_favorites_playlist(ctx, playlist: dict, command_name: str):
     if not await confirm_favorites_admin_override(ctx, playlist, "playing favorites"):
         await safe_interaction_send(ctx, "Those favorites are private.", ephemeral=True)
         return
-    if favorites_cache_policy().get("enabled"):
+    if favorites_cache_policy().get("enabled") and not user_has_group(ctx.user, "nodownload"):
         result = await prepare_favorites_cache_round_robin()
         if result.get("enabled") and (result.get("downloaded") or result.get("reused") or result.get("capped")):
             suffix = " Favorite cache cap reached; later favorites will stream." if result.get("capped") else ""
@@ -4743,7 +4751,7 @@ async def enqueue_playlist(ctx, playlist: dict, command_name: str):
     if not is_user_admin(ctx.user) and len(queue) + len(tracks) > MAX_QUEUE_LENGTH:
         await ctx.followup.send(f"Queue limit reached ({MAX_QUEUE_LENGTH} songs). Ask an admin to clear the queue.", ephemeral=True)
         return
-    if not user_has_group(ctx.user, "nodownload"):
+    if not is_favorites_playlist(playlist) and not user_has_group(ctx.user, "nodownload"):
         await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     for track in tracks:
         queue.append(track)
@@ -4779,7 +4787,7 @@ async def add_playlist_to_queue_front(ctx, playlist: dict):
         return
     if not ctx.response.is_done():
         await ctx.response.defer()
-    if not user_has_group(ctx.user, "nodownload"):
+    if not is_favorites_playlist(playlist) and not user_has_group(ctx.user, "nodownload"):
         await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     queue[0:0] = tracks
     client.song_history.extend(tracks)
