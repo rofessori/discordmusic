@@ -138,8 +138,8 @@ Setup security checks:
 ## 2026-05-04 Cache Logging & Download Debug Notes
 - `/purgecache` should log a useful audit trail: cache directory, current file kept, every safe file removed with size, unsafe/non-media skips, stale `downloads.json` metadata removals, failure count, and final removed bytes.
 - Cache lookup uses canonical base64 filenames, but exact legacy files named `cache/<youtube-id>.<ext>` or `cache/plst-<youtube-id>.<ext>` are adopted to canonical names when the same YouTube id is requested. Do not adopt arbitrary title filenames.
-- `/togglelog debug` enables DEBUG logging plus sanitized editable `/play` download debug messages. These messages may show track title/id, cache hit/miss/downloaded/stream-only state, yt-dlp format id, progress bytes, speed, and the generic ffmpeg path, but must not expose absolute local paths or tokens.
-- The debug message collapse reaction edits the message down to a normal summary and clears reactions.
+- `/togglelog download` enables sanitized editable `/play` download log messages while keeping Python logging at normal INFO level. `/togglelog debug` enables DEBUG logging plus those messages, and `/play show_download_log:true` shows the log for one request without changing the global toggle. These messages may show track title/id, cache hit/miss/downloaded/stream-only state, yt-dlp format id, a progress bar, progress bytes, speed, and the generic ffmpeg path, but must not expose absolute local paths or tokens.
+- The download log collapse reaction edits the message down to a normal summary and clears reactions.
 
 ## 2026-05-05 YouTube Playlist URL Notes
 - YouTube URLs with a valid `list=` parameter are accepted by `/play`, `/playtop`, `/enqueue`, `/q`, `/queuefirst`, `/qfirst`, guided `/playlist new`, and `/playlist add ... url`.

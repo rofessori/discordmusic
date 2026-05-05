@@ -1,4 +1,5 @@
 ## 2026-05-05
+- Decoupled Discord download logs from Python DEBUG logging: `/togglelog download` now enables editable `/play` progress logs while keeping normal INFO logging, `/play show_download_log:true` enables the log for one request, and the message now shows a styled progress bar when download totals are available.
 - Added root `RECENT_UPDATES.md` plus `/whatsnew`, summarizing recent git-history updates for Discord users.
 - Fixed a documentation/help regression from the 50% ear-safety change: `/volume_force` was registered and referenced by volume guidance but missing from the command reference and detailed `/help command:` pages.
 - Added hidden admin voice placement with `/adminjoin`, allowing admins to connect or move the bot by voice channel name or by the voice channel a selected user is in.

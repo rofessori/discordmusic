@@ -1263,7 +1263,7 @@ def build_runtime_status():
         f"- currently playing: **{discord.utils.escape_markdown(str(current))}**",
         f"- volume: `{int(round(client.volume * 100))}%` (`{'session' if client.session_volume_locked else 'channel/default'}`)",
         f"- log level: `{logging.getLevelName(logger.level)}`",
-        f"- download debug messages: `{'enabled' if client.download_debug_messages else 'disabled'}`",
+        f"- download log messages: `{'enabled' if client.download_debug_messages else 'disabled'}`",
         f"- admin operation messages: `{'enabled' if client.user_operation_debug_messages else 'disabled'}`",
         f"- repeat current track: `{'enabled' if client.repeat_current_track else 'disabled'}`",
         f"- queue links: `{'disabled' if client.queue_links_disabled else 'enabled'}`",
@@ -1300,9 +1300,10 @@ def debug_playback_content(report: DebugPlaybackMessage, *, collapsed: bool = Fa
     if collapsed:
         title = discord.utils.escape_markdown(report.title or "track")
         video_id = discord.utils.escape_markdown(report.video_id or "-")
-        return f"**download debug hidden**\n- track: **{title}** (`{video_id}`)"
+        return f"**download log hidden**\n- track: **{title}** (`{video_id}`)"
+    progress = download_progress_bar(report.downloaded_bytes, report.total_bytes)
     lines = [
-        "**download debug**",
+        "**download log**",
         f"- stage: `{discord.utils.escape_markdown(report.stage)}`",
     ]
     if report.title or report.video_id:
@@ -1320,6 +1321,8 @@ def debug_playback_content(report: DebugPlaybackMessage, *, collapsed: bool = Fa
     if report.total_bytes or report.downloaded_bytes:
         total = human_bytes(report.total_bytes) if report.total_bytes else "unknown"
         lines.append(f"- downloaded: `{human_bytes(report.downloaded_bytes)} / {total}`")
+        if progress:
+            lines.append(f"- progress: `{progress}`")
     if report.speed:
         lines.append(f"- speed: `{human_bytes(report.speed)}/s`")
     if report.events:
@@ -1333,6 +1336,14 @@ def debug_playback_content(report: DebugPlaybackMessage, *, collapsed: bool = Fa
             lines.append("- ffmpeg: `audio-only (-vn), Discord PCM volume transformer`")
         lines.append(f"_react {DEBUG_COLLAPSE_REACTION} to hide debug details._")
     return "\n".join(lines)
+
+def download_progress_bar(downloaded: int, total: int, *, width: int = 24) -> Optional[str]:
+    if not total or total <= 0:
+        return None
+    ratio = max(0.0, min(1.0, float(downloaded or 0) / float(total)))
+    filled = int(round(ratio * width))
+    bar = "#" * filled + "-" * (width - filled)
+    return f"[{bar}] {ratio * 100:.0f}%"
 
 async def append_debug_playback_event(report: Optional[DebugPlaybackMessage], event: str, *, stage: Optional[str] = None, force: bool = False):
     if not report:
@@ -1376,13 +1387,13 @@ def schedule_debug_playback_update(report: Optional[DebugPlaybackMessage], loop,
     except RuntimeError as exc:
         logger.debug(f"Could not schedule debug playback update: {exc}")
 
-async def create_debug_playback_message(ctx, command: str) -> Optional[DebugPlaybackMessage]:
-    if not client.download_debug_messages:
+async def create_debug_playback_message(ctx, command: str, *, force: bool = False) -> Optional[DebugPlaybackMessage]:
+    if not (force or client.download_debug_messages):
         return None
-    normal = f"**download debug hidden**\n- command: `/{command}`"
+    normal = f"**download log hidden**\n- command: `/{command}`"
     try:
         message = await ctx.followup.send(
-            f"**download debug**\n- command: `/{command}`\n- stage: `starting`",
+            f"**download log**\n- command: `/{command}`\n- stage: `starting`",
             wait=True,
         )
         report = DebugPlaybackMessage(message=message, normal_content=normal, stage="starting")
@@ -3568,11 +3579,11 @@ def command_help_pages() -> dict:
         },
         "play": {
             "purpose": "play or queue YouTube audio",
-            "synopsis": ["/play <youtube url or search>", "/play <youtube playlist url>", "/play playlist:<name>", "/play -favorites <username>", "/play last"],
+            "synopsis": ["/play <youtube url or search> [show_download_log]", "/play <youtube playlist url>", "/play playlist:<name>", "/play -favorites <username>", "/play last"],
             "description": "Resolves YouTube URLs, YouTube playlist URLs, favorites, or search text with yt-dlp. If nothing is playing, a single track or the selected playlist/favorites entry starts immediately; otherwise the result is queued. Playlist names can start or queue saved playlists.",
-            "arguments": ["<query> - YouTube video URL, YouTube playlist URL, YouTube search text, playlist:name, -favorites username, or last/play:last."],
-            "examples": ["/play viidestoista yö", "/play https://youtube.com/watch?v=...", "/play https://youtube.com/playlist?list=...", "/play playlist:Roadtrip", "/play -favorites jantso", "/play last"],
-            "notes": ["Raw non-YouTube URLs are rejected.", f"YouTube playlist URLs are capped at {MAX_PLAYLIST_TRACKS} track(s) and respect the queue length limit for non-admins.", "A watch URL with both `v=` and `list=` starts from that video when possible, then queues the rest of the playlist block.", "Favorites are private by default; public favorites can be played by others, and admins get a confirmation warning before overriding private favorites.", "Users in `nodownload` always stream and do not create normal downloads.", "Download mode caches individual tracks when they reach playback; stream-only mode skips local caching.", "With `/togglelog debug`, /play posts an editable sanitized download debug message."],
+            "arguments": ["<query> - YouTube video URL, YouTube playlist URL, YouTube search text, playlist:name, -favorites username, or last/play:last.", "show_download_log - true shows an editable sanitized download progress log for this request."],
+            "examples": ["/play viidestoista yö", "/play https://youtube.com/watch?v=... show_download_log:true", "/play https://youtube.com/playlist?list=...", "/play playlist:Roadtrip", "/play -favorites jantso", "/play last"],
+            "notes": ["Raw non-YouTube URLs are rejected.", f"YouTube playlist URLs are capped at {MAX_PLAYLIST_TRACKS} track(s) and respect the queue length limit for non-admins.", "A watch URL with both `v=` and `list=` starts from that video when possible, then queues the rest of the playlist block.", "Favorites are private by default; public favorites can be played by others, and admins get a confirmation warning before overriding private favorites.", "Users in `nodownload` always stream and do not create normal downloads.", "Download mode caches individual tracks when they reach playback; stream-only mode skips local caching.", "`show_download_log:true` shows the editable progress log once; `/togglelog download` enables it globally while keeping normal INFO logging."],
             "errors": ["Need voice channel - join voice first.", "Extraction failed - check yt-dlp, deno/node, and output.log.", "Large download - admin confirmation may be required."],
         },
         "playtop": {
@@ -3838,11 +3849,11 @@ def command_help_pages() -> dict:
         },
         "togglelog": {
             "purpose": "toggle server debug logging",
-            "synopsis": ["/togglelog", "/togglelog debug", "/togglelog admin", "/togglelog all", "/togglelog normal"],
-            "description": "Turns DEBUG logging on or off. Debug mode enables sanitized editable `/play` download messages; admin/all also labels them as larger user-space operation messages and keeps the event trail visible as the bot edits the same message.",
-            "arguments": ["mode - toggle, debug, admin, all, normal, or off."],
-            "examples": ["/togglelog admin", "/togglelog all", "/togglelog normal"],
-            "notes": ["Admin only.", "The `/play` debug message is posted before voice connection work so users see immediate progress.", "Debug messages can be collapsed with the cleanup reaction.", "Do not leave verbose logs on forever in production."],
+            "synopsis": ["/togglelog", "/togglelog download", "/togglelog debug", "/togglelog admin", "/togglelog all", "/togglelog normal"],
+            "description": "Controls Python log verbosity and the editable Discord `/play` download log independently.",
+            "arguments": ["mode - toggle, download, debug, admin, all, normal, or off."],
+            "examples": ["/togglelog download", "/togglelog debug", "/togglelog normal"],
+            "notes": ["Admin only.", "`download` keeps normal INFO logging but enables the sanitized `/play` download progress message.", "`debug` enables DEBUG logging plus the download log.", "`admin` and `all` keep the larger user-space operation trail.", "Download log messages can be collapsed with the cleanup reaction."],
             "errors": ["Admin permission required."],
         },
         "toggledownload": {
@@ -5504,9 +5515,12 @@ async def skip(ctx):
     record_command(ctx)
     await request_voice_vote(ctx.user, ctx.channel, "skip", "skip the current track", ctx=ctx)
 
-@app_commands.describe(url="YouTube URL, YouTube playlist URL, search term, or playlist:name")
+@app_commands.describe(
+    url="YouTube URL, YouTube playlist URL, search term, or playlist:name",
+    show_download_log="Show an editable download progress log for this play request",
+)
 @client.tree.command()
-async def play(ctx, *, url: str):
+async def play(ctx, url: str, show_download_log: Optional[bool] = False):
     """Plays a YouTube video's audio, a YouTube playlist, or a search result."""
     record_command(ctx)
     await ctx.response.defer()
@@ -5522,7 +5536,7 @@ async def play(ctx, *, url: str):
         await play_playlist_now(ctx, playlist, "play")
         return
     if not client.currently_playing:
-        debug_report = await create_debug_playback_message(ctx, "play")
+        debug_report = await create_debug_playback_message(ctx, "play", force=bool(show_download_log))
         await append_debug_playback_event(debug_report, "checking voice connection", stage="voice-check", force=True)
         # Ensure we're connected to a voice channel before creating the player
         voice = client.current_voice_channel or ctx.guild.voice_client
@@ -5623,7 +5637,7 @@ async def play(ctx, *, url: str):
         # If something is already playing, add the requested song to the queue
         if not await require_queue_room(ctx):
             return
-        debug_report = await create_debug_playback_message(ctx, "play")
+        debug_report = await create_debug_playback_message(ctx, "play", force=bool(show_download_log))
         try:
             suggestion = record_suggestion(ctx, "play", url)
             tracks = await fetch_media_tracks(url, requested_by=ctx.user, debug_report=debug_report)
@@ -6923,9 +6937,10 @@ async def stop(ctx):
     record_command(ctx)
     await request_voice_vote(ctx.user, ctx.channel, "stop", "stop playback")
 
-@app_commands.describe(mode="debug enables logs; admin/all also enable larger edited /play operation messages")
+@app_commands.describe(mode="download enables /play download logs without DEBUG logging; debug enables both")
 @app_commands.choices(mode=[
     app_commands.Choice(name="toggle", value="toggle"),
+    app_commands.Choice(name="download", value="download"),
     app_commands.Choice(name="debug", value="debug"),
     app_commands.Choice(name="admin", value="admin"),
     app_commands.Choice(name="all", value="all"),
@@ -6940,7 +6955,11 @@ async def togglelog(ctx, mode: Optional[str] = "toggle"):
         await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
     mode = str(mode or "toggle").lower()
-    if mode in {"debug", "admin", "all"}:
+    if mode == "download":
+        client.log_verbose = False
+        client.download_debug_messages = True
+        client.user_operation_debug_messages = False
+    elif mode in {"debug", "admin", "all"}:
         client.log_verbose = True
         client.download_debug_messages = True
         client.user_operation_debug_messages = mode in {"admin", "all"}
@@ -6959,11 +6978,14 @@ async def togglelog(ctx, mode: Optional[str] = "toggle"):
         else:
             msg = (
                 "Verbose logging enabled."
-                + (" Download debug messages enabled for `/play`." if client.download_debug_messages else "")
+                + (" Download log messages enabled for `/play`." if client.download_debug_messages else "")
             )
     else:
         logger.setLevel(logging.INFO)
-        msg = "Verbose logging disabled. Download debug messages disabled. Admin operation messages disabled."
+        if client.download_debug_messages:
+            msg = "Normal logging enabled. Download log messages enabled for `/play`."
+        else:
+            msg = "Verbose logging disabled. Download log messages disabled. Admin operation messages disabled."
     await ctx.response.send_message(msg)
     logger.info(f"Logging level toggled by admin: {msg}")
 

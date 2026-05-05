@@ -7,7 +7,7 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | command | purpose |
 | --- | --- |
 | `/join` | join the voice channel you are currently in. |
-| `/play <youtube url, youtube playlist url, search, playlist:name, or -favorites username>` | play a youtube result, saved playlist, or public favorites immediately, or add it to the queue if something is already playing. raw non-youtube urls are rejected. |
+| `/play <youtube url, youtube playlist url, search, playlist:name, or -favorites username> [show_download_log]` | play a youtube result, saved playlist, or public favorites immediately, or add it to the queue if something is already playing. `show_download_log:true` shows an editable sanitized progress log for this request. raw non-youtube urls are rejected. |
 | `/play:last` | restore the last auto-saved voice session after auto-leave. in Discord slash options this is entered as `/play` with `last`, `play:last`, or `/play:last` as the value. |
 | `/playtop <query or youtube playlist url>` | add a track or youtube playlist block to the front of the queue so it plays next. if nothing is playing, it starts immediately. |
 | `/enqueue <query, youtube playlist url, or playlist:name>` | add a track or playlist to the end of the queue. |
@@ -95,7 +95,7 @@ Users in `noplaylistcreate` cannot use playlist creation/import commands.
 | --- | --- |
 | `/cachestatus` | show cache directory, size, file count, global playlist cache mode, and force-global state. admin only. |
 | `/purgecache` | delete validated media files from `cache/`, keeping the current playing file if present, and report scanned/removed/skipped/metadata-cleaned counts. admin only. |
-| `/togglelog [toggle\|debug\|admin\|all\|normal\|off]` | toggle verbose debug logging. `debug` enables editable `/play` download debug messages; `admin`/`all` turn on the larger user-space operation event trail. admin only. |
+| `/togglelog [toggle\|download\|debug\|admin\|all\|normal\|off]` | control logging and Discord download logs. `download` keeps normal INFO logging but enables editable `/play` progress messages; `debug` enables DEBUG logging too; `admin`/`all` turn on the larger user-space operation event trail. admin only. |
 | `/toggledownload` | switch between download-and-play mode and stream-only mode. admin only. |
 | `/disablelinks` | toggle whether queue-style displays are allowed to show youtube links. admin only. |
 | `/volume_session <1-50>` | hard-set this bot session's volume until disconnect within the safety cap. admin only. |

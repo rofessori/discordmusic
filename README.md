@@ -68,7 +68,7 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
 
 - **slash commands**:
   - `/join`
-  - `/play <youtube url|youtube playlist url|query|playlist:name>`
+  - `/play <youtube url|youtube playlist url|query|playlist:name> [show_download_log]`
   - `/play -favorites username`
   - `/play:last`
   - `/playtop <query|youtube playlist url>`
@@ -134,7 +134,7 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/volume_session <1–50>`
   - `/volume_default <1–50>`
   - `/volume_force <1–100> [save_default]`
-  - `/togglelog [toggle|debug|admin|all|normal|off]`
+  - `/togglelog [toggle|download|debug|admin|all|normal|off]`
   - `/toggledownload`
   - `/disablelinks`
   - `/reboot`
