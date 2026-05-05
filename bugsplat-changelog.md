@@ -1,3 +1,15 @@
+## 2026-05-05
+- Fixed a documentation/help regression from the 50% ear-safety change: `/volume_force` was registered and referenced by volume guidance but missing from the command reference and detailed `/help command:` pages.
+- Added hidden admin voice placement with `/adminjoin`, allowing admins to connect or move the bot by voice channel name or by the voice channel a selected user is in.
+- Added a 50% ear-safety ceiling to normal volume paths (`/volume`, `/volume_session`, and `/volume_default`) plus an admin `/volume_force` override for intentional louder session volume or forced channel defaults.
+- Fixed regressions from the favorites/user-restriction addition: favorites playback no longer uses the generic playlist cache path unless favorites autocache is enabled, `nodownload` users do not trigger favorites cache work or reuse cached restored tracks, and `noqueueskip` users no longer get the active-playlist move-next prompt.
+- Added per-user favorites as special playlist metadata: the now-playing `⭐` reaction stores the current song in the reacting user's favorites and edits the now-playing message with a short favorite notice.
+- Added `/favorites play/list/privacy/status/cacheuser/cacheglobal`, `/play -favorites username`, and `/permissions`, plus admin `/usergroup add/remove/list` runtime restriction groups.
+- Added favorites privacy/cache guardrails: favorites are private by default but not strong secrecy, admin private-favorites playback requires confirmation, favorites cache uses root `cache/` only, global favorites cache is capped at 6 GiB, and user restrictions live in ignored `user-permissions.json`.
+- Added YouTube playlist URL ingestion for playback and saved-playlist import flows. `/play`, `/playtop`, `/enqueue`, `/q`, `/queuefirst`, `/qfirst`, guided `/playlist new`, and `/playlist add ... url` now understand `list=` links; watch links with both `v=` and `list=` start from the selected video when possible and keep the rest as one playlist block.
+- Expanded admin logging controls with `/togglelog admin` and `/togglelog all`, which make `/play` post a sanitized progress message before voice join and edit it through voice, metadata, cache, download, and ffmpeg events.
+- Added the now-playing `🔂` repeat-one reaction with admin bypass and a repeat-off quorum guard after two other recent repeat-off toggles for the same song.
+
 ## 2026-05-03
 - Added admin `/autoleave <enabled> [delay_seconds]` and `/play:last` recovery so the bot can leave after being alone, save the current song plus queue, and resume that saved session later.
 - Improved help/status UX: compact `/help` now focuses on core playback commands, `📖` toggles expanded help open and closed, and `/status` wraps URLs in a code block when queue links are disabled.

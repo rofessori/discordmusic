@@ -3,7 +3,7 @@
 a discord music bot for playing audio from any youtube video in your server’s voice channel. to use it, you need a bot token and invite url—see the [discord developer quick-start bullshittery on their devsite](https://discord.com/developers/docs/quick-start/getting-started).
 
 also has commands for handling, saving, and displaying quotes from a specific channel.
-also supports local saved playlists with owners, managers, public/private visibility, and playlist playback.
+also supports YouTube playlist links, per-user favorites, plus local saved playlists with owners, managers, public/private visibility, and playlist playback.
 downloaded media is stored under `cache/`; playlist folders under `playlists/` contain metadata only.
 
 ## docs
@@ -67,19 +67,30 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
 
 - **slash commands**:
   - `/join`
-  - `/play <youtube url|query|playlist:name>`
+  - `/play <youtube url|youtube playlist url|query|playlist:name>`
+  - `/play -favorites username`
   - `/play:last`
-  - `/playtop <query>`
-  - `/enqueue <query|playlist:name>` (alias: `/q`)
+  - `/playtop <query|youtube playlist url>`
+  - `/enqueue <query|youtube playlist url|playlist:name>` (alias: `/q`)
   - `/queue [links]` (alias: `/queuelist`)
-  - `/queuefirst <position|playlist:name>` (alias: `/qfirst`)
+  - `/queuefirst <position|youtube playlist url|playlist:name>` (alias: `/qfirst`)
+  - react `⭐` on now-playing to add the current song to your favorites
+  - react `🔂` on now-playing to toggle repeat-one
   - react `📜` on now-playing to toggle the queue above the current song
   - `/skip` (non-admins vote)
   - `/pause` / `/resume`
   - `/stop` (non-admins vote)
-  - `/volume <1–100>` (non-admins vote)
+  - `/volume <1–50>` (non-admins vote)
   - `/now` (alias `/nytsoi`)
   - `/getqueue`
+
+- **favorites**:
+  - `/favorites play [user]`
+  - `/favorites list [user]`
+  - `/favorites privacy <public|private>`
+  - `/favorites status`
+  - `/play -favorites username` (alias for playing a user's public favorites)
+  - `/permissions`
 
 - **queue management**:
   - `/clear_queue`
@@ -93,7 +104,7 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/playlist edit <name>`
   - `/playlist show <name>`
   - `/playlist play <name>`
-  - `/playlist add <playlist> <current|queue|url> [queue_position] [url]`
+  - `/playlist add <playlist> <current|queue|url> [queue_position] [url]` (URL can be a YouTube video or playlist link)
   - `/playlist fill current <playlist>`
   - `/playlist addmod <playlist> <user>`
   - `/playlist remove <playlist> [flags]`
@@ -107,15 +118,21 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/help command:<command>`, `/help command:playlist new`, `/help topic:playlists`, and `/help topic:playlist command:new`
 
 - **admin-only**:
+  - `/favorites cacheglobal <enabled> [max_gb] [per_user_tracks]`
+  - `/favorites cacheuser <user> <enabled>`
+  - `/usergroup add <user> <nodownload|novolumechange|noplaylistcreate|noqueueskip|noskip|norepeat>`
+  - `/usergroup remove <user> <group>`
+  - `/usergroup list <user>`
   - `/cachestatus`
   - `/purgecache`
   - `/purgequeue`
   - `/playlist predownload <playlist>` (disabled unless `PLAYLIST_PREDOWNLOAD_ENABLED=true`)
   - `/autoleave <enabled> [delay_seconds]`
   - `/setdeletetime <seconds>`
-  - `/volume_session <1–100>`
-  - `/volume_default <1–100>`
-  - `/togglelog [toggle|debug|normal|off]`
+  - `/volume_session <1–50>`
+  - `/volume_default <1–50>`
+  - `/volume_force <1–100> [save_default]`
+  - `/togglelog [toggle|debug|admin|all|normal|off]`
   - `/toggledownload`
   - `/disablelinks`
   - `/reboot`
@@ -156,6 +173,12 @@ tail -f output.log
 
 - **playlist storage**:
   playlists are metadata-first. each playlist folder contains `metadata.json`; audio files do not live under `playlists/`. track entries include youtube metadata plus cache fields such as `cache_key`, `cache_mode`, `cache_path`, and `ext` so playback can stream or reuse a safe file in `cache/`.
+
+- **favorites privacy and storage**:
+  favorites are special per-user playlists stored under `playlists/favorites-<user-id>/metadata.json`. they are private by default, can be made public with `/favorites privacy public`, and can be played by the owner with `/favorites play` or by others when public with `/favorites play user` or `/play -favorites username`. this privacy is a social bot setting, not strong secrecy: admins can override private favorites after a confirmation prompt, and anyone with filesystem access can read playlist metadata.
+
+- **favorites cache and user restrictions**:
+  favorites autocache is off by default. admins can enable it with `/favorites cacheglobal`; favorites cache files use `cache/plst-<cache-key>.<ext>`, never playlist folders, and the favorites cache policy is capped at 6 GiB globally. cache selection is round-robin across eligible users and considers 30 favorites per user by default, up to the supported maximum of 100 stored favorites per user. runtime user rules live in `user-permissions.json`: `nodownload` forces a user's requests to stream, `novolumechange` blocks `/volume`, `noplaylistcreate` blocks playlist creation/import, `noqueueskip` blocks queue jump/reorder commands, `noskip` blocks skip commands/votes, and `norepeat` blocks repeat reactions.
 
 - **playlist cache limits**:
   playlist caching defaults to bounded mode: at most 15 tracks or 3 GB are cached per playlist play operation, and remaining tracks stream when needed. admins can change the persistent global mode with `/playlist cacheglobal`, override a playlist with `/playlist cachemode`, inspect cache with `/cachestatus`, and purge safe cache files with `/purgecache`. the hard cache cap is 20 GB; when it is reached, new downloads fall back to streaming.
