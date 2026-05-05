@@ -6,12 +6,12 @@ discord music bot - youtube-backed voice playback and quote utilities for one di
 
 ## synopsis
 
-the bot joins a discord voice channel, resolves youtube urls or search text with `yt-dlp`, and plays audio through `ffmpeg`. it keeps an in-memory song queue, tracks the current session history, can cache downloaded audio for playback, supports local saved playlists, and includes quote backup/random quote commands for a configured quotes channel.
+the bot joins a discord voice channel, resolves youtube urls, youtube playlist urls, or search text with `yt-dlp`, and plays audio through `ffmpeg`. it keeps an in-memory song queue, tracks the current session history, can cache downloaded audio for playback, supports local saved playlists, and includes quote backup/random quote commands for a configured quotes channel.
 
 ## playback technology
 
 - `discord.py[voice]` provides slash commands, guild command sync, voice connection handling, and reaction events.
-- `yt-dlp` resolves youtube urls or search terms, extracts metadata, checks duration/filesize, and downloads audio when download mode is enabled. raw non-youtube urls are rejected before extraction.
+- `yt-dlp` resolves youtube urls, youtube playlist urls, or search terms, extracts metadata, checks duration/filesize, and downloads audio when download mode is enabled. raw non-youtube urls are rejected before extraction.
 - `ffmpeg` feeds the selected audio source into discord voice playback.
 - `yt-dlp-ejs` plus `deno` or `node` supports current youtube javascript challenge handling.
 - `.env` values configure the bot token, guild id, quotes channel id, and optional admin identity.
@@ -44,9 +44,9 @@ admins can use `/togglelog debug` to enable verbose logs and editable `/play` do
 
 ## queue and playback flow
 
-the queue is an in-memory list of upcoming track dictionaries. `/play` starts playback immediately when nothing is playing, or queues the track when something is already playing. `/enqueue` and `/q` add to the end of the queue. `/playtop` inserts a new track at the front so it plays next. `/queuefirst` and `/qfirst` move an existing queued item or playlist to the front. `/queue links:true` can show youtube urls with queued songs unless an admin has disabled queue links.
+the queue is an in-memory list of upcoming track dictionaries. `/play` starts playback immediately when nothing is playing, or queues the track when something is already playing. youtube playlist links are expanded into a single playlist block: pure playlist links start at the first extracted item, while watch links containing both `v=` and `list=` start from the selected video when possible and queue the remaining extracted items after it. `/enqueue` and `/q` add to the end of the queue. `/playtop` inserts a new track or youtube playlist block at the front so it plays next. `/queuefirst` and `/qfirst` move an existing queued item, saved playlist, or youtube playlist link to the front. `/queue links:true` can show youtube urls with queued songs unless an admin has disabled queue links.
 
-when a track ends or is skipped, the bot pops the next queued track and starts it. session history is also kept so `/getqueue` can show whether requested songs are playing, queued, played, or removed. non-admin queueing is capped to limit public-server abuse.
+when a track ends or is skipped, the bot pops the next queued track and starts it. session history is also kept so `/getqueue` can show whether requested songs are playing, queued, played, or removed. non-admin queueing is capped to limit public-server abuse. youtube playlist URL extraction is capped by `MAX_PLAYLIST_TRACKS`, and queued playlist entries are resolved through the normal safe track-fetch path when they reach playback.
 
 `/skip`, `/stop`, and `/volume` are vote-based for non-admins in the bot's voice channel. quorum is 50% of the current human members in that voice channel, rounded up, and bots are excluded. admins bypass votes. the bot starts at 20% volume, admins can hard-set the current session with `/volume_session`, and admins can save a voice-channel default with `/volume_default` in `channel-volume-config.json`.
 
@@ -58,9 +58,9 @@ playlists are stored locally under `playlists/<safe-name>-<playlistid>/metadata.
 
 track entries include the youtube id, canonical youtube URL, cache key, cache mode, optional `cache_path`, media extension, and added-by metadata. if `cache_path` is missing or unsafe, playback ignores it and streams or downloads through the normal safe path.
 
-users can create private or public playlists with `/playlist new`. without arguments it starts a guided flow: the bot asks for a playlist name, accepts one or more youtube urls, supports `done`/`finish`/`valmis`/`loppu`/`stop`, and saves only when the user finishes. users can also import the upcoming queue directly with `/playlist new <name> current`; `currentqueue` and `jono` are aliases for that import mode. queue import creates the playlist immediately, then keeps a short add-more flow open for extra youtube urls.
+users can create private or public playlists with `/playlist new`. without arguments it starts a guided flow: the bot asks for a playlist name, accepts one or more youtube video or playlist urls, supports `done`/`finish`/`valmis`/`loppu`/`stop`, and saves only when the user finishes. users can also import the upcoming queue directly with `/playlist new <name> current`; `currentqueue` and `jono` are aliases for that import mode. queue import creates the playlist immediately, then keeps a short add-more flow open for extra youtube urls.
 
-users can browse playlists with `/playlist list`, inspect with `/playlist show`, inspect/edit with `/playlist edit`, play directly with `/playlist play`, add the current song, a queued song, or a youtube url with `/playlist add`, and bulk-fill a playlist from queued songs with `/playlist fill current <name>`. fill skips songs already in that playlist. owners can allow another user to manage the playlist with `/playlist addmod`. owners and admins can rename playlists with `/playlist rename` and lock playlists so managers cannot edit them.
+users can browse playlists with `/playlist list`, inspect with `/playlist show`, inspect/edit with `/playlist edit`, play directly with `/playlist play`, add the current song, a queued song, a youtube video url, or a youtube playlist url with `/playlist add`, and bulk-fill a playlist from queued songs with `/playlist fill current <name>`. fill skips songs already in that playlist. owners can allow another user to manage the playlist with `/playlist addmod`. owners and admins can rename playlists with `/playlist rename` and lock playlists so managers cannot edit them.
 
 playlist removal is soft by default. `/playlist remove <name>` asks for confirmation, marks the playlist deleted, and keeps it rescueable for 600 seconds. `/playlist rescue` lists deleted playlists that still exist on disk, and `/playlist rescue <name>` restores one for the owner or an admin. admins may remove immediately with `-now`; `-now -force` also skips the confirmation prompt. admins editing another user's playlist through edit/remove/move are reminded and asked to confirm unless they pass `-force`.
 

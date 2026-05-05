@@ -3,7 +3,7 @@
 a discord music bot for playing audio from any youtube video in your server’s voice channel. to use it, you need a bot token and invite url—see the [discord developer quick-start bullshittery on their devsite](https://discord.com/developers/docs/quick-start/getting-started).
 
 also has commands for handling, saving, and displaying quotes from a specific channel.
-also supports local saved playlists with owners, managers, public/private visibility, and playlist playback.
+also supports YouTube playlist links plus local saved playlists with owners, managers, public/private visibility, and playlist playback.
 downloaded media is stored under `cache/`; playlist folders under `playlists/` contain metadata only.
 
 ## docs
@@ -67,12 +67,12 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
 
 - **slash commands**:
   - `/join`
-  - `/play <youtube url|query|playlist:name>`
+  - `/play <youtube url|youtube playlist url|query|playlist:name>`
   - `/play:last`
-  - `/playtop <query>`
-  - `/enqueue <query|playlist:name>` (alias: `/q`)
+  - `/playtop <query|youtube playlist url>`
+  - `/enqueue <query|youtube playlist url|playlist:name>` (alias: `/q`)
   - `/queue [links]` (alias: `/queuelist`)
-  - `/queuefirst <position|playlist:name>` (alias: `/qfirst`)
+  - `/queuefirst <position|youtube playlist url|playlist:name>` (alias: `/qfirst`)
   - react `📜` on now-playing to toggle the queue above the current song
   - `/skip` (non-admins vote)
   - `/pause` / `/resume`
@@ -93,7 +93,7 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/playlist edit <name>`
   - `/playlist show <name>`
   - `/playlist play <name>`
-  - `/playlist add <playlist> <current|queue|url> [queue_position] [url]`
+  - `/playlist add <playlist> <current|queue|url> [queue_position] [url]` (URL can be a YouTube video or playlist link)
   - `/playlist fill current <playlist>`
   - `/playlist addmod <playlist> <user>`
   - `/playlist remove <playlist> [flags]`

@@ -62,6 +62,8 @@ DEFAULT_VOLUME_LEVEL = 20
 MIN_VOLUME_LEVEL = 1
 MAX_VOLUME_LEVEL = 100
 VOICE_VOTE_TIMEOUT_SECONDS = 45
+REPEAT_TOGGLE_RECENT_SECONDS = 300
+REPEAT_TOGGLE_VOTE_THRESHOLD = 2
 HELP_EXPAND_REACTION = "📖"
 DEBUG_COLLAPSE_REACTION = "🧹"
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
@@ -91,6 +93,8 @@ YTDLP_NO_CHECK_CERTIFICATE = env_flag("YTDLP_NO_CHECK_CERTIFICATE", False)
 ALLOW_ADMIN_ROLE_NAME = env_flag("ALLOW_ADMIN_ROLE_NAME", False)
 MAX_PLAYLIST_TRACKS = env_int("MAX_PLAYLIST_TRACKS", 100)
 MAX_URLS_PER_MESSAGE = env_int("MAX_URLS_PER_MESSAGE", 10)
+YOUTUBE_PLAYLIST_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,128}$")
+YOUTUBE_VIDEO_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{6,32}$")
 
 def display_path(path: str) -> str:
     try:
@@ -279,7 +283,8 @@ def coerce_int(value, label):
 # Initialize constants and global state
 queue = []  # list of track dicts for upcoming songs
 QUEUE_REACTION = "📜"
-CONTROL_REACTIONS = ("◀️", "⏸️", "▶️", QUEUE_REACTION)
+REPEAT_REACTION = "🔂"
+CONTROL_REACTIONS = ("◀️", "⏸️", "▶️", REPEAT_REACTION, QUEUE_REACTION)
 DISCORD_MESSAGE_SAFE_LIMIT = 1900
 MAX_QUEUE_LENGTH = 50
 MIN_FREE_DOWNLOAD_MB = 512
@@ -344,6 +349,39 @@ def parse_youtube_video_id(query: str):
     if path_parts and path_parts[0] in {"embed", "shorts", "watch"} and len(path_parts) > 1:
         return path_parts[-1]
     return None
+
+def youtube_url_parts(query: str) -> tuple:
+    try:
+        parsed = urllib.parse.urlparse(str(query or "").strip())
+    except Exception:
+        return None, {}
+    host = (parsed.hostname or parsed.netloc or "").lower().rstrip(".")
+    if not is_youtube_host(host):
+        return parsed, {}
+    return parsed, urllib.parse.parse_qs(parsed.query)
+
+def parse_youtube_playlist_id(query: str) -> Optional[str]:
+    """Return a YouTube playlist id from a URL's list= parameter."""
+    parsed, qs = youtube_url_parts(query)
+    if not parsed or not qs:
+        return None
+    playlist_id = str((qs.get("list") or [""])[0]).strip()
+    if playlist_id and YOUTUBE_PLAYLIST_ID_PATTERN.fullmatch(playlist_id):
+        return playlist_id
+    return None
+
+def parse_youtube_playlist_index(query: str) -> Optional[int]:
+    parsed, qs = youtube_url_parts(query)
+    if not parsed or not qs:
+        return None
+    try:
+        index = int(str((qs.get("index") or [""])[0]).strip())
+    except ValueError:
+        return None
+    return index if index > 0 else None
+
+def is_youtube_playlist_url(query: str) -> bool:
+    return bool(parse_youtube_playlist_id(query))
 
 def normalize_youtube_query(query: str):
     """Normalize YouTube URLs for caching; leave search text for yt-dlp's ytsearch1."""
@@ -869,6 +907,20 @@ async def require_queue_room(ctx) -> bool:
     await safe_interaction_send(
         ctx,
         f"Queue limit reached ({MAX_QUEUE_LENGTH} songs). Ask an admin to clear the queue.",
+        ephemeral=True,
+    )
+    return False
+
+async def require_queue_room_for_count(ctx, track_count: int) -> bool:
+    if is_user_admin(ctx.user) or len(queue) + track_count <= MAX_QUEUE_LENGTH:
+        return True
+    logger.warning(
+        f"Denied /{command_name(ctx)} by {user_display(ctx.user)} "
+        f"({getattr(ctx.user, 'id', 0)}): queue length limit {MAX_QUEUE_LENGTH} would be exceeded by {track_count} track(s)."
+    )
+    await safe_interaction_send(
+        ctx,
+        f"Queue limit reached ({MAX_QUEUE_LENGTH} songs). This playlist would add {track_count} song(s). Ask an admin to clear the queue.",
         ephemeral=True,
     )
     return False
@@ -1670,6 +1722,7 @@ def is_play_last_query(value: str) -> bool:
 async def play_saved_track_now(voice, channel, track: dict):
     if not track.get("webpage_url") and track.get("id"):
         track["webpage_url"] = youtube_watch_url + str(track.get("id"))
+    await resolve_track_for_playback(track)
     cached_file = cached_file_for_track(track)
     if cached_file:
         track["file"] = cached_file
@@ -2074,6 +2127,8 @@ def playlist_track_from_track(track: dict, user) -> dict:
         "added_by_discord_name": user_display(user),
         "added_at": time.time(),
     }
+    if track.get("needs_refresh"):
+        item["needs_refresh"] = True
     normalize_playlist_track_cache_fields(item, source_track=track)
     return item
 
@@ -2143,7 +2198,7 @@ def extract_youtube_urls(text: str) -> list:
             validate_media_query(candidate)
         except ValueError:
             continue
-        if parse_youtube_video_id(candidate) and candidate not in urls:
+        if (parse_youtube_video_id(candidate) or parse_youtube_playlist_id(candidate)) and candidate not in urls:
             urls.append(candidate)
     return urls
 
@@ -2246,7 +2301,7 @@ def extract_youtube_urls(text: str) -> list:
             validate_media_query(candidate)
         except ValueError:
             continue
-        if parse_youtube_video_id(candidate) and candidate not in urls:
+        if (parse_youtube_video_id(candidate) or parse_youtube_playlist_id(candidate)) and candidate not in urls:
             urls.append(candidate)
     return urls
 
@@ -2326,6 +2381,7 @@ def playlist_to_queue_tracks(playlist: dict, *, block_id: Optional[str] = None) 
             "cache_mode": track.get("cache_mode", "streaming"),
             "cache_path": track.get("cache_path"),
             "ext": track.get("ext"),
+            "needs_refresh": bool(track.get("needs_refresh")),
             "playlist_id": playlist.get("id"),
             "playlist_name": playlist.get("name"),
             "playlist_block_id": block_id,
@@ -2610,10 +2666,10 @@ async def handle_playlist_pager_reaction(reaction, user) -> bool:
 def compact_help_message() -> str:
     return "\n".join([
         "**music bot help**",
-        "/play <youtube url or search> - play or queue music",
+        "/play <youtube url, playlist url, or search> - play or queue music",
         "/play:last - restore last auto-saved session",
-        "/playtop <query> - add next",
-        "/enqueue <query> (alias /q) - add to queue",
+        "/playtop <query or playlist url> - add next",
+        "/enqueue <query or playlist url> (alias /q) - add to queue",
         "/queue - show queue",
         "/help command:<command> - detailed command help",
         "/help - react 📖 for full help",
@@ -2623,12 +2679,12 @@ def expanded_help_message() -> str:
     return "\n".join([
         "**music playback**",
         "/join - Join your voice channel.",
-        "/play <YouTube URL, search, or playlist:name> - Play now or queue.",
+        "/play <YouTube URL, playlist URL, search, or playlist:name> - Play now or queue.",
         "/play:last - Restore the last auto-saved voice session.",
-        "/playtop <query> - Play a song next.",
-        "/enqueue <query or playlist:name> (alias: /q) - Add to queue.",
+        "/playtop <query or playlist URL> - Play next.",
+        "/enqueue <query, playlist URL, or playlist:name> (alias: /q) - Add to queue.",
         "/queue [links] (alias: /queuelist) - Show upcoming songs.",
-        "/queuefirst <position or playlist:name> (alias: /qfirst) - Move a song or playlist to play next.",
+        "/queuefirst <position, playlist URL, or playlist:name> (alias: /qfirst) - Move a song or playlist to play next.",
         "/skip, /pause, /resume, /stop, /volume <1-100> - Playback controls; skip/stop/volume use votes for non-admins.",
         "/now (alias: /nytsoi), /getqueue - Current/session info.",
         "",
@@ -2669,6 +2725,7 @@ def playlist_general_help_message() -> str:
         "/playlist show Roadtrip - view songs",
         "/playlist play Roadtrip - play or queue it",
         "/playlist add Roadtrip url https://youtube.com/watch?v=... - add a link",
+        "/playlist add Roadtrip url https://youtube.com/playlist?list=... - import a YouTube playlist link",
         "/playlist fill current Roadtrip - add queued songs not already in it",
         "",
         "Detailed help: `/help topic:playlist command:new`, `/help topic:playlist command:add`, `/help topic:playlist command:fill`.",
@@ -2683,7 +2740,7 @@ def playlist_help_pages() -> dict:
             "description": "Starts a guided playlist creation flow, creates an empty playlist, or imports the current upcoming queue.",
             "arguments": ["<name> - playlist name.", "private/public - playlist visibility.", "current/currentqueue - import the upcoming queue.", "jono - Finnish alias for currentqueue."],
             "examples": ["/playlist new", "/playlist new Roadtrip current", "/playlist new Suomi jono"],
-            "notes": ["Guided creation accepts YouTube URLs, `done` to finish, and `cancel` to stop.", "Queue import creates the playlist immediately, then accepts more YouTube URLs until `done`.", "The compact help does not advertise `jono`, but this page documents it."],
+            "notes": ["Guided creation accepts YouTube video or playlist URLs, `done` to finish, and `cancel` to stop.", "Queue import creates the playlist immediately, then accepts more YouTube URLs until `done`.", "The compact help does not advertise `jono`, but this page documents it."],
             "errors": ["Queue is empty - add songs to the queue first.", "Duplicate name - choose another name or remove the old playlist."],
         },
         "list": {
@@ -2725,10 +2782,10 @@ def playlist_help_pages() -> dict:
         "add": {
             "purpose": "add a song to a playlist",
             "synopsis": ["/playlist add <playlist> current", "/playlist add <playlist> queue <position>", "/playlist add <playlist> url <youtube-url>"],
-            "description": "Adds the current song, a queued song, or a YouTube URL to a playlist you can edit.",
-            "arguments": ["<playlist> - playlist to edit.", "current - currently playing song.", "queue - song from upcoming queue.", "url - YouTube URL.", "<position> - queue position when source is queue."],
-            "examples": ["/playlist add Roadtrip current", "/playlist add Roadtrip queue 2", "/playlist add Roadtrip url https://youtube.com/watch?v=..."],
-            "notes": ["Raw non-YouTube URLs are rejected."],
+            "description": "Adds the current song, a queued song, a YouTube video URL, or a YouTube playlist URL to a playlist you can edit.",
+            "arguments": ["<playlist> - playlist to edit.", "current - currently playing song.", "queue - song from upcoming queue.", "url - YouTube video or playlist URL.", "<position> - queue position when source is queue."],
+            "examples": ["/playlist add Roadtrip current", "/playlist add Roadtrip queue 2", "/playlist add Roadtrip url https://youtube.com/watch?v=...", "/playlist add Roadtrip url https://youtube.com/playlist?list=..."],
+            "notes": ["Raw non-YouTube URLs are rejected.", f"YouTube playlist imports are capped at {MAX_PLAYLIST_TRACKS} track(s)."],
             "errors": ["No current song - start playback first.", "Bad queue position - run `/queue`.", "Invalid URL - send a YouTube link."],
         },
         "addmod": {
@@ -2875,28 +2932,28 @@ def command_help_pages() -> dict:
         },
         "play": {
             "purpose": "play or queue YouTube audio",
-            "synopsis": ["/play <youtube url or search>", "/play playlist:<name>", "/play last"],
-            "description": "Resolves YouTube URLs or search text with yt-dlp. If nothing is playing, the track starts immediately; otherwise it is queued. Playlist names can start or queue saved playlists.",
-            "arguments": ["<query> - YouTube URL, YouTube search text, playlist:name, or last/play:last."],
-            "examples": ["/play viidestoista yö", "/play https://youtube.com/watch?v=...", "/play playlist:Roadtrip", "/play last"],
-            "notes": ["Raw non-YouTube URLs are rejected.", "Download mode caches audio under cache/; stream-only mode skips local caching.", "With `/togglelog debug`, /play posts an editable sanitized download debug message."],
+            "synopsis": ["/play <youtube url or search>", "/play <youtube playlist url>", "/play playlist:<name>", "/play last"],
+            "description": "Resolves YouTube URLs, YouTube playlist URLs, or search text with yt-dlp. If nothing is playing, a single track or the selected playlist entry starts immediately; otherwise the result is queued. Playlist names can start or queue saved playlists.",
+            "arguments": ["<query> - YouTube video URL, YouTube playlist URL, YouTube search text, playlist:name, or last/play:last."],
+            "examples": ["/play viidestoista yö", "/play https://youtube.com/watch?v=...", "/play https://youtube.com/playlist?list=...", "/play playlist:Roadtrip", "/play last"],
+            "notes": ["Raw non-YouTube URLs are rejected.", f"YouTube playlist URLs are capped at {MAX_PLAYLIST_TRACKS} track(s) and respect the queue length limit for non-admins.", "A watch URL with both `v=` and `list=` starts from that video when possible, then queues the rest of the playlist block.", "Download mode caches individual tracks when they reach playback; stream-only mode skips local caching.", "With `/togglelog debug`, /play posts an editable sanitized download debug message."],
             "errors": ["Need voice channel - join voice first.", "Extraction failed - check yt-dlp, deno/node, and output.log.", "Large download - admin confirmation may be required."],
         },
         "playtop": {
             "purpose": "play a song next",
             "synopsis": ["/playtop <query>"],
-            "description": "Adds a resolved YouTube track to the front of the queue. If nothing is currently playing, it starts immediately.",
-            "arguments": ["<query> - YouTube URL or search text."],
-            "examples": ["/playtop panzermensch"],
+            "description": "Adds a resolved YouTube track or YouTube playlist block to the front of the queue. If nothing is currently playing, it starts immediately.",
+            "arguments": ["<query> - YouTube URL, YouTube playlist URL, or search text."],
+            "examples": ["/playtop panzermensch", "/playtop https://youtube.com/playlist?list=..."],
             "notes": ["This does not interrupt the current track when something is already playing."],
             "errors": ["Queue limit reached for non-admins.", "Extraction failed - check output.log."],
         },
         "enqueue": {
             "purpose": "add a song or playlist to the end of the queue",
             "synopsis": ["/enqueue <query>", "/enqueue playlist:<name>"],
-            "description": "Resolves a YouTube query or visible playlist and appends it to the upcoming queue.",
-            "arguments": ["<query> - YouTube URL, search text, playlist:name, or exact playlist name."],
-            "examples": ["/enqueue and one panzermensch", "/enqueue playlist:Roadtrip"],
+            "description": "Resolves a YouTube query, YouTube playlist URL, or visible playlist and appends it to the upcoming queue.",
+            "arguments": ["<query> - YouTube URL, YouTube playlist URL, search text, playlist:name, or exact playlist name."],
+            "examples": ["/enqueue and one panzermensch", "/enqueue https://youtube.com/playlist?list=...", "/enqueue playlist:Roadtrip"],
             "notes": ["Alias: /q.", "If a playlist is actively playing, normal song requests are placed after that playlist block."],
             "errors": ["Queue limit reached.", "Large download requires /play confirmation."],
         },
@@ -2904,7 +2961,7 @@ def command_help_pages() -> dict:
             "purpose": "alias for enqueue",
             "synopsis": ["/q <query>"],
             "description": "Short alias for `/enqueue` with the same behavior.",
-            "arguments": ["<query> - YouTube URL, search text, playlist:name, or exact playlist name."],
+            "arguments": ["<query> - YouTube URL, YouTube playlist URL, search text, playlist:name, or exact playlist name."],
             "examples": ["/q viidestoista yö"],
             "notes": ["Use `/help command:enqueue` for the full behavior."],
             "errors": ["Same as `/enqueue`."],
@@ -2929,10 +2986,10 @@ def command_help_pages() -> dict:
         },
         "queuefirst": {
             "purpose": "move a queued song or playlist to play next",
-            "synopsis": ["/queuefirst <position>", "/queuefirst playlist:<name>"],
-            "description": "Moves an upcoming queue item to position 1, or moves/adds a playlist block to the front of the queue.",
-            "arguments": ["<position> - 1-based queue position.", "<playlist> - visible playlist name, id, or playlist:name."],
-            "examples": ["/queuefirst 3", "/queuefirst playlist:Roadtrip"],
+            "synopsis": ["/queuefirst <position>", "/queuefirst playlist:<name>", "/queuefirst <youtube playlist url>"],
+            "description": "Moves an upcoming queue item to position 1, or moves/adds a saved or YouTube playlist block to the front of the queue.",
+            "arguments": ["<position> - 1-based queue position.", "<playlist> - visible playlist name, id, playlist:name, or YouTube playlist URL."],
+            "examples": ["/queuefirst 3", "/queuefirst playlist:Roadtrip", "/queuefirst https://youtube.com/playlist?list=..."],
             "notes": ["Does not interrupt the currently playing track."],
             "errors": ["Queue is empty.", "Position is outside the queue.", "Playlist is empty or not visible."],
         },
@@ -2940,7 +2997,7 @@ def command_help_pages() -> dict:
             "purpose": "alias for queuefirst",
             "synopsis": ["/qfirst <position or playlist>"],
             "description": "Short alias for `/queuefirst`.",
-            "arguments": ["<target> - queue position or visible playlist."],
+            "arguments": ["<target> - queue position, visible playlist, or YouTube playlist URL."],
             "examples": ["/qfirst 2"],
             "notes": ["Use `/help command:queuefirst` for the full behavior."],
             "errors": ["Same as `/queuefirst`."],
@@ -3323,6 +3380,158 @@ async def download_youtube_to_cache(
         raise Exception("Final cache file failed safety validation.")
     return target_path, ext, data
 
+def youtube_playlist_watch_url(playlist_id: str, video_id: Optional[str] = None) -> str:
+    if video_id:
+        return f"{youtube_watch_url}{video_id}&list={urllib.parse.quote(playlist_id)}"
+    return f"{youtube_base_url}playlist?list={urllib.parse.quote(playlist_id)}"
+
+def playlist_entry_video_id(entry: dict) -> Optional[str]:
+    if not isinstance(entry, dict):
+        return None
+    for key in ("id", "url", "webpage_url"):
+        value = str(entry.get(key) or "").strip()
+        if not value:
+            continue
+        if key == "id" and YOUTUBE_VIDEO_ID_PATTERN.fullmatch(value):
+            return value
+        parsed = parse_youtube_video_id(value)
+        if parsed:
+            return parsed
+        if YOUTUBE_VIDEO_ID_PATTERN.fullmatch(value):
+            return value
+    return None
+
+def playlist_entry_to_track(entry: dict, *, playlist_id: str, playlist_name: str, block_id: str, index: int, total: int) -> Optional[dict]:
+    video_id = playlist_entry_video_id(entry)
+    if not video_id:
+        return None
+    title = str(entry.get("title") or "Unknown title")
+    if title.lower() in {"[deleted video]", "[private video]"}:
+        return None
+    return {
+        "id": video_id,
+        "title": title,
+        "webpage_url": canonical_youtube_url(video_id),
+        "cache_key": canonical_cache_key_from_video_id(video_id),
+        "cache_mode": "streaming",
+        "cache_path": None,
+        "ext": None,
+        "playlist_id": f"youtube:{playlist_id}",
+        "playlist_name": playlist_name,
+        "playlist_block_id": block_id,
+        "playlist_index": index,
+        "playlist_total": total,
+        "youtube_playlist_id": playlist_id,
+        "youtube_playlist_url": youtube_playlist_watch_url(playlist_id, video_id),
+        # Playlist extraction is metadata-only. Resolve each track through the
+        # normal fetch path when it reaches playback so duration/cache rules
+        # are still applied before ffmpeg sees it.
+        "needs_refresh": True,
+    }
+
+def rotate_playlist_entries_for_selected(entries: list, selected_video_id: Optional[str]) -> list:
+    if not selected_video_id:
+        return entries
+    for index, entry in enumerate(entries):
+        if playlist_entry_video_id(entry) == selected_video_id:
+            return entries[index:]
+    return entries
+
+async def fetch_youtube_playlist_tracks(query: str, requested_by=None, debug_report: Optional[DebugPlaybackMessage] = None) -> Optional[list]:
+    """Extract a YouTube playlist URL into queue-ready track dictionaries."""
+    query = validate_media_query(query)
+    playlist_id = parse_youtube_playlist_id(query)
+    if not playlist_id:
+        return None
+
+    selected_video_id = parse_youtube_video_id(query)
+    selected_index = parse_youtube_playlist_index(query)
+    options = dict(ytdl_options)
+    options["noplaylist"] = False
+    options["extract_flat"] = "in_playlist"
+    options["ignoreerrors"] = True
+    if selected_index:
+        options["playliststart"] = selected_index
+        options["playlistend"] = selected_index + MAX_PLAYLIST_TRACKS - 1
+    else:
+        options["playlistend"] = MAX_PLAYLIST_TRACKS
+
+    if debug_report:
+        debug_report.stage = "playlist"
+        debug_report.cache_state = "metadata"
+        await edit_debug_playback_message(debug_report, force=True)
+
+    loop = asyncio.get_event_loop()
+    extractor = yt_dlp.YoutubeDL(options)
+    data = await loop.run_in_executor(None, lambda: extractor.extract_info(query, download=False))
+    entries = [entry for entry in (data or {}).get("entries", []) if entry]
+    if not entries:
+        raise Exception("No playable entries were found in that YouTube playlist.")
+
+    entries = rotate_playlist_entries_for_selected(entries, selected_video_id)
+    if selected_video_id and not any(playlist_entry_video_id(entry) == selected_video_id for entry in entries):
+        entries.insert(0, {
+            "id": selected_video_id,
+            "title": "Selected YouTube video",
+            "webpage_url": canonical_youtube_url(selected_video_id),
+        })
+
+    entries = entries[:MAX_PLAYLIST_TRACKS]
+    playlist_name = str((data or {}).get("title") or f"YouTube playlist {playlist_id}")
+    block_id = generate_playlist_id()
+    tracks = []
+    for entry in entries:
+        track = playlist_entry_to_track(
+            entry,
+            playlist_id=playlist_id,
+            playlist_name=playlist_name,
+            block_id=block_id,
+            index=len(tracks) + 1,
+            total=len(entries),
+        )
+        if track:
+            tracks.append(track)
+
+    total = len(tracks)
+    for index, track in enumerate(tracks, start=1):
+        track["playlist_index"] = index
+        track["playlist_total"] = total
+
+    if not tracks:
+        raise Exception("No playable entries were found in that YouTube playlist.")
+    logger.info(
+        f"Resolved YouTube playlist {playlist_id} into {len(tracks)} track(s) "
+        f"for {user_display(requested_by) if requested_by else 'unknown user'}."
+    )
+    return tracks
+
+async def fetch_media_tracks(query: str, requested_by=None, debug_report: Optional[DebugPlaybackMessage] = None) -> list:
+    playlist_tracks = await fetch_youtube_playlist_tracks(query, requested_by=requested_by, debug_report=debug_report)
+    if playlist_tracks:
+        return playlist_tracks
+    return [await fetch_track(query, requested_by=requested_by, debug_report=debug_report)]
+
+def preserve_playlist_context(original: dict, resolved: dict) -> dict:
+    context_keys = (
+        "playlist_id", "playlist_name", "playlist_block_id", "playlist_index",
+        "playlist_total", "youtube_playlist_id", "youtube_playlist_url",
+    )
+    for key in context_keys:
+        if key in original:
+            resolved[key] = original[key]
+    resolved.pop("needs_refresh", None)
+    original.clear()
+    original.update(resolved)
+    return original
+
+async def resolve_track_for_playback(track: dict, requested_by=None, debug_report: Optional[DebugPlaybackMessage] = None) -> dict:
+    if not track.get("needs_refresh"):
+        return track
+    resolved = await fetch_track(track.get("webpage_url") or canonical_youtube_url(track.get("id")), requested_by=requested_by, debug_report=debug_report)
+    if resolved.get("needs_confirm"):
+        raise Exception("Track needs admin confirmation before playback.")
+    return preserve_playlist_context(track, resolved)
+
 async def fetch_track(query: str, requested_by=None, debug_report: Optional[DebugPlaybackMessage] = None):
     """
     Fetches YouTube track info for the given query (URL or search term).
@@ -3561,6 +3770,7 @@ async def ensure_voice_for_playback(ctx):
     return voice
 
 async def build_audio_player(track: dict):
+    await resolve_track_for_playback(track)
     cached_file = cached_file_for_track(track)
     if cached_file:
         track["file"] = cached_file
@@ -3569,7 +3779,8 @@ async def build_audio_player(track: dict):
     player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True)
     return player
 
-async def start_track_now(ctx, voice, track: dict):
+async def start_track_now(ctx, voice, track: dict, *, debug_report: Optional[DebugPlaybackMessage] = None):
+    await resolve_track_for_playback(track, requested_by=ctx.user, debug_report=debug_report)
     player = await build_audio_player(track)
     voice.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, ctx.channel))
     client.current_track_id = track['id']
@@ -3637,6 +3848,49 @@ async def enqueue_track_with_playlist_prompt(ctx, track: dict, command_name: str
         title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
         await ctx.followup.send(f"Added to queue: {title} ({track.get('id', '')})")
         logger.info(f"Track enqueued: {track.get('title')} ({track.get('id')})")
+
+def youtube_playlist_queue_message(tracks: list, *, action: str) -> str:
+    playlist_name = discord.utils.escape_markdown(str(tracks[0].get("playlist_name") or "YouTube playlist"))
+    return f"{action} YouTube playlist **{playlist_name}** ({len(tracks)} song(s))."
+
+async def enqueue_youtube_playlist_tracks(ctx, tracks: list, command_name: str, *, front: bool = False):
+    if not tracks:
+        await ctx.followup.send("That YouTube playlist has no playable tracks.")
+        return
+    if not await require_queue_room_for_count(ctx, len(tracks)):
+        return
+    if front:
+        queue[0:0] = tracks
+        action = "Moved to play next:"
+    else:
+        queue.extend(tracks)
+        action = "Queued"
+    client.song_history.extend(tracks)
+    await ctx.followup.send(youtube_playlist_queue_message(tracks, action=action))
+    logger.info(
+        f"YouTube playlist queued via /{command_name}: "
+        f"{tracks[0].get('playlist_name')} ({tracks[0].get('youtube_playlist_id')}) "
+        f"tracks={len(tracks)} front={front}"
+    )
+
+async def play_youtube_playlist_tracks(ctx, voice, tracks: list, command_name: str, *, debug_report: Optional[DebugPlaybackMessage] = None):
+    if not tracks:
+        await ctx.followup.send("That YouTube playlist has no playable tracks.")
+        return
+    queued_count = max(0, len(tracks) - 1)
+    if not await require_queue_room_for_count(ctx, queued_count):
+        return
+    first, rest = tracks[0], tracks[1:]
+    await start_track_now(ctx, voice, first, debug_report=debug_report)
+    queue.extend(rest)
+    client.song_history.extend(rest)
+    if rest:
+        await ctx.followup.send(youtube_playlist_queue_message(tracks, action="Loaded"))
+    logger.info(
+        f"YouTube playlist started via /{command_name}: "
+        f"{first.get('playlist_name')} ({first.get('youtube_playlist_id')}) "
+        f"playing={first.get('id')} queued={len(rest)}"
+    )
 
 def effective_playlist_cache_mode(playlist: dict) -> str:
     if client.force_global_playlist_cache_mode:
@@ -3960,11 +4214,15 @@ async def add_urls_to_playlist_session(session: PlaylistCreationSession, user, u
             limit_hit = True
             break
         try:
-            track = await fetch_track(url, requested_by=user)
-            if track.get("needs_confirm"):
-                failed.append(url)
-                continue
-            added.append(playlist_track_from_track(track, user))
+            tracks = await fetch_media_tracks(url, requested_by=user)
+            for track in tracks:
+                if len(session.tracks) + len(added) >= MAX_PLAYLIST_TRACKS:
+                    limit_hit = True
+                    break
+                if track.get("needs_confirm"):
+                    failed.append(url)
+                    continue
+                added.append(playlist_track_from_track(track, user))
         except Exception as exc:
             logger.warning(f"Failed to add URL to playlist creation session: {url}: {exc}")
             failed.append(url)
@@ -4361,10 +4619,10 @@ async def skip(ctx):
     record_command(ctx)
     await request_voice_vote(ctx.user, ctx.channel, "skip", "skip the current track", ctx=ctx)
 
-@app_commands.describe(url="YouTube URL or search term")
+@app_commands.describe(url="YouTube URL, YouTube playlist URL, search term, or playlist:name")
 @client.tree.command()
 async def play(ctx, *, url: str):
-    """Plays a YouTube video's audio by URL or search term."""
+    """Plays a YouTube video's audio, a YouTube playlist, or a search result."""
     record_command(ctx)
     await ctx.response.defer()
     if is_play_last_query(url):
@@ -4400,8 +4658,15 @@ async def play(ctx, *, url: str):
         debug_report = await create_debug_playback_message(ctx, "play")
         try:
             suggestion = record_suggestion(ctx, "play", url)
-            track = await fetch_track(url, requested_by=ctx.user, debug_report=debug_report)
+            tracks = await fetch_media_tracks(url, requested_by=ctx.user, debug_report=debug_report)
+            track = tracks[0]
             update_suggestion(suggestion, track)
+            if track.get("youtube_playlist_id"):
+                await play_youtube_playlist_tracks(ctx, voice, tracks, "play", debug_report=debug_report)
+                if debug_report:
+                    debug_report.stage = "playing"
+                    await finish_debug_playback_message(debug_report)
+                return
             # If admin needs to confirm a large download
             if track.get('needs_confirm'):
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
@@ -4457,8 +4722,15 @@ async def play(ctx, *, url: str):
         debug_report = await create_debug_playback_message(ctx, "play")
         try:
             suggestion = record_suggestion(ctx, "play", url)
-            track = await fetch_track(url, requested_by=ctx.user, debug_report=debug_report)
+            tracks = await fetch_media_tracks(url, requested_by=ctx.user, debug_report=debug_report)
+            track = tracks[0]
             update_suggestion(suggestion, track)
+            if track.get("youtube_playlist_id"):
+                await enqueue_youtube_playlist_tracks(ctx, tracks, "play")
+                if debug_report:
+                    debug_report.stage = "queued"
+                    await finish_debug_playback_message(debug_report)
+                return
             if track.get('needs_confirm'):
                 # Cannot queue a large download without confirmation; instruct admin to use /play
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
@@ -4474,7 +4746,7 @@ async def play(ctx, *, url: str):
             await finish_debug_playback_message(debug_report, status="error", error=str(e))
             await ctx.followup.send("Failed to add track to queue.")
 
-@app_commands.describe(query="YouTube URL or search term")
+@app_commands.describe(query="YouTube URL, YouTube playlist URL, or search term")
 @client.tree.command()
 async def playtop(ctx, *, query: str):
     """Adds a song to the top of the queue (plays next)."""
@@ -4505,8 +4777,12 @@ async def playtop(ctx, *, query: str):
                 return
         try:
             suggestion = record_suggestion(ctx, "playtop", query)
-            track = await fetch_track(query, requested_by=ctx.user)
+            tracks = await fetch_media_tracks(query, requested_by=ctx.user)
+            track = tracks[0]
             update_suggestion(suggestion, track)
+            if track.get("youtube_playlist_id"):
+                await play_youtube_playlist_tracks(ctx, voice, tracks, "playtop")
+                return
             if track.get('needs_confirm'):
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
                 await ctx.followup.send(f"Track **{track['title']}** (~{filesize_mb:.1f} MB) is too large to play without confirmation. Use /play for this track.")
@@ -4534,8 +4810,12 @@ async def playtop(ctx, *, query: str):
             return
         try:
             suggestion = record_suggestion(ctx, "playtop", query)
-            track = await fetch_track(query, requested_by=ctx.user)
+            tracks = await fetch_media_tracks(query, requested_by=ctx.user)
+            track = tracks[0]
             update_suggestion(suggestion, track)
+            if track.get("youtube_playlist_id"):
+                await enqueue_youtube_playlist_tracks(ctx, tracks, "playtop", front=True)
+                return
             if track.get('needs_confirm'):
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
                 await ctx.followup.send(f"Track **{track['title']}** (~{filesize_mb:.1f} MB) is too large to queue without confirmation.")
@@ -4559,8 +4839,12 @@ async def enqueue_track(ctx, query: str, command_name: str = "enqueue"):
         return
     try:
         suggestion = record_suggestion(ctx, command_name, query)
-        track = await fetch_track(query, requested_by=ctx.user)
+        tracks = await fetch_media_tracks(query, requested_by=ctx.user)
+        track = tracks[0]
         update_suggestion(suggestion, track)
+        if track.get("youtube_playlist_id"):
+            await enqueue_youtube_playlist_tracks(ctx, tracks, command_name)
+            return
         if track.get('needs_confirm'):
             filesize_mb = track.get('filesize', 0) / (1024 * 1024)
             await ctx.followup.send(f"Track **{track['title']}** (~{filesize_mb:.1f} MB) requires confirmation to download. Use /play instead.")
@@ -4570,13 +4854,13 @@ async def enqueue_track(ctx, query: str, command_name: str = "enqueue"):
         logger.error(f"/{command_name} error: {e}")
         await ctx.followup.send("Failed to enqueue track.")
 
-@app_commands.describe(query="YouTube URL or search term")
+@app_commands.describe(query="YouTube URL, YouTube playlist URL, search term, or playlist:name")
 @client.tree.command(name="enqueue")
 async def enqueue_cmd(ctx, *, query: str):
     """Enqueues a song to the queue (alias: /q)."""
     await enqueue_track(ctx, query, "enqueue")
 
-@app_commands.describe(query="YouTube URL or search term")
+@app_commands.describe(query="YouTube URL, YouTube playlist URL, search term, or playlist:name")
 @client.tree.command(name="q")
 async def q_cmd(ctx, *, query: str):
     """Alias of /enqueue."""
@@ -4590,6 +4874,15 @@ async def queue_first(ctx, target: str, command_name: str):
     playlist = resolve_playlist_reference(target, ctx.user)
     if playlist:
         await add_playlist_to_queue_front(ctx, playlist)
+        return
+    if is_youtube_playlist_url(target):
+        await ctx.response.defer()
+        try:
+            tracks = await fetch_youtube_playlist_tracks(target, requested_by=ctx.user)
+            await enqueue_youtube_playlist_tracks(ctx, tracks or [], command_name, front=True)
+        except Exception as exc:
+            logger.error(f"/{command_name} YouTube playlist error: {exc}")
+            await ctx.followup.send("Failed to read that YouTube playlist.", ephemeral=True)
         return
     try:
         position = int(str(target).strip())
@@ -4624,13 +4917,13 @@ async def queue_first(ctx, target: str, command_name: str):
     await ctx.response.send_message(f"Moved **{title}** to the front of the queue. It will play next.")
     logger.info(f"/{command_name} moved queue position {position} to the front: {track.get('title', 'Unknown title')} ({track.get('id', '')})")
 
-@app_commands.describe(target="1-based queue position or playlist name to move so it plays next")
+@app_commands.describe(target="1-based queue position, playlist name, or YouTube playlist URL to move so it plays next")
 @client.tree.command(name="queuefirst")
 async def queuefirst_cmd(ctx, target: str):
     """Moves a queued song to the front of the queue."""
     await queue_first(ctx, target, "queuefirst")
 
-@app_commands.describe(target="1-based queue position or playlist name to move so it plays next")
+@app_commands.describe(target="1-based queue position, playlist name, or YouTube playlist URL to move so it plays next")
 @client.tree.command(name="qfirst")
 async def qfirst_cmd(ctx, target: str):
     """Alias of /queuefirst."""
@@ -4784,16 +5077,19 @@ async def playlist_add(ctx, playlist: str, source: str, queue_position: Optional
     if not can_edit_playlist(ctx.user, target):
         await ctx.followup.send("You do not have permission to edit that playlist.", ephemeral=True)
         return
+    tracks_to_add = []
     if source == "current":
         track = client.current_track_info
         if not track:
             await ctx.followup.send("No song is currently playing.", ephemeral=True)
             return
+        tracks_to_add = [track]
     elif source == "queue":
         if queue_position is None or queue_position < 1 or queue_position > len(queue):
             await ctx.followup.send("Provide a valid queue position. See `/help topic:playlist command:add`.", ephemeral=True)
             return
         track = queue[queue_position - 1]
+        tracks_to_add = [track]
     elif source == "url":
         if not url:
             await ctx.followup.send("Send a YouTube URL with `source:url`. See `/help topic:playlist command:add`.", ephemeral=True)
@@ -4804,31 +5100,37 @@ async def playlist_add(ctx, playlist: str, source: str, queue_position: Optional
             return
         url = urls[0]
         try:
-            track = await fetch_track(url, requested_by=ctx.user)
+            tracks_to_add = await fetch_media_tracks(url, requested_by=ctx.user)
         except Exception as exc:
             logger.warning(f"Failed to add playlist URL {url}: {exc}")
             await ctx.followup.send("Could not read that YouTube URL. Try another link.", ephemeral=True)
             return
-        if track.get("needs_confirm"):
+        if any(track.get("needs_confirm") for track in tracks_to_add):
             await ctx.followup.send("That track needs admin confirmation before download, so it was not added.", ephemeral=True)
             return
     else:
         await ctx.followup.send("Use source `current`, `queue`, or `url`.", ephemeral=True)
         return
-    target.setdefault("tracks", []).append(playlist_track_from_track(track, ctx.user))
+    remaining_slots = max(0, MAX_PLAYLIST_TRACKS - len(target.get("tracks", [])))
+    if not remaining_slots:
+        await ctx.followup.send(f"That playlist already has the maximum {MAX_PLAYLIST_TRACKS} track(s).", ephemeral=True)
+        return
+    tracks_to_add = tracks_to_add[:remaining_slots]
+    target.setdefault("tracks", []).extend(playlist_track_from_track(track, ctx.user) for track in tracks_to_add)
     try:
         save_playlist(target)
     except Exception as exc:
         logger.error(f"Failed to save playlist after add: {exc}")
         await ctx.followup.send("Could not save the playlist. Check output.log.", ephemeral=True)
         return
-    title = discord.utils.escape_markdown(str(track.get("title") or "Unknown title"))
+    first_title = discord.utils.escape_markdown(str(tracks_to_add[0].get("title") or "Unknown title"))
+    added_label = f"**{first_title}**" if len(tracks_to_add) == 1 else f"{len(tracks_to_add)} track(s), starting with **{first_title}**"
     await ctx.followup.send(
-        f"Added **{title}** to **{discord.utils.escape_markdown(target['name'])}**. "
-        "The track is saved in playlist metadata and will stream unless cached later.",
+        f"Added {added_label} to **{discord.utils.escape_markdown(target['name'])}**. "
+        "Track metadata is saved locally and will stream unless cached later.",
         ephemeral=True,
     )
-    logger.info(f"Added track to playlist {target['name']} ({target['id']}): {track.get('title')} ({track.get('id')})")
+    logger.info(f"Added {len(tracks_to_add)} track(s) to playlist {target['name']} ({target['id']}) via source {source}.")
 
 @app_commands.describe(
     source="Source to fill from",

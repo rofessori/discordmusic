@@ -7,15 +7,15 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | command | purpose |
 | --- | --- |
 | `/join` | join the voice channel you are currently in. |
-| `/play <youtube url, search, or playlist:name>` | play a youtube result or playlist immediately, or add it to the queue if something is already playing. raw non-youtube urls are rejected. |
+| `/play <youtube url, youtube playlist url, search, or playlist:name>` | play a youtube result or playlist immediately, or add it to the queue if something is already playing. raw non-youtube urls are rejected. |
 | `/play:last` | restore the last auto-saved voice session after auto-leave. in Discord slash options this is entered as `/play` with `last`, `play:last`, or `/play:last` as the value. |
-| `/playtop <query>` | add a track to the front of the queue so it plays next. if nothing is playing, it starts immediately. |
-| `/enqueue <query or playlist:name>` | add a track or playlist to the end of the queue. |
-| `/q <query or playlist:name>` | alias for `/enqueue`. |
+| `/playtop <query or youtube playlist url>` | add a track or youtube playlist block to the front of the queue so it plays next. if nothing is playing, it starts immediately. |
+| `/enqueue <query, youtube playlist url, or playlist:name>` | add a track or playlist to the end of the queue. |
+| `/q <query, youtube playlist url, or playlist:name>` | alias for `/enqueue`. |
 | `/queue [links]` | show the upcoming songs in the queue. set `links:true` to include youtube urls when links are enabled. |
 | `/queuelist [links]` | alias for `/queue`. |
-| `/queuefirst <position or playlist:name>` | move an existing queued song or playlist to the front of the queue. |
-| `/qfirst <position or playlist:name>` | alias for `/queuefirst`. |
+| `/queuefirst <position, youtube playlist url, or playlist:name>` | move an existing queued song or playlist to the front of the queue. |
+| `/qfirst <position, youtube playlist url, or playlist:name>` | alias for `/queuefirst`. |
 | `/skip` | vote to skip the current track and continue to the next queued track. admins bypass the vote. |
 | `/stop` | vote to stop playback, clear the queue, and disconnect from voice. admins bypass the vote. |
 | `/pause` | pause the current playing audio. requires the same voice channel unless the user is an admin. |
@@ -57,7 +57,7 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/playlist edit <name> [flags]` | show editable playlist details and song pages. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
 | `/playlist add <playlist> current` | add the currently playing song to a playlist you can edit. |
 | `/playlist add <playlist> queue <position>` | add a queued song by queue number to a playlist you can edit. |
-| `/playlist add <playlist> url <url>` | add a youtube url directly to a playlist you can edit. |
+| `/playlist add <playlist> url <url>` | add a youtube video or playlist url directly to a playlist you can edit. |
 | `/playlist fill current <playlist>` | add queued songs that are not already in the playlist. |
 | `/playlist addmod <playlist> <user>` | add a manager to a playlist you own. |
 | `/playlist remove <playlist> [flags]` | remove a whole playlist after confirmation. it can be rescued for 600 seconds. admins can use `-now`; `-now -force` skips confirmation. |

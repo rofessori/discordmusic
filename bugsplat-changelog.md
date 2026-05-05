@@ -1,3 +1,6 @@
+## 2026-05-05
+- Added YouTube playlist URL ingestion for playback and saved-playlist import flows. `/play`, `/playtop`, `/enqueue`, `/q`, `/queuefirst`, `/qfirst`, guided `/playlist new`, and `/playlist add ... url` now understand `list=` links; watch links with both `v=` and `list=` start from the selected video when possible and keep the rest as one playlist block.
+
 ## 2026-05-03
 - Added admin `/autoleave <enabled> [delay_seconds]` and `/play:last` recovery so the bot can leave after being alone, save the current song plus queue, and resume that saved session later.
 - Improved help/status UX: compact `/help` now focuses on core playback commands, `📖` toggles expanded help open and closed, and `/status` wraps URLs in a code block when queue links are disabled.

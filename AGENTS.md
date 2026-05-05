@@ -140,3 +140,10 @@ Setup security checks:
 - Cache lookup uses canonical base64 filenames, but exact legacy files named `cache/<youtube-id>.<ext>` or `cache/plst-<youtube-id>.<ext>` are adopted to canonical names when the same YouTube id is requested. Do not adopt arbitrary title filenames.
 - `/togglelog debug` enables DEBUG logging plus sanitized editable `/play` download debug messages. These messages may show track title/id, cache hit/miss/downloaded/stream-only state, yt-dlp format id, progress bytes, speed, and the generic ffmpeg path, but must not expose absolute local paths or tokens.
 - The debug message collapse reaction edits the message down to a normal summary and clears reactions.
+
+## 2026-05-05 YouTube Playlist URL Notes
+- YouTube URLs with a valid `list=` parameter are accepted by `/play`, `/playtop`, `/enqueue`, `/q`, `/queuefirst`, `/qfirst`, guided `/playlist new`, and `/playlist add ... url`.
+- Pure playlist URLs expand from the first extracted item. Watch URLs with both `v=` and `list=` should start from the selected video when the playlist extraction contains it, then queue the remaining extracted entries as one playlist block.
+- YouTube playlist URL extraction is metadata-only and capped by `MAX_PLAYLIST_TRACKS`; non-admin queue length still respects `MAX_QUEUE_LENGTH`.
+- Queue entries from YouTube playlist URLs carry `needs_refresh=True` and must resolve through the normal `fetch_track()` path when they reach playback so cache, duration, filesize, and YouTube-only safety rules still apply before `ffmpeg`.
+- Keep local saved playlists and YouTube playlist URL blocks distinct: local playlists use persisted metadata under `playlists/`, while YouTube playlist URL blocks are session queue entries with `playlist_id` prefixed as `youtube:<list-id>`.
