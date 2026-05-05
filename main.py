@@ -1144,6 +1144,7 @@ def config_panel_message() -> str:
         f"🌐 force global playlist cache: `{bool_status(client.force_global_playlist_cache_mode)}`",
         f"📦 playlist cache default: `{client.playlist_cache_default_mode}`",
         f"🏃 playspeed for everyone: `{bool_status(client.playspeed_allow_all)}`",
+        f"🏃 alone speed reset: `1x after {alone_speed_reset_delay_seconds()}s alone`",
         f"⏱️ nowplaying cooldown: `{client.nowplaying_cooldown_seconds}s`",
         f"📊 public `/status play`: `{bool_status(client.status_play_public)}`",
         f"🗳️ voice votes: `{bool_status(client.voice_votes_enabled)}`",
@@ -1522,6 +1523,7 @@ class Client(discord.Client):
         self.auto_leave_enabled = False
         self.auto_leave_delay_seconds = AUTO_LEAVE_DEFAULT_DELAY_SECONDS
         self.auto_leave_task = None
+        self.alone_speed_reset_task = None
         self.auto_leave_disconnect_in_progress = False
         # Queue and history tracking
         self.song_history = []                # list of all tracks requested in current session
@@ -1587,6 +1589,7 @@ def build_runtime_status():
         f"- boot id: `{client.boot_id}`",
         f"- volume: `{int(round(client.volume * 100))}%` (`{'session' if client.session_volume_locked else 'channel/default'}`)",
         f"- playback speed default: `{client.playback_speed:g}x` (`{'everyone' if client.playspeed_allow_all else 'admin/group'}`)",
+        f"- alone speed reset: `1x after {alone_speed_reset_delay_seconds()}s alone`",
         f"- log level: `{logging.getLevelName(logger.level)}`",
         f"- download log messages: `{'enabled' if client.download_debug_messages else 'disabled'}`",
         f"- admin operation messages: `{'enabled' if client.user_operation_debug_messages else 'disabled'}`",
@@ -2144,6 +2147,60 @@ def reset_session_volume(reason: str = ""):
     set_client_volume_level(DEFAULT_VOLUME_LEVEL)
     logger.info(f"Reset session volume to {DEFAULT_VOLUME_LEVEL}%{f' after {reason}' if reason else ''}.")
 
+def playback_speed_is_normal(speed: Optional[float]) -> bool:
+    try:
+        return abs(float(speed or 1.0) - 1.0) <= 0.001
+    except (TypeError, ValueError):
+        return True
+
+def playback_speed_reset_needed() -> bool:
+    if not playback_speed_is_normal(getattr(client, "playback_speed", 1.0)):
+        return True
+    track = client.current_track_info or {}
+    if "playback_speed" in track and not playback_speed_is_normal(track.get("playback_speed")):
+        return True
+    return False
+
+def alone_speed_reset_delay_seconds() -> int:
+    return int(getattr(client, "auto_leave_delay_seconds", AUTO_LEAVE_DEFAULT_DELAY_SECONDS) or AUTO_LEAVE_DEFAULT_DELAY_SECONDS)
+
+async def reset_playback_speed_after_alone(voice_channel, *, reason: str) -> bool:
+    if not playback_speed_reset_needed():
+        return False
+    old_default = playback_speed_for_track(None)
+    old_current = playback_speed_for_track(client.current_track_info) if client.current_track_info else old_default
+    client.playback_speed = 1.0
+    if client.current_track_info and "playback_speed" in client.current_track_info:
+        client.current_track_info["playback_speed"] = 1.0
+    details = {
+        "reason": reason,
+        "voice_channel_id": getattr(voice_channel, "id", None),
+        "voice_channel_name": getattr(voice_channel, "name", None),
+        "old_default_speed": old_default,
+        "old_current_speed": old_current,
+        "new_speed": 1.0,
+        "delay_seconds": alone_speed_reset_delay_seconds(),
+        "currently_playing": bool(client.currently_playing),
+    }
+    append_runtime_audit_event("playback-speed-alone-reset", details=details)
+    logger.info(
+        "Playback speed reset to 1x after bot was alone: "
+        f"channel={getattr(voice_channel, 'name', voice_channel)} "
+        f"old_default={old_default:g}x old_current={old_current:g}x reason={reason}."
+    )
+    notify_channel = getattr(client.current_track_message, "channel", None)
+    if client.user_operation_debug_messages and notify_channel:
+        try:
+            await notify_channel.send(
+                "**admin operation**\n"
+                f"- playback speed reset: `{old_current:g}x` -> `1x`\n"
+                f"- reason: bot was alone for `{alone_speed_reset_delay_seconds()}s`\n"
+                "- note: already-running audio changes on the next track or replay."
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to send alone speed-reset operation message: {exc}")
+    return True
+
 def find_voice_channel_by_name(guild, name: str):
     lookup = str(name or "").strip().lower()
     if not guild or not lookup:
@@ -2181,6 +2238,7 @@ async def connect_or_move_to_voice_channel(ctx, voice_channel, *, reason: str):
             logger.info(f"Connected bot to voice channel {voice_channel.name} for {reason}.")
         apply_channel_volume_default(voice_channel, reason)
         cancel_auto_leave_task(reason)
+        cancel_alone_speed_reset_task(reason)
         await safe_interaction_send(ctx, f"Joined voice channel **{discord.utils.escape_markdown(voice_channel.name)}**.", ephemeral=True)
         return True
     except Exception as exc:
@@ -2266,6 +2324,7 @@ async def perform_stop_action() -> str:
     voice = client.current_voice_channel
     if voice:
         cancel_auto_leave_task("stop command")
+        cancel_alone_speed_reset_task("stop command")
         try:
             if voice.is_playing() or voice.is_paused():
                 voice.stop()
@@ -2618,6 +2677,13 @@ def cancel_auto_leave_task(reason: str = ""):
         logger.info(f"Cancelled auto-leave task{f' ({reason})' if reason else ''}.")
     client.auto_leave_task = None
 
+def cancel_alone_speed_reset_task(reason: str = ""):
+    task = getattr(client, "alone_speed_reset_task", None)
+    if task and not task.done():
+        task.cancel()
+        logger.info(f"Cancelled alone speed-reset task{f' ({reason})' if reason else ''}.")
+    client.alone_speed_reset_task = None
+
 def current_playback_recovery_tracks() -> list:
     tracks = []
     if client.current_track_info:
@@ -2806,6 +2872,7 @@ async def restore_last_session(ctx) -> bool:
             client.current_voice_channel = voice
             apply_channel_volume_default(ctx.user.voice.channel, "play last join")
             cancel_auto_leave_task("play last joined voice")
+            cancel_alone_speed_reset_task("play last joined voice")
             client.song_history = []
             await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
         except Exception as exc:
@@ -2851,6 +2918,7 @@ async def perform_auto_leave_if_still_alone(voice_channel):
         if not bot_is_alone_in_voice(voice_channel):
             return
         notify_channel = getattr(client.current_track_message, "channel", None)
+        await reset_playback_speed_after_alone(voice_channel, reason="auto-leave")
         saved_count = save_last_session_recovery(voice_channel)
         if not saved_count:
             logger.info("Auto-leave found no current song or queue to save.")
@@ -2884,6 +2952,40 @@ async def perform_auto_leave_if_still_alone(voice_channel):
     finally:
         if asyncio.current_task() is client.auto_leave_task:
             client.auto_leave_task = None
+
+async def perform_alone_speed_reset_if_still_alone(voice_channel):
+    try:
+        await asyncio.sleep(alone_speed_reset_delay_seconds())
+        if asyncio.current_task() is not client.alone_speed_reset_task:
+            return
+        voice = client.current_voice_channel
+        if voice is None or not voice.is_connected() or getattr(voice, "channel", None) != voice_channel:
+            return
+        if not bot_is_alone_in_voice(voice_channel):
+            return
+        await reset_playback_speed_after_alone(voice_channel, reason="alone-timer")
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        logger.error(f"Alone speed-reset task failed: {exc}")
+    finally:
+        if asyncio.current_task() is client.alone_speed_reset_task:
+            client.alone_speed_reset_task = None
+
+def schedule_alone_speed_reset_if_needed(channel):
+    if channel is None:
+        return
+    if not bot_is_alone_in_voice(channel):
+        cancel_alone_speed_reset_task("user present")
+        return
+    if not playback_speed_reset_needed():
+        cancel_alone_speed_reset_task("speed already normal")
+        return
+    task = getattr(client, "alone_speed_reset_task", None)
+    if task and not task.done():
+        return
+    client.alone_speed_reset_task = asyncio.create_task(perform_alone_speed_reset_if_still_alone(channel))
+    logger.info(f"Scheduled playback speed reset to 1x in {alone_speed_reset_delay_seconds()}s for channel {getattr(channel, 'name', channel)}.")
 
 def schedule_auto_leave_if_needed(channel):
     if not client.auto_leave_enabled or channel is None:
@@ -4752,7 +4854,7 @@ def command_help_pages() -> dict:
             "description": "When enabled, the bot waits while alone in voice, saves the current song and queue, disconnects, and lets users restore with `/play last`.",
             "arguments": ["enabled - true or false.", "delay_seconds - optional delay before leaving."],
             "examples": ["/autoleave true 10", "/autoleave false"],
-            "notes": ["Admin only.", "The bot cancels the pending leave when a human rejoins voice."],
+            "notes": ["Admin only.", "The bot cancels the pending leave when a human rejoins voice.", "The same alone delay resets playback speed back to `1x` even when auto-leave is disabled."],
             "errors": ["Delay outside allowed range.", "Admin permission required."],
         },
         "volume_session": {
@@ -4788,7 +4890,7 @@ def command_help_pages() -> dict:
             "description": "Controls Python log verbosity and the editable Discord `/play` download log independently.",
             "arguments": ["mode - toggle, download, debug, admin, all, normal, or off."],
             "examples": ["/togglelog download", "/togglelog debug", "/togglelog normal"],
-            "notes": ["Admin only.", "`download` keeps normal INFO logging but enables the sanitized `/play` download progress message.", "`debug` enables DEBUG logging plus the download log.", "`admin` and `all` keep the larger user-space operation trail.", "Download log messages can be collapsed with the cleanup reaction."],
+            "notes": ["Admin only.", "`download` keeps normal INFO logging but enables the sanitized `/play` download progress message.", "`debug` enables DEBUG logging plus the download log.", "`admin` and `all` keep the larger user-space operation trail, including automatic alone speed-reset notices.", "Download log messages can be collapsed with the cleanup reaction."],
             "errors": ["Admin permission required."],
         },
         "toggledownload": {
@@ -5552,6 +5654,7 @@ async def ensure_voice_for_playback(ctx):
                 client.current_voice_channel = voice
                 apply_channel_volume_default(ctx.user.voice.channel, "playback join")
                 cancel_auto_leave_task("playback joined voice")
+                cancel_alone_speed_reset_task("playback joined voice")
                 client.song_history = []
                 await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
             except Exception as e:
@@ -6579,6 +6682,7 @@ async def on_voice_state_update(member, before, after):
     if bot_id and member.id == bot_id and after.channel is None:
         if not client.auto_leave_disconnect_in_progress:
             cancel_auto_leave_task("bot disconnected")
+        cancel_alone_speed_reset_task("bot disconnected")
         client.current_voice_channel = None
         client.currently_playing = False
         client.current_track_started_at = None
@@ -6590,8 +6694,10 @@ async def on_voice_state_update(member, before, after):
     if voice and voice.is_connected() and voice_channel:
         if bot_is_alone_in_voice(voice_channel):
             schedule_auto_leave_if_needed(voice_channel)
+            schedule_alone_speed_reset_if_needed(voice_channel)
         else:
             cancel_auto_leave_task("voice channel occupied")
+            cancel_alone_speed_reset_task("voice channel occupied")
 
 @client.event
 async def on_message(msg):
@@ -6697,6 +6803,7 @@ async def join(ctx):
             client.current_voice_channel = await ctx.user.voice.channel.connect()
             apply_channel_volume_default(ctx.user.voice.channel, "join command")
             cancel_auto_leave_task("joined voice")
+            cancel_alone_speed_reset_task("joined voice")
             # Reset session history when joining a new voice channel
             client.song_history = []
             await ctx.response.send_message(f"Joined voice channel {ctx.user.voice.channel.name}")
@@ -6924,6 +7031,7 @@ async def play(
                     client.current_voice_channel = voice
                     apply_channel_volume_default(ctx.user.voice.channel, "play join")
                     cancel_auto_leave_task("play joined voice")
+                    cancel_alone_speed_reset_task("play joined voice")
                     client.song_history = []  # reset history for new session
                     await append_debug_playback_event(
                         debug_report,
@@ -7097,6 +7205,7 @@ async def playtop(ctx, *, query: str):
                     client.current_voice_channel = voice
                     apply_channel_volume_default(ctx.user.voice.channel, "playtop join")
                     cancel_auto_leave_task("playtop joined voice")
+                    cancel_alone_speed_reset_task("playtop joined voice")
                     client.song_history = []
                     await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
                 except Exception as e:
@@ -8262,6 +8371,7 @@ async def autoleave(ctx, enabled: bool, delay_seconds: Optional[int] = None):
     if voice and voice.is_connected():
         client.current_voice_channel = voice
         schedule_auto_leave_if_needed(getattr(voice, "channel", None))
+        schedule_alone_speed_reset_if_needed(getattr(voice, "channel", None))
     await ctx.response.send_message(
         f"Auto-leave is enabled. If the bot is alone for {delay_seconds} second(s), it will save the current song and queue, then disconnect. Restore with `/play last`.",
         ephemeral=True,
@@ -8473,7 +8583,7 @@ async def togglelog(ctx, mode: Optional[str] = "toggle"):
     if client.log_verbose:
         logger.setLevel(logging.DEBUG)
         if client.user_operation_debug_messages:
-            msg = "Verbose logging enabled. Admin user-space operation messages enabled for `/play`."
+            msg = "Verbose logging enabled. Admin user-space operation messages enabled for `/play` and automatic alone speed resets."
         else:
             msg = (
                 "Verbose logging enabled."
@@ -8553,6 +8663,13 @@ async def playspeed_cmd(ctx, speed: float):
     if client.current_track_info and "playback_speed" not in client.current_track_info:
         client.current_track_info["playback_speed"] = playback_speed_for_track(client.current_track_info)
     client.playback_speed = parsed
+    voice = client.current_voice_channel
+    schedule_alone_speed_reset_if_needed(getattr(voice, "channel", None))
+    append_runtime_audit_event("playback-speed-changed", actor=ctx.user, details={
+        "speed": parsed,
+        "voice_channel_id": getattr(getattr(voice, "channel", None), "id", None),
+        "voice_channel_name": getattr(getattr(voice, "channel", None), "name", None),
+    })
     if abs(parsed - 1.0) <= 0.001:
         await ctx.response.send_message(normal_speed_message())
     else:

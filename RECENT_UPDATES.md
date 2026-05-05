@@ -10,6 +10,7 @@ Source: local git history and maintainer notes.
 - Reduced active-playlist move-next prompts: admins and disabled-vote sessions act directly, and small voice sessions no longer get the prompt.
 - Playlist playback now starts or queues immediately while bounded playlist cache warming runs in the background for up to the first 15 tracks or 3 GB.
 - Added `runtime-audit.json` for sanitized high-impact runtime events such as config toggles, cache purge/cachequeue, queue file deletion, cache playback, and `/play last` decisions.
+- Playback speed now resets to normal `1x` after the bot has been alone for the configured alone delay; the reset is logged and announced when admin operation messages are enabled.
 - Improved YouTube failure handling so unavailable videos get a useful message and search requests try fallback results before failing.
 - Added `/nowplaying` URL-free controls with cooldown, plus hidden playspeed controls and `/play speed`.
 - Added admin `/cachequeue` to cache the current song plus upcoming queue immediately, with `nodownload` skips and queue-blackbox audit entries.
