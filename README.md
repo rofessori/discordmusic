@@ -68,21 +68,24 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
 
 - **slash commands**:
   - `/join`
-  - `/play <youtube url|youtube playlist url|query|playlist:name>`
+  - `/play <youtube url|youtube playlist url|query|playlist:name> [repeat] [speed] [show_download_log]`
+  - `/play <query> -repeat <count>` (single tracks only; above 20 becomes repeat-one loop)
+  - `/play <query> --speed:<0.1-2>` (single tracks only; requires admin, `playspeed`, or allow-all)
   - `/play -favorites username`
   - `/play:last`
   - `/playtop <query|youtube playlist url>`
   - `/enqueue <query|youtube playlist url|playlist:name>` (alias: `/q`)
   - `/queue [links]` (alias: `/queuelist`)
   - `/queuefirst <position|youtube playlist url|playlist:name>` (alias: `/qfirst`)
-  - react `⭐` on now-playing to add the current song to your favorites
+  - react `⭐` on now-playing to toggle the current song in your favorites
   - react `🔂` on now-playing to toggle repeat-one
   - react `📜` on now-playing to toggle the queue above the current song
-  - `/skip` (non-admins vote)
+  - `/skip` (non-admins vote unless voice votes are disabled)
   - `/pause` / `/resume`
-  - `/stop` (non-admins vote)
-  - `/volume <1–50>` (non-admins vote)
+  - `/stop` (non-admins vote unless voice votes are disabled)
+  - `/volume <1–50>` (non-admins vote unless voice votes are disabled)
   - `/now` (alias `/nytsoi`)
+  - `/nowplaying` (reposts controls without the video URL; cooldown protected)
   - `/getqueue`
   - `/whatsnew`
 
@@ -118,14 +121,16 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/playlist cachemode <playlist> <follow_global|streaming|bounded|keep_cached>` (admin-only)
   - `/playlist cacheglobal <streaming|bounded|keep_cached> [force]` (admin-only)
   - `/help command:<command>`, `/help command:playlist new`, `/help topic:playlists`, and `/help topic:playlist command:new`
+  - `/help` expanded view is paged with `◀️`/`▶️`
 
 - **admin-only**:
   - `/favorites cacheglobal <enabled> [max_gb] [per_user_tracks]`
   - `/favorites cacheuser <user> <enabled>`
-  - `/usergroup add <user> <nodownload|novolumechange|noplaylistcreate|noqueueskip|noskip|norepeat>`
+  - `/usergroup add <user> <nodownload|novolumechange|noplaylistcreate|noqueueskip|noskip|norepeat|playspeed>`
   - `/usergroup remove <user> <group>`
   - `/usergroup list <user>`
   - `/cachestatus`
+  - `/cachequeue [include_current]`
   - `/purgecache`
   - `/purgequeue`
   - `/playlist predownload <playlist>` (disabled unless `PLAYLIST_PREDOWNLOAD_ENABLED=true`)
@@ -134,11 +139,16 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/volume_session <1–50>`
   - `/volume_default <1–50>`
   - `/volume_force <1–100> [save_default]`
-  - `/togglelog [toggle|debug|admin|all|normal|off]`
+  - `/togglelog [toggle|download|debug|admin|all|normal|off]`
   - `/toggledownload`
   - `/disablelinks`
   - `/reboot`
-  - `/status [view]`
+  - `/status [view]` (`play` can be made public from `/config show`; other views are admin-only)
+  - `/config show`
+  - `/userstats <user>`
+  - `/playspeed <0.1-2>` (hidden operational command; admin, `playspeed`, or allow-all)
+  - `/playspeedaccess <enabled>` (admin-only)
+  - `/nowplayingcooldown <seconds>` (admin-only)
 
 - **quotes**:
   - `/backup_teekkari_quotes`
@@ -163,6 +173,9 @@ tail -f output.log
 - **youtube “confirm you're not a bot” error**:  
   update yt-dlp with `pip install --upgrade -r requirements.txt` and make sure `deno` or `node` is on `PATH`. if YouTube still blocks your server IP, export YouTube cookies to `cookies.txt` and set `YTDLP_COOKIEFILE=cookies.txt` in `.env`.
 
+- **youtube unavailable search results**:
+  if the first search result is unavailable, the bot tries a few fallback search results before failing. direct unavailable YouTube links still fail, but users get a specific availability message instead of a generic queue error. admins also see a reminder when no `deno` or `node` runtime is available.
+
 - **dependabot alerts for aiohttp or python-dotenv**:
   run `pip install --upgrade -r requirements.txt`. the requirements require `aiohttp>=3.13.4,<4.0` for the 2026 aiohttp DoS fixes and `python-dotenv>=1.2.2,<2.0` for the `.env` symlink rewrite fix.
 
@@ -172,15 +185,25 @@ tail -f output.log
 - **runtime media cache**:
   downloaded audio lives in `cache/`, not the repository root. normal `/play` downloads use `cache/<base64url-canonical-youtube-url>.<ext>`. playlist long-term cache files use `cache/plst-<base64url-canonical-youtube-url>.<ext>`. raw youtube titles and user input are not used in cache filenames.
   exact legacy files named `cache/<youtube-id>.<ext>` or `cache/plst-<youtube-id>.<ext>` are adopted to the canonical cache name when that video is requested.
+  admins can run `/cachequeue` to download the current song plus upcoming queue into `cache/` immediately. it reuses existing safe cache files, skips tracks from `nodownload` users, respects the hard cache cap, and writes queue audit entries to `queue-blackbox.json`.
+
+- **runtime audit logging**:
+  impactful runtime actions append sanitized entries to `runtime-audit.json` and write concise `output.log` lines. this covers config toggles, cache purge/cachequeue, queue clears that delete files, delayed cleanup, cache hits/downloads, stream fallbacks, and `/play last` restore decisions. runtime audit files are local operational state and should not be committed.
+
+- **playback recovery and diagnostics**:
+  `/play last` only restores recent auto-leave recovery files that were marked by the bot as auto-leave saves; stale or legacy recovery files are rejected, removed, and logged to `queue-blackbox.json`. `/status play` shows detailed current playback diagnostics such as codec, bitrate, BPM when known, duration/position, cache state, speed, repeat, queue, and voice state. admins can make only that playback status view public through `/config show`.
+
+- **voice votes and active playlists**:
+  skip, stop, volume, previous, and guarded repeat-off use voice votes for non-admins by default. admins always act directly. admins can toggle voice votes from `/config show`; when disabled, same-voice-channel non-admins act directly too, while restriction groups such as `noskip`, `novolumechange`, `norepeat`, and `noqueueskip` still block their actions. while an active playlist is playing, ordinary song requests only show the move-next prompt when votes are enabled and at least three human users are in voice; admins and disabled-vote sessions do not get that prompt.
 
 - **playlist storage**:
   playlists are metadata-first. each playlist folder contains `metadata.json`; audio files do not live under `playlists/`. track entries include youtube metadata plus cache fields such as `cache_key`, `cache_mode`, `cache_path`, and `ext` so playback can stream or reuse a safe file in `cache/`.
 
 - **favorites privacy and storage**:
-  favorites are special per-user playlists stored under `playlists/favorites-<user-id>/metadata.json`. they are private by default, can be made public with `/favorites privacy public`, and can be played by the owner with `/favorites play` or by others when public with `/favorites play user` or `/play -favorites username`. this privacy is a social bot setting, not strong secrecy: admins can override private favorites after a confirmation prompt, and anyone with filesystem access can read playlist metadata.
+  favorites are special per-user playlists stored under `playlists/favorites-<user-id>/metadata.json`. the now-playing star toggles the current song in or out of the reacting user's favorites and logs the change. favorites are private by default, can be made public with `/favorites privacy public`, and can be played by the owner with `/favorites play` or by others when public with `/favorites play user` or `/play -favorites username`. this privacy is a social bot setting, not strong secrecy: admins can override private favorites after a confirmation prompt, and anyone with filesystem access can read playlist metadata.
 
 - **favorites cache and user restrictions**:
-  favorites autocache is off by default. admins can enable it with `/favorites cacheglobal`; favorites cache files use `cache/plst-<cache-key>.<ext>`, never playlist folders, and the favorites cache policy is capped at 6 GiB globally. cache selection is round-robin across eligible users and considers 30 favorites per user by default, up to the supported maximum of 100 stored favorites per user. runtime user rules live in `user-permissions.json`: `nodownload` forces a user's requests to stream, `novolumechange` blocks `/volume`, `noplaylistcreate` blocks playlist creation/import, `noqueueskip` blocks queue jump/reorder commands, `noskip` blocks skip commands/votes, and `norepeat` blocks repeat reactions.
+  favorites autocache is off by default. admins can enable it with `/favorites cacheglobal`; favorites cache files use `cache/plst-<cache-key>.<ext>`, never playlist folders, and the favorites cache policy is capped at 6 GiB globally. cache selection is round-robin across eligible users and considers 30 favorites per user by default, up to the supported maximum of 100 stored favorites per user. runtime user rules live in `user-permissions.json`: `nodownload` forces a user's requests to stream, `novolumechange` blocks `/volume`, `noplaylistcreate` blocks playlist creation/import, `noqueueskip` blocks queue jump/reorder commands, `noskip` blocks skip commands/votes, `norepeat` blocks repeat reactions plus `/play repeat`, and `playspeed` grants speed controls when allow-all is off.
 
 - **playlist cache limits**:
   playlist caching defaults to bounded mode: at most 15 tracks or 3 GB are cached per playlist play operation, and remaining tracks stream when needed. admins can change the persistent global mode with `/playlist cacheglobal`, override a playlist with `/playlist cachemode`, inspect cache with `/cachestatus`, and purge safe cache files with `/purgecache`. the hard cache cap is 20 GB; when it is reached, new downloads fall back to streaming.

@@ -2,6 +2,11 @@
 /.env.backup
 /setup.tmp
 /last_session_queue.tmp.json
+/queue-blackbox.json
+/runtime-audit.json
+/queue_backup.json
+/queue_backup.tmp
+/downloads.json
 /playlist-cache-policy.json
 /channel-volume-config.json
 /user-permissions.json

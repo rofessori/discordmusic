@@ -1,4 +1,21 @@
+## 2026-05-06
+- Fixed `/help` reaction expansion failing with Discord's 2000-character content limit by paging expanded help and keeping each edit below the safe limit.
+- Added persistent `voice_votes_enabled` runtime config in `/config show`; admins always bypass votes, and disabled votes make same-channel users act directly while restriction groups still apply.
+- Fixed active-playlist move-next prompting so admins never get the prompt, disabled-vote sessions move next directly, and fewer than three human voice users skip the prompt.
+- Added sanitized `runtime-audit.json` entries for impactful runtime actions, including config toggles, cache purge/cachequeue, queue file deletion, delayed cleanup, cache hits/downloads, stream fallback, and `/play last` decisions.
+- Improved yt-dlp failure handling: unavailable videos now produce a specific user message, admins get a missing `deno`/`node` hint, and search requests try bounded fallback results before failing.
+- Added `/nowplaying`, which reposts the active now-playing controls without the YouTube URL and uses an admin-configurable per-channel cooldown to prevent spam.
+- Added hidden playback speed controls: `/playspeed`, `/playspeedaccess`, the `playspeed` allow group, and `/play speed`/`--speed:<number>` for single-track requests from 0.1x to 2x.
+- Fixed stale `/play last` recovery behavior by requiring recent auto-leave metadata before restoring `last_session_queue.tmp.json`; rejected legacy/stale recovery files are logged to `queue-blackbox.json` and removed.
+- Added admin `/cachequeue [include_current]` to download/cache the current session's eligible current/upcoming tracks into root `cache/`, while skipping `nodownload` users and respecting the cache hard cap.
+- Changed the now-playing `⭐` reaction into a favorites toggle. A second press removes the same song from that user's favorites, edits the now-playing notice, and logs the removal.
+- Added `/status play` for detailed music stream diagnostics and a `/config show` toggle that can make only that playback status view public.
+
 ## 2026-05-05
+- Added admin `/config show`, a reaction-toggleable runtime config panel that edits itself when admins flip download mode, download logs, DEBUG logging, operation trail, queue links, auto-leave, favorites autocache, playlist cache policy, playspeed allow-all, or nowplaying cooldown.
+- Added admin `/userstats <user>` for cross-checking a user's restriction groups, favorites, playlists, queued/session requests, recent commands, and recent music requests.
+- Added `/play` single-track repeat support through the `repeat` slash option or trailing `-repeat <count>`; counts above 20 become repeat-one loop instead of queuing more than 20 copies.
+- Decoupled Discord download logs from Python DEBUG logging: `/togglelog download` now enables editable `/play` progress logs while keeping normal INFO logging, `/play show_download_log:true` enables the log for one request, and the message now shows a styled progress bar when download totals are available.
 - Added root `RECENT_UPDATES.md` plus `/whatsnew`, summarizing recent git-history updates for Discord users.
 - Fixed a documentation/help regression from the 50% ear-safety change: `/volume_force` was registered and referenced by volume guidance but missing from the command reference and detailed `/help command:` pages.
 - Added hidden admin voice placement with `/adminjoin`, allowing admins to connect or move the bot by voice channel name or by the voice channel a selected user is in.
