@@ -120,8 +120,8 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/playlist lock <playlist> <locked>`
   - `/playlist cachemode <playlist> <follow_global|streaming|bounded|keep_cached>` (admin-only)
   - `/playlist cacheglobal <streaming|bounded|keep_cached> [force]` (admin-only)
-  - `/help command:<command>`, `/help command:playlist new`, `/help topic:playlists`, and `/help topic:playlist command:new`
-  - `/help` expanded view is paged with `◀️`/`▶️`
+  - `/help command:<command>`, `/help command:playlist new`, `/help topic:playlists`, `/help topic:playlist command:new`, and `/help topic:all`
+  - `/help` and `/help topic:all` use paged reaction views with `◀️`/`▶️`
 
 - **admin-only**:
   - `/favorites cacheglobal <enabled> [max_gb] [per_user_tracks]`

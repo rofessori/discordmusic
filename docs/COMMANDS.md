@@ -144,6 +144,7 @@ status views:
 | command | purpose |
 | --- | --- |
 | `/help` | show the in-discord command summary. react `📖` to expand or compact it; expanded help is paged with `◀️` and `▶️` so it stays under Discord's message limit. |
+| `/help topic:all` | show every registered slash command and subcommand in paged help. |
 | `/help command:<command>` | show a manpage-style help page for any root command, for example `/help command:nytsoi`, `/help command:play`, or `/help command:purgecache`. |
 | `/help command:playlist <subcommand>` | show playlist subcommand help without setting a topic, for example `/help command:playlist new`. |
 | `/help topic:playlists` | show the playlist quick-start help page. |

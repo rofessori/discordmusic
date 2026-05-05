@@ -1,5 +1,6 @@
 ## 2026-05-06
 - Fixed `/help` reaction expansion failing with Discord's 2000-character content limit by paging expanded help and keeping each edit below the safe limit.
+- Restyled compact and expanded `/help` into grouped sections and added paged `/help topic:all` for every registered slash command and subcommand.
 - Added persistent `voice_votes_enabled` runtime config in `/config show`; admins always bypass votes, and disabled votes make same-channel users act directly while restriction groups still apply.
 - Fixed active-playlist move-next prompting so admins never get the prompt, disabled-vote sessions move next directly, and fewer than three human voice users skip the prompt.
 - Fixed long saved playlist playback so `/play playlist:...` queues or starts immediately and bounded playlist cache warming runs in the background instead of blocking on up to 15 downloads first.

@@ -5,6 +5,7 @@ Source: local git history and maintainer notes.
 ## 2026-05-06
 
 - Fixed `/help` reaction expansion by splitting expanded help into safe pages with `◀️`/`▶️`.
+- Restyled `/help` into grouped, scan-friendly sections and added `/help topic:all` for every registered command.
 - Added a `/config show` voice-vote toggle. Admins always bypass votes; when votes are disabled, same-channel users act directly while restriction groups still apply.
 - Reduced active-playlist move-next prompts: admins and disabled-vote sessions act directly, and small voice sessions no longer get the prompt.
 - Playlist playback now starts or queues immediately while bounded playlist cache warming runs in the background for up to the first 15 tracks or 3 GB.

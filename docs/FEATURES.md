@@ -125,7 +125,7 @@ the supported groups are:
 - `norepeat`: blocks repeat reaction use and `/play repeat`.
 - `playspeed`: grants `/playspeed` and `/play speed` when admins have not enabled playspeed for everyone.
 
-playlist list/edit views use `◀️` and `▶️` reactions for pages. only the newest playlist view remains interactive. `/help` is compact by default and expands in place when users react with `📖`; expanded help is split into pages controlled by `◀️` and `▶️` so each edit stays below Discord's message-size limit. every root slash command has a manpage-style page through `/help command:<command>`, for example `/help command:nytsoi`. playlist help is available with `/help topic:playlists`, `/help command:playlist new`, and `/help topic:playlist command:new` style selectors.
+playlist list/edit views use `◀️` and `▶️` reactions for pages. only the newest playlist view remains interactive. `/help` is compact by default and expands in place when users react with `📖`; expanded help is split into pages controlled by `◀️` and `▶️` so each edit stays below Discord's message-size limit. `/help topic:all` shows every registered slash command and subcommand in the same paged style. every root slash command has a manpage-style page through `/help command:<command>`, for example `/help command:nytsoi`. playlist help is available with `/help topic:playlists`, `/help command:playlist new`, and `/help topic:playlist command:new` style selectors.
 
 ## security hardening
 

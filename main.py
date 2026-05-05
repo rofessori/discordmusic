@@ -1534,6 +1534,7 @@ class Client(discord.Client):
         self.help_message_id = None
         self.help_expanded = False
         self.help_page = 0
+        self.help_pages = None
         self.config_panel_message_id = None
         self.config_panel_user_id = None
         self.playlist_delete_tasks = {}
@@ -4051,17 +4052,24 @@ async def handle_playlist_pager_reaction(reaction, user) -> bool:
 def compact_help_message() -> str:
     return "\n".join([
         "**music bot help**",
-        "/play <youtube url, playlist url, or search> [repeat] - play or queue music",
-        "/play:last - restore last auto-saved session",
-        "/nowplaying - repost controls without the video URL",
-        "/playtop <query or playlist url> - add next",
-        "/enqueue <query or playlist url> (alias /q) - add to queue",
-        "/queue - show queue",
-        "/favorites play - play your starred songs",
-        "/permissions - show your restriction groups",
-        "/whatsnew - recent bot updates",
-        "/help command:<command> - detailed command help",
-        "/help - react 📖 for full help",
+        "",
+        "**playback**",
+        "`/play` - play YouTube, search, saved playlists, or favorites.",
+        "`/playtop` - put a request next.",
+        "`/enqueue` / `/q` - add to the queue.",
+        "`/queue` - show upcoming songs.",
+        "",
+        "**controls**",
+        "`/nowplaying` - repost controls without the video URL.",
+        "`/skip` `/pause` `/resume` `/stop` `/volume` - voice controls.",
+        f"Reactions: {FAVORITE_REACTION} favorite, {QUEUE_REACTION} queue, {REPEAT_REACTION} repeat.",
+        "",
+        "**more**",
+        "`/favorites` - play and manage starred songs.",
+        "`/playlist` - create, play, and edit saved playlists.",
+        "`/whatsnew` - recent bot updates.",
+        "`/help topic:all` - literally every command.",
+        f"React {HELP_EXPAND_REACTION} for common commands.",
     ])
 
 def expanded_help_message() -> str:
@@ -4070,57 +4078,94 @@ def expanded_help_message() -> str:
 def expanded_help_pages() -> list:
     pages = [
         "\n".join([
-            "**music playback**",
-            "/join - Join your voice channel.",
-            "/play <YouTube URL, playlist URL, search, or playlist:name> [repeat] - Play now or queue; single tracks can repeat.",
-            "/play -favorites username - Play a user's public favorites; admins get a warning prompt for private favorites.",
-            "/play:last - Restore the last auto-saved voice session.",
-            "/playtop <query or playlist URL> - Play next.",
-            "/enqueue <query, playlist URL, or playlist:name> (alias: /q) - Add to queue.",
-            "/queue [links] (alias: /queuelist) - Show upcoming songs.",
-            "/queuefirst <position, playlist URL, or playlist:name> (alias: /qfirst) - Move a song or playlist to play next.",
-            f"/skip, /pause, /resume, /stop, /volume <1-{SAFE_VOLUME_MAX_LEVEL}> - Controls. Admins bypass votes; disabling voice votes makes same-channel users direct.",
-            f"Now-playing reactions: {FAVORITE_REACTION} favorite toggle, ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat-one, {QUEUE_REACTION} queue.",
-            "/nowplaying, /now (alias: /nytsoi), /getqueue - Current/session info.",
-            "/favorites play/list/privacy/status - Per-user favorites.",
-            "/whatsnew - Show recent bot updates from RECENT_UPDATES.md.",
-        ]),
-        "\n".join([
-            "**playlists**",
-            "/playlist list - Browse your playlists and visible public playlists.",
-            "/playlist new - Guided playlist creation.",
-            "/playlist new <name> <private|public|current|currentqueue|jono> - Create or import.",
-            "/playlist show <name> - Show playlist details.",
-            "/playlist play <name> - Play or queue a playlist.",
-            "/playlist edit <name> - Show editable playlist details.",
-            "/playlist add <playlist> <current|queue|url> [queue_position] [url] - Add a song.",
-            "/playlist fill current <playlist> - Add queued songs missing from a playlist.",
-            "/playlist addmod <playlist> <user> - Add manager (owner only).",
-            "/playlist remove <playlist> [flags] (alias delete) - Remove with 600s rescue.",
-            "/playlist rename <playlist> <new_name> - Rename a playlist.",
-            "/playlist removesong <playlist> <position> - Remove a song.",
-            "/playlist move <playlist> <from> <to> - Reorder songs.",
-            "/playlist lock <playlist> <locked> - Lock or unlock edits.",
-            "/playlist cachemode <playlist> <mode> - Admin cache policy for one playlist.",
-            "/playlist cacheglobal <mode> [force] - Admin global playlist cache policy.",
-        ]),
-        "\n".join([
-            "**admin / other**",
-            "/favorites cacheglobal, /favorites cacheuser - Favorites cache policy.",
-            "/usergroup add/remove/list, /permissions - Restriction groups.",
-            "/config show - Reaction-toggle runtime config, including voice votes and public `/status play`.",
-            "/userstats <user> - Admin user diagnostics.",
-            "/clear_queue, /restorequeue, /cachequeue - Queue cleanup/recovery/cache.",
-            "/purgequeue, /purgecache, /cachestatus - Cache and disk tools.",
-            "/autoleave, /setdeletetime - Recovery and cleanup timers.",
-            "/volume_session, /volume_default, /volume_force - Admin volume controls.",
-            "/togglelog, /toggledownload, /disablelinks, /reboot, /status - Runtime controls.",
-            "/backup_teekkari_quotes, /random_quote - Quote tools.",
+            "**help - playback**",
             "",
-            "Detailed help: `/help command:play`, `/help command:nytsoi`, `/help command:playlist new`.",
+            "`/join` - join your voice channel.",
+            "`/play` - play now or queue YouTube, search, `playlist:name`, or favorites.",
+            "`/playtop` - place a request next.",
+            "`/enqueue` / `/q` - append to the queue.",
+            "`/queue` / `/queuelist` - show upcoming songs.",
+            "`/queuefirst` / `/qfirst` - move a queued item or playlist block next.",
+            "",
+            "**now playing**",
+            "`/nowplaying` - repost controls without the URL.",
+            "`/now` / `/nytsoi` - compact current-song view.",
+            "`/getqueue` - session request history.",
+            f"`/volume` - set volume up to {SAFE_VOLUME_MAX_LEVEL}% for normal users.",
+            "`/skip` `/pause` `/resume` `/stop` - voice controls.",
+            f"Reactions: {FAVORITE_REACTION} favorite, ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat, {QUEUE_REACTION} queue.",
+        ]),
+        "\n".join([
+            "**help - playlists and favorites**",
+            "",
+            "`/playlist list` - browse saved playlists.",
+            "`/playlist new` - guided creation.",
+            "`/playlist new <name> current` - import the upcoming queue.",
+            "`/playlist show` / `/playlist edit` - inspect playlist details.",
+            "`/playlist play` - play or queue a saved playlist.",
+            "`/playlist add` - add current, queued, or URL media.",
+            "`/playlist fill current` - bulk-add queued songs not already present.",
+            "`/playlist remove` / `/playlist delete` - delete with rescue window.",
+            "`/playlist rescue` - restore a recently deleted playlist.",
+            "`/playlist removesong` / `/playlist move` / `/playlist rename` / `/playlist lock` - edit tools.",
+            "`/playlist cachemode` / `/playlist cacheglobal` - admin cache policy.",
+            "`/favorites play` / `/favorites list` - use starred songs.",
+            "`/favorites privacy` / `/favorites status` - manage favorites visibility.",
+        ]),
+        "\n".join([
+            "**help - admin and utilities**",
+            "",
+            "`/config show` - reaction-toggle runtime settings.",
+            "`/status` / `/status play` - runtime and playback diagnostics.",
+            "`/userstats` - admin diagnostics for one user.",
+            "`/usergroup` / `/permissions` - restriction groups.",
+            "`/cachequeue` / `/cachestatus` / `/purgecache` / `/purgequeue` - cache tools.",
+            "`/clear_queue` / `/restorequeue` - queue cleanup and recovery.",
+            "`/autoleave` / `/setdeletetime` - leave and cleanup timers.",
+            "`/volume_session` / `/volume_default` / `/volume_force` - admin volume controls.",
+            "`/togglelog` / `/toggledownload` / `/disablelinks` / `/reboot` - runtime controls.",
+            "`/playspeed` / `/playspeedaccess` / `/nowplayingcooldown` - hidden/admin tuning.",
+            "`/backup_teekkari_quotes` / `/random_quote` - quote tools.",
+            "`/whatsnew` - recent bot changes.",
+            "",
+            "Use `/help topic:all` for every slash command.",
+            "Use `/help command:play` or `/help command:playlist new` for details.",
         ]),
     ]
     return [trim_discord_message(page) for page in pages]
+
+def command_description(command) -> str:
+    return str(getattr(command, "description", "") or "no description").strip()
+
+def all_command_entries() -> list:
+    entries = []
+    for command in client.tree.get_commands():
+        children = list(getattr(command, "commands", []) or [])
+        entries.append(f"`/{command.name}` - {command_description(command)}")
+        for child in children:
+            entries.append(f"`/{command.name} {child.name}` - {command_description(child)}")
+    return entries
+
+def paginate_help_entries(title: str, intro: str, entries: list) -> list:
+    pages = []
+    header = [f"**{title}**", intro, ""]
+    current = list(header)
+    for entry in entries:
+        candidate = "\n".join([*current, entry])
+        if len(candidate) > DISCORD_MESSAGE_SAFE_LIMIT - 120 and len(current) > len(header):
+            pages.append("\n".join(current))
+            current = list(header)
+        current.append(entry)
+    if len(current) > len(header):
+        pages.append("\n".join(current))
+    return [trim_discord_message(page) for page in pages] or ["**all commands**\nNo commands are registered."]
+
+def all_help_pages() -> list:
+    return paginate_help_entries(
+        "all commands",
+        "Every registered slash command and subcommand. Use `/help command:<name>` for details.",
+        all_command_entries(),
+    )
 
 def trim_discord_message(content: str) -> str:
     if len(content) <= DISCORD_MESSAGE_SAFE_LIMIT:
@@ -4131,11 +4176,25 @@ def trim_discord_message(content: str) -> str:
 def help_message_content(*, expanded: bool, page: int = 0) -> str:
     if not expanded:
         return compact_help_message()
-    pages = expanded_help_pages()
+    pages = client.help_pages or expanded_help_pages()
     page = max(0, min(page, len(pages) - 1))
     footer = f"\n\n_page {page + 1}/{len(pages)} - react {HELP_EXPAND_REACTION} to close, ◀️/▶️ to change page_"
     content = pages[page] + footer
     return trim_discord_message(content)
+
+async def send_help_pages(ctx, pages: list):
+    client.help_pages = pages
+    client.help_expanded = True
+    client.help_page = 0
+    await ctx.response.send_message(help_message_content(expanded=True, page=0))
+    message = await ctx.original_response()
+    client.help_message_id = message.id
+    for emoji in (HELP_EXPAND_REACTION, *HELP_PAGE_REACTIONS):
+        try:
+            await message.add_reaction(emoji)
+        except Exception as exc:
+            logger.warning(f"Failed to add help reaction {emoji}: {exc}")
+    return message
 
 async def handle_help_reaction(reaction, user) -> bool:
     if not client.help_message_id or reaction.message.id != client.help_message_id:
@@ -4143,10 +4202,11 @@ async def handle_help_reaction(reaction, user) -> bool:
     emoji = str(reaction.emoji)
     if emoji not in {HELP_EXPAND_REACTION, *HELP_PAGE_REACTIONS}:
         return True
-    pages = expanded_help_pages()
+    pages = client.help_pages or expanded_help_pages()
     if emoji == HELP_EXPAND_REACTION:
         client.help_expanded = not client.help_expanded
         client.help_page = 0
+        client.help_pages = expanded_help_pages() if client.help_expanded else None
     elif client.help_expanded and emoji == "◀️":
         client.help_page = max(0, getattr(client, "help_page", 0) - 1)
     elif client.help_expanded and emoji == "▶️":
@@ -4778,11 +4838,11 @@ def command_help_pages() -> dict:
         },
         "help": {
             "purpose": "show command help",
-            "synopsis": ["/help", "/help command:<command>", "/help topic:playlist command:<subcommand>"],
-            "description": "Shows compact help, a command-specific manpage, or playlist topic help.",
-            "arguments": ["topic - optional topic such as playlist.", "command - command or playlist subcommand name."],
-            "examples": ["/help", "/help command:nytsoi", "/help topic:playlist command:new"],
-            "notes": ["Use command names without the leading slash.", "Playlist subcommands can be addressed as `playlist new` or with topic:playlist."],
+            "synopsis": ["/help", "/help topic:all", "/help command:<command>", "/help topic:playlist command:<subcommand>"],
+            "description": "Shows compact help, paged all-command help, a command-specific manpage, or playlist topic help.",
+            "arguments": ["topic - optional topic such as all or playlist.", "command - command, all, or playlist subcommand name."],
+            "examples": ["/help", "/help topic:all", "/help command:nytsoi", "/help topic:playlist command:new"],
+            "notes": ["Use command names without the leading slash.", "Playlist subcommands can be addressed as `playlist new` or with topic:playlist.", "The all-command view is paged with reaction controls."],
             "errors": ["Unknown command - check spelling or run `/help`."],
         },
         "status": {
@@ -4868,6 +4928,8 @@ def format_command_manpage(command: str) -> Optional[str]:
 def help_message_for(topic: Optional[str] = None, command: Optional[str] = None) -> Optional[str]:
     topic_key = str(topic or "").strip().lower()
     command_key = str(command or "").strip().lower()
+    if topic_key in {"all", "commands"} or command_key in {"all", "commands"}:
+        return "__HELP_ALL__"
     if command_key and not topic_key:
         if normalize_help_command(command_key) in {"playlist", "playlists"}:
             return playlist_general_help_message()
@@ -8715,8 +8777,9 @@ async def whatsnew(ctx):
     record_command(ctx)
     await ctx.response.send_message(recent_updates_message())
 
-@app_commands.describe(topic="Help topic, for example playlists", command="Command name, for example nytsoi, play, or playlist new")
+@app_commands.describe(topic="Help topic, for example all or playlists", command="Command name, for example nytsoi, play, playlist new, or all")
 @app_commands.choices(topic=[
+    app_commands.Choice(name="all", value="all"),
     app_commands.Choice(name="playlists", value="playlists"),
     app_commands.Choice(name="playlist", value="playlist"),
 ])
@@ -8725,6 +8788,9 @@ async def help(ctx, topic: Optional[str] = None, command: Optional[str] = None):
     """Displays the list of available commands and their usage."""
     record_command(ctx)
     topic_message = help_message_for(topic, command)
+    if topic_message == "__HELP_ALL__":
+        await send_help_pages(ctx, all_help_pages())
+        return
     if topic_message:
         await ctx.response.send_message(topic_message)
         return
@@ -8736,6 +8802,7 @@ async def help(ctx, topic: Optional[str] = None, command: Optional[str] = None):
     client.help_message_id = message.id
     client.help_expanded = False
     client.help_page = 0
+    client.help_pages = None
     try:
         await message.add_reaction(HELP_EXPAND_REACTION)
     except Exception as exc:
