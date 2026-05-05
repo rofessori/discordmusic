@@ -66,6 +66,7 @@ FAVORITES_MAX_TRACKS_PER_USER = 100
 DEFAULT_VOLUME_LEVEL = 20
 MIN_VOLUME_LEVEL = 1
 MAX_VOLUME_LEVEL = 100
+SAFE_VOLUME_MAX_LEVEL = 50
 VOICE_VOTE_TIMEOUT_SECONDS = 45
 REPEAT_TOGGLE_RECENT_SECONDS = 300
 REPEAT_TOGGLE_VOTE_THRESHOLD = 2
@@ -1069,6 +1070,7 @@ def load_channel_volume_config() -> dict:
             if isinstance(level, int) and MIN_VOLUME_LEVEL <= level <= MAX_VOLUME_LEVEL:
                 config["channels"][str(key)] = {
                     "level": level,
+                    "force": bool(entry.get("force", False)),
                     "updated_at": entry.get("updated_at", 0),
                     "updated_by_user_id": entry.get("updated_by_user_id"),
                     "updated_by_discord_name": entry.get("updated_by_discord_name"),
@@ -1548,22 +1550,38 @@ def channel_volume_key(channel) -> Optional[str]:
     guild_id = int(getattr(guild, "id", 0) or 0)
     return f"{guild_id}:{channel_id}"
 
-def validate_volume_level(level: int) -> Optional[str]:
+def validate_volume_level(level: int, *, allow_unsafe: bool = False) -> Optional[str]:
     if level < MIN_VOLUME_LEVEL or level > MAX_VOLUME_LEVEL:
         return f"Volume must be between {MIN_VOLUME_LEVEL} and {MAX_VOLUME_LEVEL}."
+    if not allow_unsafe and level > SAFE_VOLUME_MAX_LEVEL:
+        return f"Volume is capped at {SAFE_VOLUME_MAX_LEVEL}% for ear safety. Admins can use `/volume_force` to go louder."
     return None
 
-def configured_volume_level_for_channel(channel) -> int:
+def channel_volume_entry(channel) -> dict:
     key = channel_volume_key(channel)
     if not key:
+        return {}
+    return client.channel_volume_config.get("channels", {}).get(key, {})
+
+def configured_volume_level_for_channel(channel) -> int:
+    entry = channel_volume_entry(channel)
+    if not entry:
         return DEFAULT_VOLUME_LEVEL
-    entry = client.channel_volume_config.get("channels", {}).get(key, {})
     level = entry.get("level")
     if isinstance(level, int) and MIN_VOLUME_LEVEL <= level <= MAX_VOLUME_LEVEL:
+        if level > SAFE_VOLUME_MAX_LEVEL and not entry.get("force"):
+            logger.warning(
+                f"Clamping unsafe channel volume default {level}% for {channel_volume_key(channel)} "
+                f"to {SAFE_VOLUME_MAX_LEVEL}%."
+            )
+            return SAFE_VOLUME_MAX_LEVEL
         return level
     return DEFAULT_VOLUME_LEVEL
 
-def set_client_volume_level(level: int):
+def set_client_volume_level(level: int, *, allow_unsafe: bool = False):
+    if not allow_unsafe and level > SAFE_VOLUME_MAX_LEVEL:
+        logger.warning(f"Clamping requested volume {level}% to safe limit {SAFE_VOLUME_MAX_LEVEL}%.")
+        level = SAFE_VOLUME_MAX_LEVEL
     client.volume = level / 100.0
     voice = client.current_voice_channel
     if voice and getattr(voice, "source", None):
@@ -1576,7 +1594,7 @@ def apply_channel_volume_default(channel, reason: str = ""):
     if client.session_volume_locked:
         return
     level = configured_volume_level_for_channel(channel)
-    set_client_volume_level(level)
+    set_client_volume_level(level, allow_unsafe=bool(channel_volume_entry(channel).get("force")))
     logger.info(
         f"Applied voice channel volume default {level}%"
         f"{f' during {reason}' if reason else ''}."
@@ -1586,6 +1604,50 @@ def reset_session_volume(reason: str = ""):
     client.session_volume_locked = False
     set_client_volume_level(DEFAULT_VOLUME_LEVEL)
     logger.info(f"Reset session volume to {DEFAULT_VOLUME_LEVEL}%{f' after {reason}' if reason else ''}.")
+
+def find_voice_channel_by_name(guild, name: str):
+    lookup = str(name or "").strip().lower()
+    if not guild or not lookup:
+        return None
+    voice_channels = getattr(guild, "voice_channels", [])
+    for channel in voice_channels:
+        if str(getattr(channel, "name", "")).lower() == lookup:
+            return channel
+    matches = [
+        channel for channel in voice_channels
+        if lookup in str(getattr(channel, "name", "")).lower()
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+async def connect_or_move_to_voice_channel(ctx, voice_channel, *, reason: str):
+    if voice_channel is None:
+        await safe_interaction_send(ctx, "Voice channel not found.", ephemeral=True)
+        return False
+    voice = client.current_voice_channel or getattr(ctx.guild, "voice_client", None)
+    try:
+        if voice and voice.is_connected():
+            if getattr(voice, "channel", None) == voice_channel:
+                client.current_voice_channel = voice
+                await safe_interaction_send(ctx, f"Already in voice channel **{discord.utils.escape_markdown(voice_channel.name)}**.", ephemeral=True)
+                return True
+            await voice.move_to(voice_channel)
+            client.current_voice_channel = voice
+            logger.info(f"Moved bot to voice channel {voice_channel.name} for {reason}.")
+        else:
+            client.current_voice_channel = await voice_channel.connect()
+            if not client.currently_playing:
+                client.song_history = []
+            logger.info(f"Connected bot to voice channel {voice_channel.name} for {reason}.")
+        apply_channel_volume_default(voice_channel, reason)
+        cancel_auto_leave_task(reason)
+        await safe_interaction_send(ctx, f"Joined voice channel **{discord.utils.escape_markdown(voice_channel.name)}**.", ephemeral=True)
+        return True
+    except Exception as exc:
+        logger.error(f"Admin voice join failed for {getattr(voice_channel, 'name', voice_channel)}: {exc}")
+        await safe_interaction_send(ctx, "Unable to join that voice channel. Check output.log.", ephemeral=True)
+        return False
 
 def voice_vote_quorum(channel) -> int:
     human_count = len(voice_channel_human_members(channel))
@@ -3253,7 +3315,7 @@ def expanded_help_message() -> str:
         "/enqueue <query, playlist URL, or playlist:name> (alias: /q) - Add to queue.",
         "/queue [links] (alias: /queuelist) - Show upcoming songs.",
         "/queuefirst <position, playlist URL, or playlist:name> (alias: /qfirst) - Move a song or playlist to play next.",
-        "/skip, /pause, /resume, /stop, /volume <1-100> - Playback controls; skip/stop/volume use votes for non-admins.",
+        f"/skip, /pause, /resume, /stop, /volume <1-{SAFE_VOLUME_MAX_LEVEL}> - Playback controls; skip/stop/volume use votes for non-admins.",
         f"Now-playing reactions: {FAVORITE_REACTION} favorite, ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat-one, {QUEUE_REACTION} queue.",
         "/now (alias: /nytsoi), /getqueue - Current/session info.",
         "/favorites play [user], /favorites list [user], /favorites privacy <public|private>, /favorites status.",
@@ -3611,12 +3673,12 @@ def command_help_pages() -> dict:
         },
         "volume": {
             "purpose": "vote to change playback volume",
-            "synopsis": ["/volume <1-100>"],
-            "description": "Sets the current playback volume after a non-admin vote. Admins bypass the vote.",
-            "arguments": ["<level> - volume percentage from 1 to 100."],
+            "synopsis": [f"/volume <1-{SAFE_VOLUME_MAX_LEVEL}>"],
+            "description": "Sets the current playback volume after a non-admin vote. Admins bypass the vote, but the normal command still keeps the ear-safety ceiling.",
+            "arguments": [f"<level> - volume percentage from 1 to {SAFE_VOLUME_MAX_LEVEL}."],
             "examples": ["/volume 20", "/volume 35"],
-            "notes": ["The startup default is 20%.", "Admins can use `/volume_session` for a session hard-set or `/volume_default` for a persistent channel default.", "Users in `novolumechange` cannot use this command."],
-            "errors": ["Level outside 1-100.", "Bot is not in voice.", "You must be in the bot's voice channel.", "Restricted by novolumechange."],
+            "notes": ["The startup default is 20%.", f"Normal volume commands are capped at {SAFE_VOLUME_MAX_LEVEL}% for ear safety.", "Admins can use `/volume_force` when a louder override is intentionally needed.", "Users in `novolumechange` cannot use this command."],
+            "errors": [f"Level outside 1-{SAFE_VOLUME_MAX_LEVEL}.", "Bot is not in voice.", "You must be in the bot's voice channel.", "Restricted by novolumechange."],
         },
         "now": {
             "purpose": "show the current song",
@@ -3737,21 +3799,21 @@ def command_help_pages() -> dict:
         },
         "volume_session": {
             "purpose": "admin session volume hard-set",
-            "synopsis": ["/volume_session <1-100>"],
-            "description": "Sets the bot's current session volume immediately and keeps it until the bot disconnects.",
-            "arguments": ["<level> - volume percentage from 1 to 100."],
+            "synopsis": [f"/volume_session <1-{SAFE_VOLUME_MAX_LEVEL}>"],
+            "description": "Sets the bot's current session volume immediately and keeps it until the bot disconnects, within the normal safety ceiling.",
+            "arguments": [f"<level> - volume percentage from 1 to {SAFE_VOLUME_MAX_LEVEL}."],
             "examples": ["/volume_session 20"],
-            "notes": ["Admin only.", "This overrides channel defaults for the current connection only."],
-            "errors": ["Bot is not connected to voice.", "Level outside 1-100.", "Admin permission required."],
+            "notes": ["Admin only.", "This overrides channel defaults for the current connection only.", "Use `/volume_force` for intentional louder overrides."],
+            "errors": ["Bot is not connected to voice.", f"Level outside 1-{SAFE_VOLUME_MAX_LEVEL}.", "Admin permission required."],
         },
         "volume_default": {
             "purpose": "save a persistent channel volume default",
-            "synopsis": ["/volume_default <1-100>"],
-            "description": "Stores the default volume for the current voice channel in channel-volume-config.json.",
-            "arguments": ["<level> - volume percentage from 1 to 100."],
+            "synopsis": [f"/volume_default <1-{SAFE_VOLUME_MAX_LEVEL}>"],
+            "description": "Stores the default volume for the current voice channel in channel-volume-config.json, within the normal safety ceiling.",
+            "arguments": [f"<level> - volume percentage from 1 to {SAFE_VOLUME_MAX_LEVEL}."],
             "examples": ["/volume_default 20"],
-            "notes": ["Admin only.", "Applied when the bot joins that voice channel unless a session hard-set is active."],
-            "errors": ["No voice channel context.", "Level outside 1-100.", "Config write failed."],
+            "notes": ["Admin only.", "Applied when the bot joins that voice channel unless a session hard-set is active.", "Use `/volume_force save_default:true` for an intentional louder forced default."],
+            "errors": ["No voice channel context.", f"Level outside 1-{SAFE_VOLUME_MAX_LEVEL}.", "Config write failed."],
         },
         "togglelog": {
             "purpose": "toggle server debug logging",
@@ -5300,6 +5362,35 @@ async def join(ctx):
     else:
         await ctx.response.send_message("You must be in a voice channel to use this command")
 
+@app_commands.describe(
+    channel_name="Voice channel name, exact or unique partial match",
+    user="Join the voice channel this user is currently in",
+)
+@client.tree.command(name="adminjoin")
+async def admin_join(ctx, channel_name: Optional[str] = None, user: Optional[discord.Member] = None):
+    """Admin-only hidden utility to move/connect the bot by channel name or user's voice."""
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    target_channel = None
+    if user:
+        target_channel = getattr(getattr(user, "voice", None), "channel", None)
+        if target_channel is None:
+            await ctx.response.send_message("That user is not in a voice channel.", ephemeral=True)
+            return
+    elif channel_name:
+        target_channel = find_voice_channel_by_name(ctx.guild, channel_name)
+        if target_channel is None:
+            await ctx.response.send_message("No exact or unique matching voice channel found.", ephemeral=True)
+            return
+    else:
+        target_channel = getattr(getattr(ctx.user, "voice", None), "channel", None)
+        if target_channel is None:
+            await ctx.response.send_message("Provide `channel_name`, `user`, or join a voice channel yourself.", ephemeral=True)
+            return
+    await connect_or_move_to_voice_channel(ctx, target_channel, reason="adminjoin")
+
 @client.tree.command()
 async def clear_queue(ctx):
     """Clears the current song queue, with option to delete downloaded files."""
@@ -6659,6 +6750,52 @@ async def volume_session(ctx, level: int):
     await ctx.response.send_message(f"Session volume hard-set to {level}% until the bot disconnects.")
     logger.info(f"Session volume hard-set to {level}% by {user_display(ctx.user)}.")
 
+@app_commands.describe(
+    level="Forced volume percent from 1 to 100",
+    save_default="Also save this as the current voice channel default",
+)
+@client.tree.command(name="volume_force")
+async def volume_force(ctx, level: int, save_default: Optional[bool] = False):
+    """Admin-only forced volume override that can exceed the normal safety cap."""
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    error = validate_volume_level(level, allow_unsafe=True)
+    if error:
+        await ctx.response.send_message(error, ephemeral=True)
+        return
+    voice = client.current_voice_channel or ctx.guild.voice_client
+    voice_channel = getattr(voice, "channel", None) or getattr(getattr(ctx.user, "voice", None), "channel", None)
+    if not voice or not voice.is_connected():
+        await ctx.response.send_message("Connect the bot to voice before forcing volume.", ephemeral=True)
+        return
+    client.session_volume_locked = True
+    set_client_volume_level(level, allow_unsafe=True)
+    saved = False
+    if save_default:
+        key = channel_volume_key(voice_channel)
+        if not key:
+            await ctx.response.send_message("Forced session volume set, but no voice channel default could be saved.", ephemeral=True)
+            return
+        client.channel_volume_config.setdefault("channels", {})[key] = {
+            "level": level,
+            "force": True,
+            "updated_at": time.time(),
+            "updated_by_user_id": user_id_value(ctx.user),
+            "updated_by_discord_name": user_display(ctx.user),
+        }
+        try:
+            save_channel_volume_config()
+            saved = True
+        except Exception as exc:
+            logger.error(f"Failed to save forced channel volume default: {exc}")
+            await ctx.response.send_message("Forced session volume set, but saving the default failed. Check output.log.", ephemeral=True)
+            return
+    suffix = " and saved as a forced channel default" if saved else ""
+    await ctx.response.send_message(f"Forced volume set to {level}%{suffix}.")
+    logger.info(f"Forced volume set to {level}% by {user_display(ctx.user)} save_default={bool(save_default)}.")
+
 @app_commands.describe(level="Volume percent from 1 to 100")
 @client.tree.command(name="volume_default")
 async def volume_default(ctx, level: int):
@@ -6679,6 +6816,7 @@ async def volume_default(ctx, level: int):
         return
     client.channel_volume_config.setdefault("channels", {})[key] = {
         "level": level,
+        "force": False,
         "updated_at": time.time(),
         "updated_by_user_id": user_id_value(ctx.user),
         "updated_by_discord_name": user_display(ctx.user),
