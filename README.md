@@ -131,6 +131,7 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/setdeletetime <seconds>`
   - `/volume_session <1–50>`
   - `/volume_default <1–50>`
+  - `/volume_force <1–100> [save_default]`
   - `/togglelog [toggle|debug|admin|all|normal|off]`
   - `/toggledownload`
   - `/disablelinks`

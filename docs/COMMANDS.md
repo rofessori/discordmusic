@@ -99,6 +99,7 @@ Users in `noplaylistcreate` cannot use playlist creation/import commands.
 | `/disablelinks` | toggle whether queue-style displays are allowed to show youtube links. admin only. |
 | `/volume_session <1-50>` | hard-set this bot session's volume until disconnect within the safety cap. admin only. |
 | `/volume_default <1-50>` | save the current voice channel's safe default volume in `channel-volume-config.json`. admin only. |
+| `/volume_force <1-100> [save_default]` | intentionally bypass the 50 percent safety cap for the current session; `save_default:true` stores a forced default for the current voice channel. admin only. |
 | `/autoleave <enabled> [delay_seconds]` | when enabled, save the current song and queue and leave if the bot is alone in voice for the configured delay. admin only. |
 | `/setdeletetime <seconds>` | set how long downloaded song files wait after playback before delayed cleanup deletes them. admin only. |
 | `/reboot` | save the queue, ask for confirmation, disconnect, and exit the bot process. admin only. |
