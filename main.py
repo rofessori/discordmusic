@@ -1537,6 +1537,7 @@ class Client(discord.Client):
         self.config_panel_message_id = None
         self.config_panel_user_id = None
         self.playlist_delete_tasks = {}
+        self.playlist_cache_tasks = {}
         self.playlist_creation_sessions = {}
         self.playlist_creation_timeout_tasks = {}
         self.active_voice_votes = {}
@@ -5737,29 +5738,72 @@ async def cache_playlist_track(track: dict, *, playlist_cache: bool, projected_l
     track["ext"] = ext
     return True, cache_file_size(file_path)
 
-async def prepare_playlist_cache_for_playback(ctx, playlist: dict, tracks: list):
+def playlist_cache_result_summary(result: dict) -> str:
+    prepared = result.get("prepared", 0)
+    downloaded = result.get("downloaded", 0)
+    reused = result.get("reused", 0)
+    failed = result.get("failed", 0)
+    parts = [f"{prepared} prepared", f"{downloaded} downloaded", f"{reused} reused"]
+    if failed:
+        parts.append(f"{failed} failed")
+    return ", ".join(parts)
+
+def playlist_cache_warm_message(playlist: dict, result: dict) -> Optional[str]:
+    if result.get("mode") == "streaming" or result.get("skipped"):
+        return None
+    if not (result.get("prepared") or result.get("downloaded") or result.get("reused") or result.get("failed")):
+        return None
+    name = discord.utils.escape_markdown(str(playlist.get("name") or "playlist"))
+    summary = playlist_cache_result_summary(result)
+    if result.get("capped"):
+        return (
+            f"Playlist cache warmup for **{name}** reached the bounded limit "
+            f"({summary}). Remaining tracks will stream when needed."
+        )
+    return f"Playlist cache warmup for **{name}** complete ({summary})."
+
+async def cache_playlist_tracks_for_playback(playlist: dict, tracks: list, *, actor=None) -> dict:
     mode = effective_playlist_cache_mode(playlist)
+    result = {
+        "playlist_id": playlist.get("id"),
+        "playlist_name": playlist.get("name"),
+        "mode": mode,
+        "total": len(tracks),
+        "considered": 0,
+        "prepared": 0,
+        "downloaded": 0,
+        "reused": 0,
+        "failed": 0,
+        "bytes": 0,
+        "capped": False,
+        "skipped": False,
+    }
     if mode == "streaming":
-        return
-    cached = 0
-    reused = 0
+        result["skipped"] = True
+        result["reason"] = "streaming"
+        return result
     downloaded_bytes = 0
-    capped = False
     track_limit = PLAYLIST_CACHE_BOUNDED_TRACK_LIMIT if mode == "bounded" else len(tracks)
     byte_limit = PLAYLIST_CACHE_BOUNDED_BYTES if mode == "bounded" else CACHE_HARD_LIMIT_BYTES
-
+    changed = False
     playlist_tracks = playlist.get("tracks", [])
+
     for index, queue_track in enumerate(tracks):
+        if mode == "bounded" and (result["considered"] >= track_limit or downloaded_bytes >= byte_limit):
+            result["capped"] = index < len(tracks)
+            break
+        result["considered"] += 1
         cache_key = cache_key_for_track(queue_track)
+        if not cache_key:
+            continue
         existing = find_existing_cache_file(cache_key, prefer_playlist=True, video_id=str(queue_track.get("id") or "").strip() or None)
         if existing:
             apply_cache_fields(queue_track, existing, cache_mode="playlist" if os.path.basename(existing).startswith("plst-") else "shortterm")
             if index < len(playlist_tracks):
                 apply_cache_fields(playlist_tracks[index], existing, cache_mode=queue_track.get("cache_mode", "shortterm"))
-            reused += 1
-            continue
-        if cached >= track_limit or downloaded_bytes >= byte_limit:
-            capped = True
+            result["reused"] += 1
+            result["prepared"] += 1
+            changed = True
             continue
         try:
             did_download, size = await cache_playlist_track(
@@ -5768,6 +5812,7 @@ async def prepare_playlist_cache_for_playback(ctx, playlist: dict, tracks: list)
                 projected_limit=max(0, byte_limit - downloaded_bytes),
             )
         except Exception as exc:
+            result["failed"] += 1
             logger.warning(f"Playlist cache download failed for {queue_track.get('id')}: {exc}")
             continue
         if did_download:
@@ -5779,22 +5824,92 @@ async def prepare_playlist_cache_for_playback(ctx, playlist: dict, tracks: list)
                     except OSError as exc:
                         logger.warning(f"Failed to remove over-limit playlist cache file {file_path}: {exc}")
                 apply_cache_fields(queue_track, None, cache_mode="streaming")
-                capped = True
-                continue
-            cached += 1
+                result["capped"] = True
+                break
+            result["downloaded"] += 1
+            result["prepared"] += 1
             downloaded_bytes += size
+            result["bytes"] += size
             if index < len(playlist_tracks):
                 apply_cache_fields(playlist_tracks[index], queue_track.get("file"), cache_mode="playlist")
-    if cached or reused:
+            changed = True
+    if changed:
         playlist["predownloaded"] = True
         playlist["predownloaded_at"] = time.time()
         save_playlist(playlist)
-    if capped:
+    return result
+
+async def prepare_playlist_cache_for_playback(ctx, playlist: dict, tracks: list):
+    result = await cache_playlist_tracks_for_playback(playlist, tracks, actor=getattr(ctx, "user", None))
+    if result.get("capped"):
         await ctx.followup.send(
             "Playlist cache limit reached: cached up to 15 tracks or 3 GB. Remaining tracks will stream when needed."
         )
-    elif cached or reused:
-        await ctx.followup.send(f"Using playlist cache for {cached + reused} track(s).")
+    elif result.get("prepared"):
+        await ctx.followup.send(f"Using playlist cache for {result.get('prepared')} track(s).")
+
+def playlist_cache_task_key(playlist: dict, channel) -> str:
+    return f"{playlist.get('id') or 'playlist'}:{getattr(channel, 'id', 'no-channel')}"
+
+def schedule_playlist_cache_warmup(ctx, playlist: dict, tracks: list, command_name: str) -> bool:
+    if not tracks or is_favorites_playlist(playlist) or user_has_group(ctx.user, "nodownload"):
+        return False
+    if effective_playlist_cache_mode(playlist) == "streaming":
+        return False
+    channel = getattr(ctx, "channel", None)
+    key = playlist_cache_task_key(playlist, channel)
+    existing_task = client.playlist_cache_tasks.get(key)
+    if existing_task and not existing_task.done():
+        append_runtime_audit_event("playlist-cache-warm-already-running", actor=ctx.user, details={
+            "playlist_id": playlist.get("id"),
+            "playlist_name": playlist.get("name"),
+            "command": command_name,
+            "tracks": len(tracks),
+        })
+        return False
+
+    actor = ctx.user
+
+    async def runner():
+        try:
+            append_runtime_audit_event("playlist-cache-warm-started", actor=actor, details={
+                "playlist_id": playlist.get("id"),
+                "playlist_name": playlist.get("name"),
+                "command": command_name,
+                "tracks": len(tracks),
+                "mode": effective_playlist_cache_mode(playlist),
+            })
+            try:
+                result = await cache_playlist_tracks_for_playback(playlist, tracks, actor=actor)
+                append_runtime_audit_event("playlist-cache-warm-finished", actor=actor, details=result)
+            except Exception as exc:
+                append_runtime_audit_event("playlist-cache-warm-failed", actor=actor, details={
+                    "playlist_id": playlist.get("id"),
+                    "playlist_name": playlist.get("name"),
+                    "command": command_name,
+                    "error": str(exc),
+                })
+                logger.warning(f"Playlist cache warmup failed for {playlist.get('name')} ({playlist.get('id')}): {exc}")
+                return
+            message = playlist_cache_warm_message(playlist, result)
+            if message and channel:
+                try:
+                    await channel.send(message)
+                except Exception as exc:
+                    append_runtime_audit_event("playlist-cache-warm-notify-failed", actor=actor, details={
+                        "playlist_id": playlist.get("id"),
+                        "playlist_name": playlist.get("name"),
+                        "command": command_name,
+                        "error": str(exc),
+                    })
+                    logger.warning(f"Playlist cache warmup notification failed for {playlist.get('name')} ({playlist.get('id')}): {exc}")
+        finally:
+            if client.playlist_cache_tasks.get(key) is task:
+                client.playlist_cache_tasks.pop(key, None)
+
+    task = asyncio.create_task(runner())
+    client.playlist_cache_tasks[key] = task
+    return True
 
 async def play_playlist_now(ctx, playlist: dict, command_name: str):
     tracks = playlist_to_queue_tracks(playlist)
@@ -5812,13 +5927,15 @@ async def play_playlist_now(ctx, playlist: dict, command_name: str):
     voice = await ensure_voice_for_playback(ctx)
     if voice is None:
         return
-    if not is_favorites_playlist(playlist) and not user_has_group(ctx.user, "nodownload"):
-        await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     if client.currently_playing:
         for track in tracks:
             queue.append(track)
             client.song_history.append(track)
-        await ctx.followup.send(f"Queued playlist **{discord.utils.escape_markdown(playlist['name'])}** ({len(tracks)} song(s)).")
+        warmup_started = schedule_playlist_cache_warmup(ctx, playlist, tracks, command_name)
+        suffix = "\nPlaylist cache warmup is running in the background." if warmup_started else ""
+        await ctx.followup.send(
+            f"Queued playlist **{discord.utils.escape_markdown(playlist['name'])}** ({len(tracks)} song(s)).{suffix}"
+        )
         logger.info(f"Queued playlist via /{command_name}: {playlist['name']} ({playlist['id']})")
         return
     first, rest = tracks[0], tracks[1:]
@@ -5826,6 +5943,7 @@ async def play_playlist_now(ctx, playlist: dict, command_name: str):
     for track in rest:
         client.song_history.append(track)
     await start_track_now(ctx, voice, first)
+    schedule_playlist_cache_warmup(ctx, playlist, tracks, command_name)
     logger.info(f"Started playlist via /{command_name}: {playlist['name']} ({playlist['id']})")
 
 def favorites_visible_to_requester(requester, playlist: dict) -> bool:
@@ -5912,12 +6030,12 @@ async def enqueue_playlist(ctx, playlist: dict, command_name: str):
     if not is_user_admin(ctx.user) and len(queue) + len(tracks) > MAX_QUEUE_LENGTH:
         await ctx.followup.send(f"Queue limit reached ({MAX_QUEUE_LENGTH} songs). Ask an admin to clear the queue.", ephemeral=True)
         return
-    if not is_favorites_playlist(playlist) and not user_has_group(ctx.user, "nodownload"):
-        await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     for track in tracks:
         queue.append(track)
         client.song_history.append(track)
-    await ctx.followup.send(f"Queued playlist **{discord.utils.escape_markdown(playlist['name'])}** ({len(tracks)} song(s)).")
+    warmup_started = schedule_playlist_cache_warmup(ctx, playlist, tracks, command_name)
+    suffix = "\nPlaylist cache warmup is running in the background." if warmup_started else ""
+    await ctx.followup.send(f"Queued playlist **{discord.utils.escape_markdown(playlist['name'])}** ({len(tracks)} song(s)).{suffix}")
     logger.info(f"Queued playlist via /{command_name}: {playlist['name']} ({playlist['id']})")
 
 def move_existing_playlist_block_to_front(playlist_id: str) -> int:
@@ -5948,12 +6066,12 @@ async def add_playlist_to_queue_front(ctx, playlist: dict):
         return
     if not ctx.response.is_done():
         await ctx.response.defer()
-    if not is_favorites_playlist(playlist) and not user_has_group(ctx.user, "nodownload"):
-        await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     queue[0:0] = tracks
     client.song_history.extend(tracks)
+    warmup_started = schedule_playlist_cache_warmup(ctx, playlist, tracks, "queuefirst")
+    suffix = "\nPlaylist cache warmup is running in the background." if warmup_started else ""
     await ctx.followup.send(
-        f"Moved playlist **{discord.utils.escape_markdown(playlist['name'])}** to play next ({len(tracks)} song(s))."
+        f"Moved playlist **{discord.utils.escape_markdown(playlist['name'])}** to play next ({len(tracks)} song(s)).{suffix}"
     )
     logger.info(f"Playlist queued at front: {playlist['name']} ({playlist['id']})")
 

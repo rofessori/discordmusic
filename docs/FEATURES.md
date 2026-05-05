@@ -80,7 +80,7 @@ playlist references accept both `playlist:name` and exact playlist names. `/play
 
 while a playlist is actively playing, normal song requests are placed after the active playlist block. the `👍`/`👎` prompt to move a song next is only shown for non-admins when voice votes are enabled and at least three human users are in voice. admins move next directly, disabled voice votes move next directly, and small voice sessions keep the song after the playlist without prompting.
 
-playlist cache behavior is admin-controlled. the persistent global default is bounded caching, where a playlist play operation may cache up to 15 tracks or 3 GB and streams the rest. admins can use `/playlist cacheglobal` to change the global default, `/playlist cachemode` to override a playlist, `/cachestatus` to inspect cache use, and `/purgecache` to delete validated cache files. per-playlist modes are `follow_global`, `streaming`, `bounded`, and `keep_cached`.
+playlist cache behavior is admin-controlled. the persistent global default is bounded caching, where playlist playback queues or starts immediately and then warms cache in the background for up to the first 15 tracks or 3 GB. the rest streams when needed. admins can use `/playlist cacheglobal` to change the global default, `/playlist cachemode` to override a playlist, `/cachestatus` to inspect cache use, and `/purgecache` to delete validated cache files. per-playlist modes are `follow_global`, `streaming`, `bounded`, and `keep_cached`.
 
 the admin-only `/playlist predownload` command is disabled by default. enabling `PLAYLIST_PREDOWNLOAD_ENABLED=true` lets admins permanently download playlist audio into `cache/` with `plst-<cache-key>.<ext>` names without exposing that capability to normal users.
 

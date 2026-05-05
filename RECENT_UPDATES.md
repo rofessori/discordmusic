@@ -7,6 +7,7 @@ Source: local git history and maintainer notes.
 - Fixed `/help` reaction expansion by splitting expanded help into safe pages with `◀️`/`▶️`.
 - Added a `/config show` voice-vote toggle. Admins always bypass votes; when votes are disabled, same-channel users act directly while restriction groups still apply.
 - Reduced active-playlist move-next prompts: admins and disabled-vote sessions act directly, and small voice sessions no longer get the prompt.
+- Playlist playback now starts or queues immediately while bounded playlist cache warming runs in the background for up to the first 15 tracks or 3 GB.
 - Added `runtime-audit.json` for sanitized high-impact runtime events such as config toggles, cache purge/cachequeue, queue file deletion, cache playback, and `/play last` decisions.
 - Improved YouTube failure handling so unavailable videos get a useful message and search requests try fallback results before failing.
 - Added `/nowplaying` URL-free controls with cooldown, plus hidden playspeed controls and `/play speed`.

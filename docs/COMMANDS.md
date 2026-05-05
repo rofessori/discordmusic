@@ -85,7 +85,7 @@ Favorites are special per-user playlists under `playlists/favorites-<user-id>/me
 | `/playlist removesong <playlist> <position> [flags]` | remove a song from a playlist you can edit. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
 | `/playlist move <playlist> <from> <to> [flags]` | reorder songs inside a playlist you can edit. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
 | `/playlist lock <playlist> <locked>` | lock or unlock manager edits. owner/admin only. |
-| `/playlist cachemode <playlist> <mode>` | set one playlist's cache behavior. admin only. modes: `follow_global`, `streaming`, `bounded`, `keep_cached`. |
+| `/playlist cachemode <playlist> <mode>` | set one playlist's cache behavior. admin only. modes: `follow_global`, `streaming`, `bounded`, `keep_cached`. bounded playback starts/queues first, then warms up to the first 15 tracks or 3 GB in the background. |
 | `/playlist cacheglobal <mode> [force]` | set the persistent global playlist cache behavior. admin only. modes: `streaming`, `bounded`, `keep_cached`; `force:true` makes playlists ignore their own mode. |
 | `/playlist predownload <playlist>` | admin-only hook for permanent playlist downloads into `cache/plst-<cache-key>.<ext>`. disabled by default. |
 

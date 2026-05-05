@@ -125,7 +125,7 @@ Setup security checks:
 - Cache filenames are deterministic URL-safe base64 of the canonical YouTube watch URL. Normal cache files are `cache/<cache-key>.<ext>` and playlist long-term cache files are `cache/plst-<cache-key>.<ext>`.
 - Playlist track metadata should include `cache_key`, `cache_mode`, `cache_path`, and `ext` when available. Unsafe or missing `cache_path` values must be ignored and logged, never trusted directly from JSON.
 - Playlist cache policy is admin-controlled. The persistent global default is `bounded`, per-playlist default is `follow_global`, and admins can use `/playlist cacheglobal`, `/playlist cachemode`, `/cachestatus`, and `/purgecache`.
-- Bounded playlist caching may cache at most 15 tracks or 3 GB per playlist play operation. The hard root cache cap is 20 GB; when reached, playback should stream instead of downloading.
+- Bounded playlist caching must not block playlist playback. Queue or start the playlist first, then warm the cache in a background task for at most the first 15 tracks or 3 GB. The hard root cache cap is 20 GB; when reached, playback should stream instead of downloading.
 - Full playlist predownload remains explicit/admin-only through `/playlist predownload` and must use `cache/plst-<cache-key>.<ext>`, not playlist folders.
 
 ## 2026-05-03 Vote Controls & Playlist Current Import Notes
@@ -173,6 +173,6 @@ Setup security checks:
 - `/status play` is the detailed current music stream status view. It should include best-effort bitrate, BPM, codec, duration/position, cache, playback speed, repeat, queue, and voice-state fields while showing `unknown` for metadata yt-dlp did not provide. Only this status view may be public, controlled by `/config show`; other `/status` views stay admin-only.
 - `/help` expansion is paged. Keep every expanded help page below `DISCORD_MESSAGE_SAFE_LIMIT`; do not reintroduce a single oversized expanded help string.
 - Active-playlist move-next prompts should not appear for admins, disabled-vote sessions, or voice channels with fewer than three human users. Admins and disabled-vote sessions move next directly; small voice sessions keep the song after the playlist.
-- `runtime-audit.json` is append-only operational audit state for impactful actions: config toggles, cache purge/cachequeue, queue clears with file deletion, delayed cleanup, cache hits/downloads, stream fallback, playlist placement, and `/play last` decisions. Sanitize paths and secrets, preserve malformed audit files, and keep it out of commits.
+- `runtime-audit.json` is append-only operational audit state for impactful actions: config toggles, cache purge/cachequeue, playlist cache warmups, queue clears with file deletion, delayed cleanup, cache hits/downloads, stream fallback, playlist placement, and `/play last` decisions. Sanitize paths and secrets, preserve malformed audit files, and keep it out of commits.
 - yt-dlp JavaScript runtimes must only be configured when `deno` or `node` actually exists on `PATH`. If no runtime exists, keep the startup warning and user-facing admin hint, but do not force a missing runtime in `ytdl_options`.
 - Search fallback is bounded and YouTube-only: if the first yt-dlp search result is unavailable, try a few YouTube search candidates, but never allow raw non-YouTube URLs through to yt-dlp.
