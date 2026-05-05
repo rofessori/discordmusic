@@ -1,4 +1,9 @@
 ## 2026-05-06
+- Fixed `/help` reaction expansion failing with Discord's 2000-character content limit by paging expanded help and keeping each edit below the safe limit.
+- Added persistent `voice_votes_enabled` runtime config in `/config show`; admins always bypass votes, and disabled votes make same-channel users act directly while restriction groups still apply.
+- Fixed active-playlist move-next prompting so admins never get the prompt, disabled-vote sessions move next directly, and fewer than three human voice users skip the prompt.
+- Added sanitized `runtime-audit.json` entries for impactful runtime actions, including config toggles, cache purge/cachequeue, queue file deletion, delayed cleanup, cache hits/downloads, stream fallback, and `/play last` decisions.
+- Improved yt-dlp failure handling: unavailable videos now produce a specific user message, admins get a missing `deno`/`node` hint, and search requests try bounded fallback results before failing.
 - Added `/nowplaying`, which reposts the active now-playing controls without the YouTube URL and uses an admin-configurable per-channel cooldown to prevent spam.
 - Added hidden playback speed controls: `/playspeed`, `/playspeedaccess`, the `playspeed` allow group, and `/play speed`/`--speed:<number>` for single-track requests from 0.1x to 2x.
 - Fixed stale `/play last` recovery behavior by requiring recent auto-leave metadata before restoring `last_session_queue.tmp.json`; rejected legacy/stale recovery files are logged to `queue-blackbox.json` and removed.

@@ -16,11 +16,11 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/queuelist [links]` | alias for `/queue`. |
 | `/queuefirst <position, youtube playlist url, or playlist:name>` | move an existing queued song or playlist to the front of the queue. |
 | `/qfirst <position, youtube playlist url, or playlist:name>` | alias for `/queuefirst`. |
-| `/skip` | vote to skip the current track and continue to the next queued track. admins bypass the vote. |
-| `/stop` | vote to stop playback, clear the queue, and disconnect from voice. admins bypass the vote. |
+| `/skip` | vote to skip the current track and continue to the next queued track. admins bypass the vote; if voice votes are disabled, same-channel users act directly. |
+| `/stop` | vote to stop playback, clear the queue, and disconnect from voice. admins bypass the vote; if voice votes are disabled, same-channel users act directly. |
 | `/pause` | pause the current playing audio. requires the same voice channel unless the user is an admin. |
 | `/resume` | resume paused audio. requires the same voice channel unless the user is an admin. |
-| `/volume <1-50>` | vote to set playback volume from 1 to 50 percent. admins bypass the vote, but the normal command keeps the ear-safety cap. |
+| `/volume <1-50>` | vote to set playback volume from 1 to 50 percent. admins bypass the vote, and disabled voice votes make same-channel users direct, but the normal command keeps the ear-safety cap. |
 | `/now` | show the currently playing song. |
 | `/nowplaying` | repost the now-playing controls without the video url. non-admin use has a per-channel cooldown. |
 | `/nytsoi` | finnish alias for `/now`. |
@@ -32,9 +32,9 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | reaction | purpose |
 | --- | --- |
 | `⭐` | toggle the current song in your favorites. the now-playing message is edited with a short add/remove notice naming the user. |
-| `◀️` | vote to replay the previous track when one is available. admins bypass the vote. |
+| `◀️` | vote to replay the previous track when one is available. admins bypass the vote; disabled voice votes make same-channel users direct. |
 | `⏸️` | pause or resume playback. requires the same voice channel unless the user is an admin. |
-| `▶️` | vote to skip to the next track. admins bypass the vote. |
+| `▶️` | vote to skip to the next track. admins bypass the vote; disabled voice votes make same-channel users direct. |
 | `🔂` | toggle repeat-one for the current track. admins bypass repeat-off votes; non-admin repeat-off only starts a vote after two other recent repeat-off toggles for that same song. |
 | `📜` | toggle the current queue above the now-playing message. requires the same voice channel unless the user is an admin. |
 
@@ -108,7 +108,7 @@ Users in `noplaylistcreate` cannot use playlist creation/import commands.
 | `/setdeletetime <seconds>` | set how long downloaded song files wait after playback before delayed cleanup deletes them. admin only. |
 | `/reboot` | save the queue, ask for confirmation, disconnect, and exit the bot process. admin only. |
 | `/status [view]` | show runtime diagnostics, detailed playback status, the full suggestion session, or the last five commands. admin only except `/status play` when public access is enabled. |
-| `/config show` | show a reaction-toggleable runtime config panel for download mode, Discord download logs, DEBUG logging, admin operation trail, queue links, auto-leave, favorites autocache, playlist cache policy, playspeed allow-all, `/nowplaying` cooldown, and public `/status play`. admin only. |
+| `/config show` | show a reaction-toggleable runtime config panel for download mode, Discord download logs, DEBUG logging, admin operation trail, queue links, auto-leave, favorites autocache, playlist cache policy, playspeed allow-all, `/nowplaying` cooldown, public `/status play`, and voice votes. admin only. |
 | `/userstats <user>` | show one user's restriction groups, favorites summary, playlist ownership/management, queued/session requests, recent commands, and recent music requests. admin only. |
 | `/playspeed <speed>` | hidden operational speed command. usable by admins, users in `playspeed`, or everyone when allow-all is enabled. applies to future audio sources; current audio changes on next track or replay. |
 | `/playspeedaccess <enabled>` | allow or restrict speed controls for everyone. admin only. |
@@ -117,7 +117,7 @@ Users in `noplaylistcreate` cannot use playlist creation/import commands.
 | `/usergroup remove <user> <group>` | remove a runtime restriction group from a user. admin only. |
 | `/usergroup list <user>` | list a user's runtime restriction groups. admin only. |
 
-restriction groups live in `user-permissions.json`: `nodownload` makes that user's requests stream-only and prevents favorite cache entries for that user, `novolumechange` blocks `/volume`, `noplaylistcreate` blocks playlist creation/import, `noqueueskip` blocks `/playtop` queue jumps and `/queuefirst`/`/qfirst`, `noskip` blocks `/skip` and skip votes, `norepeat` blocks repeat reactions plus `/play repeat`, and `playspeed` grants speed controls when allow-all is off.
+restriction groups live in `user-permissions.json`: `nodownload` makes that user's requests stream-only and prevents favorite cache entries for that user, `novolumechange` blocks `/volume`, `noplaylistcreate` blocks playlist creation/import, `noqueueskip` blocks `/playtop` queue jumps and `/queuefirst`/`/qfirst`, `noskip` blocks `/skip` and skip votes, `norepeat` blocks repeat reactions plus `/play repeat`, and `playspeed` grants speed controls when allow-all is off. the global voice vote toggle lives in the same runtime config; when disabled, same-channel users act directly but restriction groups still win.
 
 ## user permissions
 
@@ -143,7 +143,7 @@ status views:
 
 | command | purpose |
 | --- | --- |
-| `/help` | show the in-discord command summary. react `📖` to expand it. |
+| `/help` | show the in-discord command summary. react `📖` to expand or compact it; expanded help is paged with `◀️` and `▶️` so it stays under Discord's message limit. |
 | `/help command:<command>` | show a manpage-style help page for any root command, for example `/help command:nytsoi`, `/help command:play`, or `/help command:purgecache`. |
 | `/help command:playlist <subcommand>` | show playlist subcommand help without setting a topic, for example `/help command:playlist new`. |
 | `/help topic:playlists` | show the playlist quick-start help page. |
