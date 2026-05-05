@@ -41,6 +41,7 @@ PLAYLIST_BLACKBOX_FILE = os.path.join(BASE_DIR, "playlists-blackbox.json")
 PLAYLIST_CACHE_POLICY_FILE = os.path.join(BASE_DIR, "playlist-cache-policy.json")
 CHANNEL_VOLUME_CONFIG_FILE = os.path.join(BASE_DIR, "channel-volume-config.json")
 USER_PERMISSIONS_FILE = os.path.join(BASE_DIR, "user-permissions.json")
+RECENT_UPDATES_FILE = os.path.join(BASE_DIR, "RECENT_UPDATES.md")
 youtube_base_url = 'https://www.youtube.com/'
 youtube_base_url_2 = 'https://youtu.be/'
 youtube_watch_url = youtube_base_url + 'watch?v='
@@ -3300,6 +3301,7 @@ def compact_help_message() -> str:
         "/queue - show queue",
         "/favorites play - play your starred songs",
         "/permissions - show your restriction groups",
+        "/whatsnew - recent bot updates",
         "/help command:<command> - detailed command help",
         "/help - react 📖 for full help",
     ])
@@ -3319,6 +3321,7 @@ def expanded_help_message() -> str:
         f"Now-playing reactions: {FAVORITE_REACTION} favorite, ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat-one, {QUEUE_REACTION} queue.",
         "/now (alias: /nytsoi), /getqueue - Current/session info.",
         "/favorites play [user], /favorites list [user], /favorites privacy <public|private>, /favorites status.",
+        "/whatsnew - Show recent bot updates from RECENT_UPDATES.md.",
         "",
         "**playlists**",
         "/playlist list - Browse your playlists and visible public playlists.",
@@ -3707,6 +3710,15 @@ def command_help_pages() -> dict:
             "notes": ["This is session memory, not persistent storage."],
             "errors": ["No songs have been requested this session."],
         },
+        "whatsnew": {
+            "purpose": "show recent bot updates",
+            "synopsis": ["/whatsnew"],
+            "description": "Shows the latest user-facing update summary from RECENT_UPDATES.md.",
+            "arguments": ["none"],
+            "examples": ["/whatsnew"],
+            "notes": ["The update file is generated from recent local git history and maintainer notes.", "If the file grows too long for one Discord message, the command shows the first part with a truncation note."],
+            "errors": ["RECENT_UPDATES.md is missing or unreadable."],
+        },
         "favorites": {
             "purpose": "play and manage per-user favorites",
             "synopsis": ["/favorites play [user]", "/favorites list [user]", "/favorites privacy <public|private>", "/favorites status", "/favorites cacheuser <user> <enabled>", "/favorites cacheglobal <enabled> [max_gb] [per_user_tracks]"],
@@ -3979,6 +3991,31 @@ def help_message_for(topic: Optional[str] = None, command: Optional[str] = None)
             return format_playlist_manpage(command_key) or f"No playlist help page for `{command}`. Try `/help topic:playlists`."
         return playlist_general_help_message()
     return None
+
+def recent_updates_message() -> str:
+    try:
+        with open(RECENT_UPDATES_FILE, "r") as f:
+            content = f.read().strip()
+    except Exception as exc:
+        logger.warning(f"Could not read recent updates file: {exc}")
+        return "**recent updates**\nRECENT_UPDATES.md is not available. Check the bot logs."
+
+    if not content:
+        return "**recent updates**\nNo recent updates have been written yet."
+    if len(content) <= DISCORD_MESSAGE_SAFE_LIMIT:
+        return content
+
+    notice = "\n\n_Showing the first part. See RECENT_UPDATES.md for the full list._"
+    allowed = DISCORD_MESSAGE_SAFE_LIMIT - len(notice)
+    lines = []
+    for line in content.splitlines():
+        candidate = "\n".join(lines + [line]).rstrip()
+        if len(candidate) > allowed:
+            break
+        lines.append(line)
+    if not lines:
+        return content[:allowed].rstrip() + notice
+    return "\n".join(lines).rstrip() + notice
 
 def enough_disk_for_download() -> bool:
     try:
@@ -7133,6 +7170,12 @@ async def random_quote(ctx):
     message = quotes.getRandomQuote()
     await ctx.response.send_message(message)
     logger.info("User requested random teekkari quote.")
+
+@client.tree.command(name="whatsnew")
+async def whatsnew(ctx):
+    """Shows recent bot updates."""
+    record_command(ctx)
+    await ctx.response.send_message(recent_updates_message())
 
 @app_commands.describe(topic="Help topic, for example playlists", command="Command name, for example nytsoi, play, or playlist new")
 @app_commands.choices(topic=[

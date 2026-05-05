@@ -10,6 +10,7 @@ downloaded media is stored under `cache/`; playlist folders under `playlists/` c
 
 - [Features](docs/FEATURES.md) - man-page style overview of the bot, playback tech, queue behavior, and restore flow.
 - [Commands](docs/COMMANDS.md) - clean command reference with every slash command and now-playing reaction.
+- [Recent updates](RECENT_UPDATES.md) - user-facing summary shown by `/whatsnew`.
 
 ---
 
@@ -83,6 +84,7 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/volume <1–50>` (non-admins vote)
   - `/now` (alias `/nytsoi`)
   - `/getqueue`
+  - `/whatsnew`
 
 - **favorites**:
   - `/favorites play [user]`
