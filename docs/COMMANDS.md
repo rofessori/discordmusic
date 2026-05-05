@@ -24,6 +24,7 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/now` | show the currently playing song. |
 | `/nytsoi` | finnish alias for `/now`. |
 | `/getqueue` | list all songs requested in the current session and show whether they are playing, queued, played, or removed. |
+| `/whatsnew` | show the recent bot update summary from `RECENT_UPDATES.md`. |
 
 ## now-playing reactions
 

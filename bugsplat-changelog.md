@@ -1,4 +1,5 @@
 ## 2026-05-05
+- Added root `RECENT_UPDATES.md` plus `/whatsnew`, summarizing recent git-history updates for Discord users.
 - Fixed a documentation/help regression from the 50% ear-safety change: `/volume_force` was registered and referenced by volume guidance but missing from the command reference and detailed `/help command:` pages.
 - Added hidden admin voice placement with `/adminjoin`, allowing admins to connect or move the bot by voice channel name or by the voice channel a selected user is in.
 - Added a 50% ear-safety ceiling to normal volume paths (`/volume`, `/volume_session`, and `/volume_default`) plus an admin `/volume_force` override for intentional louder session volume or forced channel defaults.

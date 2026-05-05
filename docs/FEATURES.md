@@ -56,6 +56,8 @@ admins can enable `/autoleave` so that if the bot is alone in voice for the conf
 
 admins also have a hidden voice-placement utility that is intentionally not listed in normal help: it can connect or move the bot to a voice channel by exact or unique partial channel name, or to the voice channel where a selected user currently is. moving an already connected bot preserves playback and applies that channel's configured volume default.
 
+`/whatsnew` displays the user-facing recent update summary from root `RECENT_UPDATES.md`. keep that file concise enough for a Discord message when recent feature work should be visible in-server.
+
 ## playlists
 
 playlists are stored locally under `playlists/<safe-name>-<playlistid>/metadata.json`. each playlist has an 8-character url-safe id, name, generated timestamp, lock state, visibility, owner discord id/name, manager user ids, cache mode, and ordered track entries. playlist folders are metadata-only; downloaded audio files never live under `playlists/`.
