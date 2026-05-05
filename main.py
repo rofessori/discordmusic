@@ -2561,9 +2561,17 @@ def load_last_session_recovery() -> tuple:
         with open(LAST_SESSION_QUEUE_FILE, "r") as f:
             payload = json.load(f)
         if not isinstance(payload, dict):
+            append_queue_blackbox_event("last-session-rejected", details={
+                "reason": "saved session file is not a JSON object",
+            })
+            remove_last_session_recovery()
             return None, "saved session file is not a JSON object"
         tracks = payload.get("tracks", [])
         if not isinstance(tracks, list) or not tracks:
+            append_queue_blackbox_event("last-session-rejected", details={
+                "reason": "saved session has no tracks",
+            })
+            remove_last_session_recovery()
             return None, "saved session has no tracks"
         reason = validate_last_session_recovery_payload(payload)
         if reason:
