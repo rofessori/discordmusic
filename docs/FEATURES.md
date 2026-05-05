@@ -46,7 +46,7 @@ admins can use `/togglelog download` to keep normal INFO logging while enabling 
 
 ## queue and playback flow
 
-the queue is an in-memory list of upcoming track dictionaries. `/play` starts playback immediately when nothing is playing, or queues the track when something is already playing. youtube playlist links are expanded into a single playlist block: pure playlist links start at the first extracted item, while watch links containing both `v=` and `list=` start from the selected video when possible and queue the remaining extracted items after it. `/enqueue` and `/q` add to the end of the queue. `/playtop` inserts a new track or youtube playlist block at the front so it plays next. `/queuefirst` and `/qfirst` move an existing queued item, saved playlist, or youtube playlist link to the front. `/queue links:true` can show youtube urls with queued songs unless an admin has disabled queue links.
+the queue is an in-memory list of upcoming track dictionaries. `/play` starts playback immediately when nothing is playing, or queues the track when something is already playing. single-track `/play` requests can include the `repeat` option or a trailing `-repeat <count>`; counts through 20 queue explicit repeat plays, while larger values become repeat-one loop until repeat is turned off. youtube playlist links are expanded into a single playlist block: pure playlist links start at the first extracted item, while watch links containing both `v=` and `list=` start from the selected video when possible and queue the remaining extracted items after it. `/enqueue` and `/q` add to the end of the queue. `/playtop` inserts a new track or youtube playlist block at the front so it plays next. `/queuefirst` and `/qfirst` move an existing queued item, saved playlist, or youtube playlist link to the front. `/queue links:true` can show youtube urls with queued songs unless an admin has disabled queue links.
 
 when a track ends or is skipped, the bot pops the next queued track and starts it. session history is also kept so `/getqueue` can show whether requested songs are playing, queued, played, or removed. non-admin queueing is capped to limit public-server abuse. youtube playlist URL extraction is capped by `MAX_PLAYLIST_TRACKS`, and queued playlist entries are resolved through the normal safe track-fetch path when they reach playback.
 
@@ -55,6 +55,8 @@ when a track ends or is skipped, the bot pops the next queued track and starts i
 admins can enable `/autoleave` so that if the bot is alone in voice for the configured delay, it saves the current song plus upcoming queue to `last_session_queue.tmp.json`, disconnects, and reports that the session can be started again with `/play:last`. the saved session is restored by running `/play` with `last`, `play:last`, or `/play:last` as the value.
 
 admins also have a hidden voice-placement utility that is intentionally not listed in normal help: it can connect or move the bot to a voice channel by exact or unique partial channel name, or to the voice channel where a selected user currently is. moving an already connected bot preserves playback and applies that channel's configured volume default.
+
+admins can use `/config show` as a debug panel for runtime settings. the panel lists each toggle with a reaction emoji and edits itself after an admin changes download mode, Discord download logs, Python DEBUG logging, admin operation trail, queue-link display, auto-leave, favorites autocache, force-global playlist cache, or playlist cache default mode. `/userstats <user>` shows one user's groups, favorites, playlists, queued/session requests, and retained recent command/music request memory.
 
 `/whatsnew` displays the user-facing recent update summary from root `RECENT_UPDATES.md`. keep that file concise enough for a Discord message when recent feature work should be visible in-server.
 
@@ -118,7 +120,7 @@ the supported groups are:
 - `noplaylistcreate`: blocks guided playlist creation and queue-import playlist creation.
 - `noqueueskip`: blocks `/playtop` while playback is active plus `/queuefirst` and `/qfirst`.
 - `noskip`: blocks `/skip`, skip reactions, and skip vote participation.
-- `norepeat`: blocks repeat reaction use.
+- `norepeat`: blocks repeat reaction use and `/play repeat`.
 
 playlist list/edit views use `◀️` and `▶️` reactions for pages. only the newest playlist view remains interactive. `/help` is compact by default and expands in place when users react with `📖`. every root slash command has a manpage-style page through `/help command:<command>`, for example `/help command:nytsoi`. playlist help is available with `/help topic:playlists`, `/help command:playlist new`, and `/help topic:playlist command:new` style selectors.
 

@@ -7,7 +7,7 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | command | purpose |
 | --- | --- |
 | `/join` | join the voice channel you are currently in. |
-| `/play <youtube url, youtube playlist url, search, playlist:name, or -favorites username> [show_download_log]` | play a youtube result, saved playlist, or public favorites immediately, or add it to the queue if something is already playing. `show_download_log:true` shows an editable sanitized progress log for this request. raw non-youtube urls are rejected. |
+| `/play <youtube url, youtube playlist url, search, playlist:name, or -favorites username> [repeat] [show_download_log]` | play a youtube result, saved playlist, or public favorites immediately, or add it to the queue if something is already playing. `repeat` or a trailing `-repeat <count>` repeats single-track requests; values above 20 become repeat-one loop. `show_download_log:true` shows an editable sanitized progress log for this request. raw non-youtube urls are rejected. |
 | `/play:last` | restore the last auto-saved voice session after auto-leave. in Discord slash options this is entered as `/play` with `last`, `play:last`, or `/play:last` as the value. |
 | `/playtop <query or youtube playlist url>` | add a track or youtube playlist block to the front of the queue so it plays next. if nothing is playing, it starts immediately. |
 | `/enqueue <query, youtube playlist url, or playlist:name>` | add a track or playlist to the end of the queue. |
@@ -105,11 +105,13 @@ Users in `noplaylistcreate` cannot use playlist creation/import commands.
 | `/setdeletetime <seconds>` | set how long downloaded song files wait after playback before delayed cleanup deletes them. admin only. |
 | `/reboot` | save the queue, ask for confirmation, disconnect, and exit the bot process. admin only. |
 | `/status [view]` | show runtime diagnostics, the full suggestion session, or the last five commands. admin only. |
+| `/config show` | show a reaction-toggleable runtime config panel for download mode, Discord download logs, DEBUG logging, admin operation trail, queue links, auto-leave, favorites autocache, and playlist cache policy. admin only. |
+| `/userstats <user>` | show one user's restriction groups, favorites summary, playlist ownership/management, queued/session requests, recent commands, and recent music requests. admin only. |
 | `/usergroup add <user> <group>` | add a runtime restriction group to a user. admin only. |
 | `/usergroup remove <user> <group>` | remove a runtime restriction group from a user. admin only. |
 | `/usergroup list <user>` | list a user's runtime restriction groups. admin only. |
 
-restriction groups live in `user-permissions.json`: `nodownload` makes that user's requests stream-only and prevents favorite cache entries for that user, `novolumechange` blocks `/volume`, `noplaylistcreate` blocks playlist creation/import, `noqueueskip` blocks `/playtop` queue jumps and `/queuefirst`/`/qfirst`, `noskip` blocks `/skip` and skip votes, and `norepeat` blocks repeat reactions.
+restriction groups live in `user-permissions.json`: `nodownload` makes that user's requests stream-only and prevents favorite cache entries for that user, `novolumechange` blocks `/volume`, `noplaylistcreate` blocks playlist creation/import, `noqueueskip` blocks `/playtop` queue jumps and `/queuefirst`/`/qfirst`, `noskip` blocks `/skip` and skip votes, and `norepeat` blocks repeat reactions plus `/play repeat`.
 
 ## user permissions
 

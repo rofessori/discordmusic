@@ -68,7 +68,8 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
 
 - **slash commands**:
   - `/join`
-  - `/play <youtube url|youtube playlist url|query|playlist:name> [show_download_log]`
+  - `/play <youtube url|youtube playlist url|query|playlist:name> [repeat] [show_download_log]`
+  - `/play <query> -repeat <count>` (single tracks only; above 20 becomes repeat-one loop)
   - `/play -favorites username`
   - `/play:last`
   - `/playtop <query|youtube playlist url>`
@@ -139,6 +140,8 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/disablelinks`
   - `/reboot`
   - `/status [view]`
+  - `/config show`
+  - `/userstats <user>`
 
 - **quotes**:
   - `/backup_teekkari_quotes`
@@ -180,7 +183,7 @@ tail -f output.log
   favorites are special per-user playlists stored under `playlists/favorites-<user-id>/metadata.json`. they are private by default, can be made public with `/favorites privacy public`, and can be played by the owner with `/favorites play` or by others when public with `/favorites play user` or `/play -favorites username`. this privacy is a social bot setting, not strong secrecy: admins can override private favorites after a confirmation prompt, and anyone with filesystem access can read playlist metadata.
 
 - **favorites cache and user restrictions**:
-  favorites autocache is off by default. admins can enable it with `/favorites cacheglobal`; favorites cache files use `cache/plst-<cache-key>.<ext>`, never playlist folders, and the favorites cache policy is capped at 6 GiB globally. cache selection is round-robin across eligible users and considers 30 favorites per user by default, up to the supported maximum of 100 stored favorites per user. runtime user rules live in `user-permissions.json`: `nodownload` forces a user's requests to stream, `novolumechange` blocks `/volume`, `noplaylistcreate` blocks playlist creation/import, `noqueueskip` blocks queue jump/reorder commands, `noskip` blocks skip commands/votes, and `norepeat` blocks repeat reactions.
+  favorites autocache is off by default. admins can enable it with `/favorites cacheglobal`; favorites cache files use `cache/plst-<cache-key>.<ext>`, never playlist folders, and the favorites cache policy is capped at 6 GiB globally. cache selection is round-robin across eligible users and considers 30 favorites per user by default, up to the supported maximum of 100 stored favorites per user. runtime user rules live in `user-permissions.json`: `nodownload` forces a user's requests to stream, `novolumechange` blocks `/volume`, `noplaylistcreate` blocks playlist creation/import, `noqueueskip` blocks queue jump/reorder commands, `noskip` blocks skip commands/votes, and `norepeat` blocks repeat reactions plus `/play repeat`.
 
 - **playlist cache limits**:
   playlist caching defaults to bounded mode: at most 15 tracks or 3 GB are cached per playlist play operation, and remaining tracks stream when needed. admins can change the persistent global mode with `/playlist cacheglobal`, override a playlist with `/playlist cachemode`, inspect cache with `/cachestatus`, and purge safe cache files with `/purgecache`. the hard cache cap is 20 GB; when it is reached, new downloads fall back to streaming.

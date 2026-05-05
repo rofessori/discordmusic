@@ -1,4 +1,7 @@
 ## 2026-05-05
+- Added admin `/config show`, a reaction-toggleable runtime config panel that edits itself when admins flip download mode, download logs, DEBUG logging, operation trail, queue links, auto-leave, favorites autocache, or playlist cache policy.
+- Added admin `/userstats <user>` for cross-checking a user's restriction groups, favorites, playlists, queued/session requests, recent commands, and recent music requests.
+- Added `/play` single-track repeat support through the `repeat` slash option or trailing `-repeat <count>`; counts above 20 become repeat-one loop instead of queuing more than 20 copies.
 - Decoupled Discord download logs from Python DEBUG logging: `/togglelog download` now enables editable `/play` progress logs while keeping normal INFO logging, `/play show_download_log:true` enables the log for one request, and the message now shows a styled progress bar when download totals are available.
 - Added root `RECENT_UPDATES.md` plus `/whatsnew`, summarizing recent git-history updates for Discord users.
 - Fixed a documentation/help regression from the 50% ear-safety change: `/volume_force` was registered and referenced by volume guidance but missing from the command reference and detailed `/help command:` pages.

@@ -68,11 +68,13 @@ DEFAULT_VOLUME_LEVEL = 20
 MIN_VOLUME_LEVEL = 1
 MAX_VOLUME_LEVEL = 100
 SAFE_VOLUME_MAX_LEVEL = 50
+MAX_PLAY_REPEAT_COUNT = 20
 VOICE_VOTE_TIMEOUT_SECONDS = 45
 REPEAT_TOGGLE_RECENT_SECONDS = 300
 REPEAT_TOGGLE_VOTE_THRESHOLD = 2
 HELP_EXPAND_REACTION = "📖"
 DEBUG_COLLAPSE_REACTION = "🧹"
+CONFIG_REACTIONS = ("🎧", "📥", "🔍", "🧭", "🔗", "🚪", "⭐", "🌐", "📦")
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -987,6 +989,102 @@ def permissions_summary_for(user) -> str:
         return "normal user"
     return ", ".join(f"`{group}`" for group in groups)
 
+def bool_status(value: bool) -> str:
+    return "enabled" if value else "disabled"
+
+def playlist_cache_modes_order() -> list:
+    return ["streaming", "bounded", "keep_cached"]
+
+def set_verbose_logging(enabled: bool):
+    client.log_verbose = bool(enabled)
+    logger.setLevel(logging.DEBUG if client.log_verbose else logging.INFO)
+
+def config_panel_message() -> str:
+    policy = favorites_cache_policy()
+    lines = [
+        "**admin config**",
+        "React with the matching emoji to change a setting. Only admins can use this panel.",
+        "",
+        f"🎧 download-and-play: `{bool_status(client.download_mode)}`",
+        f"📥 Discord download logs: `{bool_status(client.download_debug_messages)}`",
+        f"🔍 Python DEBUG logging: `{bool_status(client.log_verbose)}` (`{logging.getLevelName(logger.level)}`)",
+        f"🧭 admin operation trail: `{bool_status(client.user_operation_debug_messages)}`",
+        f"🔗 queue links: `{'disabled' if client.queue_links_disabled else 'enabled'}`",
+        f"🚪 auto-leave: `{bool_status(client.auto_leave_enabled)}` (`{client.auto_leave_delay_seconds}s`)",
+        f"⭐ favorites autocache: `{bool_status(bool(policy.get('enabled')))}`",
+        f"🌐 force global playlist cache: `{bool_status(client.force_global_playlist_cache_mode)}`",
+        f"📦 playlist cache default: `{client.playlist_cache_default_mode}`",
+        "",
+        "_Config changes are runtime changes unless that setting already has a persistent policy file._",
+    ]
+    return "\n".join(lines)
+
+async def apply_config_reaction(emoji: str) -> str:
+    if emoji == "🎧":
+        client.download_mode = not client.download_mode
+        return f"download-and-play is now `{bool_status(client.download_mode)}`."
+    if emoji == "📥":
+        client.download_debug_messages = not client.download_debug_messages
+        return f"Discord download logs are now `{bool_status(client.download_debug_messages)}`."
+    if emoji == "🔍":
+        set_verbose_logging(not client.log_verbose)
+        return f"Python DEBUG logging is now `{bool_status(client.log_verbose)}`."
+    if emoji == "🧭":
+        client.user_operation_debug_messages = not client.user_operation_debug_messages
+        return f"admin operation trail is now `{bool_status(client.user_operation_debug_messages)}`."
+    if emoji == "🔗":
+        client.queue_links_disabled = not client.queue_links_disabled
+        return f"queue links are now `{'disabled' if client.queue_links_disabled else 'enabled'}`."
+    if emoji == "🚪":
+        client.auto_leave_enabled = not client.auto_leave_enabled
+        if not client.auto_leave_enabled:
+            cancel_auto_leave_task("config panel")
+        else:
+            voice = client.current_voice_channel
+            schedule_auto_leave_if_needed(getattr(voice, "channel", None))
+        return f"auto-leave is now `{bool_status(client.auto_leave_enabled)}`."
+    if emoji == "⭐":
+        policy = favorites_cache_policy()
+        set_favorites_cache_policy(not bool(policy.get("enabled")))
+        return f"favorites autocache is now `{bool_status(bool(favorites_cache_policy().get('enabled')))}`."
+    if emoji == "🌐":
+        client.force_global_playlist_cache_mode = not client.force_global_playlist_cache_mode
+        save_playlist_cache_policy()
+        return f"force global playlist cache is now `{bool_status(client.force_global_playlist_cache_mode)}`."
+    if emoji == "📦":
+        modes = playlist_cache_modes_order()
+        current = client.playlist_cache_default_mode
+        next_mode = modes[(modes.index(current) + 1) % len(modes)] if current in modes else DEFAULT_PLAYLIST_CACHE_MODE
+        client.playlist_cache_default_mode = next_mode
+        save_playlist_cache_policy()
+        return f"playlist cache default is now `{next_mode}`."
+    return "unknown config reaction."
+
+async def handle_config_reaction(reaction, user) -> bool:
+    if reaction.message.id != getattr(client, "config_panel_message_id", None):
+        return False
+    emoji = str(reaction.emoji)
+    if emoji not in CONFIG_REACTIONS:
+        return True
+    if not is_user_admin(user):
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception as exc:
+            logger.warning(f"Failed to remove denied config reaction: {exc}")
+        return True
+    try:
+        result = await apply_config_reaction(emoji)
+        await reaction.message.edit(content=config_panel_message())
+        await reaction.message.remove_reaction(reaction.emoji, user)
+        logger.info(f"Config panel changed by {user_display(user)} ({user_id_value(user)}): {result}")
+    except Exception as exc:
+        logger.error(f"Config panel reaction failed: {exc}")
+        try:
+            await reaction.message.channel.send("Config update failed. Check output.log.")
+        except Exception:
+            pass
+    return True
+
 async def require_voice_control(ctx, action: str = "control playback") -> bool:
     if can_control_voice(ctx.user):
         return True
@@ -1216,6 +1314,8 @@ class Client(discord.Client):
         self.playlist_pager = None
         self.help_message_id = None
         self.help_expanded = False
+        self.config_panel_message_id = None
+        self.config_panel_user_id = None
         self.playlist_delete_tasks = {}
         self.playlist_creation_sessions = {}
         self.playlist_creation_timeout_tasks = {}
@@ -1490,6 +1590,106 @@ def update_suggestion(record: SuggestionRecord, track):
         f"command=/{record.command} title={record.title or '-'} id={record.video_id or '-'}"
     )
     return record
+
+def parse_play_repeat_request(query: str, repeat: Optional[int]) -> tuple:
+    text = str(query or "").strip()
+    explicit = repeat is not None
+    requested = repeat
+    match = re.search(r"(?:^|\s)-repeat(?:\s+(\d+))?\s*$", text, flags=re.IGNORECASE)
+    if match:
+        explicit = True
+        requested = int(match.group(1) or 2)
+        text = text[:match.start()].strip()
+    if not explicit:
+        return text, 1, False, False
+    try:
+        requested = int(requested)
+    except (TypeError, ValueError):
+        requested = 1
+    requested = max(1, requested)
+    return text, min(requested, MAX_PLAY_REPEAT_COUNT), requested > MAX_PLAY_REPEAT_COUNT, True
+
+def clone_track_for_repeat(track: dict, *, repeat_loop: bool = False) -> dict:
+    clone = dict(track)
+    if repeat_loop:
+        clone["repeat_loop"] = True
+    else:
+        clone.pop("repeat_loop", None)
+    return clone
+
+def queue_repeat_copies(track: dict, repeat_count: int, *, already_started: bool = False) -> int:
+    copies = max(0, int(repeat_count or 1) - (1 if already_started else 0))
+    for _ in range(copies):
+        repeated = clone_track_for_repeat(track)
+        queue.append(repeated)
+        client.song_history.append(repeated)
+    if copies:
+        logger.info(
+            f"Queued {copies} repeat copy/copies for {track.get('title')} ({track.get('id')})."
+        )
+    return copies
+
+async def announce_repeat_request(ctx, repeat_count: int, repeat_loop: bool, *, started: bool):
+    if repeat_loop:
+        await ctx.followup.send(
+            f"Repeat count above {MAX_PLAY_REPEAT_COUNT} requested; this track will loop until repeat is turned off."
+        )
+    elif repeat_count > 1:
+        action = "started and repeat copies were queued" if started else "queued"
+        await ctx.followup.send(f"Repeat {action}: this track will play `{repeat_count}` time(s).")
+
+def track_requested_by_user(track: dict, user) -> bool:
+    return user_id_value(track.get("requested_by_user_id")) == user_id_value(user)
+
+def format_recent_user_commands(user, limit: int = 5) -> list:
+    uid = user_id_value(user)
+    commands = [record for record in client.recent_commands if user_id_value(record.user_id) == uid]
+    return [
+        f"`/{record.command}` at `{format_timestamp(record.timestamp)}`"
+        for record in commands[-limit:]
+    ]
+
+def format_recent_user_suggestions(user, limit: int = 5) -> list:
+    uid = user_id_value(user)
+    suggestions = [record for record in client.suggestion_history if user_id_value(record.user_id) == uid]
+    lines = []
+    for record in suggestions[-limit:]:
+        title = discord.utils.escape_markdown(record.title or record.raw_value or "unresolved")
+        lines.append(f"**{title}** (`/{record.command}`, `{format_timestamp(record.timestamp)}`)")
+    return lines
+
+def user_stats_message(user) -> str:
+    uid = user_id_value(user)
+    playlists = load_playlists()
+    normal_playlists = [p for p in playlists if not is_favorites_playlist(p)]
+    owned = [p for p in normal_playlists if playlist_owner_id(p) == uid]
+    managed = [p for p in normal_playlists if uid in playlist_manager_ids(p) and playlist_owner_id(p) != uid]
+    favorites = favorites_playlist_for_user(user, create=False)
+    favorite_tracks = favorites.get("tracks", []) if favorites else []
+    favorite_visibility = favorites.get("visibility", "private") if favorites else "private"
+    queued_count = sum(1 for track in queue if track_requested_by_user(track, user))
+    history_count = sum(1 for track in client.song_history if track_requested_by_user(track, user))
+    cache_allowed = favorite_cache_allowed_for_user(user) and not user_has_group(user, "nodownload")
+    owned_names = ", ".join(discord.utils.escape_markdown(p.get("name", "unnamed")) for p in owned[:5]) or "none"
+    managed_names = ", ".join(discord.utils.escape_markdown(p.get("name", "unnamed")) for p in managed[:5]) or "none"
+    recent_commands = format_recent_user_commands(user)
+    recent_suggestions = format_recent_user_suggestions(user)
+    lines = [
+        f"**user stats: {discord.utils.escape_markdown(user_display(user))}**",
+        f"- user id: `{uid}`",
+        f"- permissions: {permissions_summary_for(user)}",
+        f"- favorites: `{len(favorite_tracks)}` saved, `{favorite_visibility}` visibility, cache `{'eligible' if cache_allowed else 'disabled'}`",
+        f"- playlists owned: `{len(owned)}` ({owned_names})",
+        f"- playlists managed: `{len(managed)}` ({managed_names})",
+        f"- session requests: `{history_count}` total, `{queued_count}` still queued",
+        "",
+        "**recent commands**",
+    ]
+    lines.extend(f"- {item}" for item in recent_commands) if recent_commands else lines.append("- none in retained command memory")
+    lines.append("")
+    lines.append("**recent music requests**")
+    lines.extend(f"- {item}" for item in recent_suggestions) if recent_suggestions else lines.append("- none in retained suggestion memory")
+    return "\n".join(lines)[:1900]
 
 def format_suggestion_record(record: SuggestionRecord, *, include_url=True) -> str:
     title = discord.utils.escape_markdown(record.title or "unresolved")
@@ -1840,6 +2040,11 @@ async def handle_repeat_reaction(user, text_channel) -> str:
 
 def sync_repeat_for_started_track(track: dict):
     track_id = str(track.get("id") or "").strip()
+    if track.get("repeat_loop") and track_id:
+        client.repeat_current_track = True
+        client.repeat_track_id = track_id
+        logger.info(f"Repeat loop enabled from queued repeat request for {track_id}.")
+        return
     if client.repeat_current_track and client.repeat_track_id and client.repeat_track_id != track_id:
         logger.info(f"Repeat cleared because playback moved from {client.repeat_track_id} to {track_id}.")
         client.repeat_current_track = False
@@ -3305,7 +3510,7 @@ async def handle_playlist_pager_reaction(reaction, user) -> bool:
 def compact_help_message() -> str:
     return "\n".join([
         "**music bot help**",
-        "/play <youtube url, playlist url, or search> - play or queue music",
+        "/play <youtube url, playlist url, or search> [repeat] - play or queue music",
         "/play:last - restore last auto-saved session",
         "/playtop <query or playlist url> - add next",
         "/enqueue <query or playlist url> (alias /q) - add to queue",
@@ -3321,7 +3526,7 @@ def expanded_help_message() -> str:
     return "\n".join([
         "**music playback**",
         "/join - Join your voice channel.",
-        "/play <YouTube URL, playlist URL, search, or playlist:name> - Play now or queue.",
+        "/play <YouTube URL, playlist URL, search, or playlist:name> [repeat] - Play now or queue; single tracks can repeat.",
         "/play -favorites username - Play a user's public favorites; admins get a warning prompt for private favorites.",
         "/play:last - Restore the last auto-saved voice session.",
         "/playtop <query or playlist URL> - Play next.",
@@ -3354,6 +3559,7 @@ def expanded_help_message() -> str:
         "",
         "**admin / other**",
         "/favorites cacheglobal, /favorites cacheuser, /usergroup add/remove/list, /permissions",
+        "/config show, /userstats <user> - Admin debug panels.",
         "/clear_queue, /restorequeue, /purgequeue, /purgecache, /cachestatus, /autoleave, /setdeletetime, /volume_session, /volume_default, /volume_force, /togglelog, /toggledownload, /disablelinks, /reboot, /status",
         "/backup_teekkari_quotes, /random_quote",
         "",
@@ -3579,11 +3785,11 @@ def command_help_pages() -> dict:
         },
         "play": {
             "purpose": "play or queue YouTube audio",
-            "synopsis": ["/play <youtube url or search> [show_download_log]", "/play <youtube playlist url>", "/play playlist:<name>", "/play -favorites <username>", "/play last"],
+            "synopsis": ["/play <youtube url or search> [repeat] [show_download_log]", "/play <search> -repeat <count>", "/play <youtube playlist url>", "/play playlist:<name>", "/play -favorites <username>", "/play last"],
             "description": "Resolves YouTube URLs, YouTube playlist URLs, favorites, or search text with yt-dlp. If nothing is playing, a single track or the selected playlist/favorites entry starts immediately; otherwise the result is queued. Playlist names can start or queue saved playlists.",
-            "arguments": ["<query> - YouTube video URL, YouTube playlist URL, YouTube search text, playlist:name, -favorites username, or last/play:last.", "show_download_log - true shows an editable sanitized download progress log for this request."],
-            "examples": ["/play viidestoista yö", "/play https://youtube.com/watch?v=... show_download_log:true", "/play https://youtube.com/playlist?list=...", "/play playlist:Roadtrip", "/play -favorites jantso", "/play last"],
-            "notes": ["Raw non-YouTube URLs are rejected.", f"YouTube playlist URLs are capped at {MAX_PLAYLIST_TRACKS} track(s) and respect the queue length limit for non-admins.", "A watch URL with both `v=` and `list=` starts from that video when possible, then queues the rest of the playlist block.", "Favorites are private by default; public favorites can be played by others, and admins get a confirmation warning before overriding private favorites.", "Users in `nodownload` always stream and do not create normal downloads.", "Download mode caches individual tracks when they reach playback; stream-only mode skips local caching.", "`show_download_log:true` shows the editable progress log once; `/togglelog download` enables it globally while keeping normal INFO logging."],
+            "arguments": ["<query> - YouTube video URL, YouTube playlist URL, YouTube search text, playlist:name, -favorites username, or last/play:last.", f"repeat - optional repeat count for single-track requests; values above {MAX_PLAY_REPEAT_COUNT} turn into repeat-one loop.", "show_download_log - true shows an editable sanitized download progress log for this request."],
+            "examples": ["/play viidestoista yö", "/play viidestoista yö -repeat 3", "/play https://youtube.com/watch?v=... repeat:4 show_download_log:true", "/play https://youtube.com/playlist?list=...", "/play playlist:Roadtrip", "/play -favorites jantso", "/play last"],
+            "notes": ["Raw non-YouTube URLs are rejected.", f"YouTube playlist URLs are capped at {MAX_PLAYLIST_TRACKS} track(s) and respect the queue length limit for non-admins.", "A watch URL with both `v=` and `list=` starts from that video when possible, then queues the rest of the playlist block.", "Repeat is only for single-track YouTube/search requests; playlists, favorites, and last-session restore are rejected when repeat is requested.", "Favorites are private by default; public favorites can be played by others, and admins get a confirmation warning before overriding private favorites.", "Users in `nodownload` always stream and do not create normal downloads.", "Users in `norepeat` cannot use repeat requests.", "Download mode caches individual tracks when they reach playback; stream-only mode skips local caching.", "`show_download_log:true` shows the editable progress log once; `/togglelog download` enables it globally while keeping normal INFO logging."],
             "errors": ["Need voice channel - join voice first.", "Extraction failed - check yt-dlp, deno/node, and output.log.", "Large download - admin confirmation may be required."],
         },
         "playtop": {
@@ -3756,6 +3962,24 @@ def command_help_pages() -> dict:
             "examples": ["/usergroup add @user nodownload", "/usergroup remove @user noskip", "/usergroup list @user"],
             "notes": ["Admin only.", "`nodownload` forces that user's requests to stream and prevents favorite cache entries for that user.", "The config is runtime state and should not be committed."],
             "errors": ["Admin permission required.", "Unknown group."],
+        },
+        "config": {
+            "purpose": "admin reaction-toggle runtime settings",
+            "synopsis": ["/config show"],
+            "description": "Posts a runtime configuration panel. Each setting has an emoji reaction; admin reactions flip or cycle the setting and edit the same message.",
+            "arguments": ["none"],
+            "examples": ["/config show"],
+            "notes": ["Admin only.", "The panel covers download mode, Discord download logs, Python DEBUG logging, admin operation trail, queue links, auto-leave, favorites autocache, and playlist cache policy.", "Most toggles are runtime state unless that setting already writes to a policy file."],
+            "errors": ["Admin permission required.", "Discord may block reaction cleanup if the bot lacks reaction permissions."],
+        },
+        "userstats": {
+            "purpose": "admin inspect one user's bot state",
+            "synopsis": ["/userstats <user>"],
+            "description": "Shows one user's restriction groups, favorites count/visibility/cache eligibility, owned and managed playlists, queued/session request counts, recent commands, and recent music requests.",
+            "arguments": ["user - Discord member to inspect."],
+            "examples": ["/userstats @user"],
+            "notes": ["Admin only.", "Recent command memory is intentionally small and resets on bot restart."],
+            "errors": ["Admin permission required."],
         },
         "clear_queue": {
             "purpose": "clear the upcoming queue",
@@ -3952,6 +4176,8 @@ def command_aliases() -> dict:
         "usergroup:add": "usergroup",
         "usergroup:remove": "usergroup",
         "usergroup:list": "usergroup",
+        "config:show": "config",
+        "config show": "config",
     }
 
 def normalize_help_command(command: str) -> str:
@@ -5332,6 +5558,8 @@ async def on_reaction_add(reaction, user):
         return
     if await handle_debug_playback_reaction(reaction, user):
         return
+    if await handle_config_reaction(reaction, user):
+        return
     if client.help_message_id and reaction.message.id == client.help_message_id and str(reaction.emoji) == HELP_EXPAND_REACTION:
         try:
             client.help_expanded = not client.help_expanded
@@ -5400,6 +5628,7 @@ async def save_all_channel_messages(channel):
 playlist_group = app_commands.Group(name="playlist", description="create, browse, and edit saved playlists")
 favorites_group = app_commands.Group(name="favorites", description="play and manage per-user favorites")
 usergroup_group = app_commands.Group(name="usergroup", description="admin user restriction groups")
+config_group = app_commands.Group(name="config", description="admin runtime configuration panel")
 
 @client.tree.command()
 async def join(ctx):
@@ -5447,6 +5676,34 @@ async def admin_join(ctx, channel_name: Optional[str] = None, user: Optional[dis
             await ctx.response.send_message("Provide `channel_name`, `user`, or join a voice channel yourself.", ephemeral=True)
             return
     await connect_or_move_to_voice_channel(ctx, target_channel, reason="adminjoin")
+
+@config_group.command(name="show", description="Show an admin runtime config panel.")
+async def config_show(ctx):
+    """Shows reaction-toggleable runtime configuration."""
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    await ctx.response.send_message(config_panel_message())
+    message = await ctx.original_response()
+    client.config_panel_message_id = message.id
+    client.config_panel_user_id = user_id_value(ctx.user)
+    for emoji in CONFIG_REACTIONS:
+        try:
+            await message.add_reaction(emoji)
+        except Exception as exc:
+            logger.warning(f"Failed to add config reaction {emoji}: {exc}")
+    logger.info(f"Config panel opened by {user_display(ctx.user)} ({user_id_value(ctx.user)}).")
+
+@app_commands.describe(user="User to inspect")
+@client.tree.command(name="userstats")
+async def userstats(ctx, user: discord.Member):
+    """Shows admin-only user stats across favorites, groups, playlists, and command memory."""
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    await ctx.response.send_message(user_stats_message(user), ephemeral=True)
 
 @client.tree.command()
 async def clear_queue(ctx):
@@ -5518,24 +5775,44 @@ async def skip(ctx):
 @app_commands.describe(
     url="YouTube URL, YouTube playlist URL, search term, or playlist:name",
     show_download_log="Show an editable download progress log for this play request",
+    repeat=f"Repeat a single-track request; values above {MAX_PLAY_REPEAT_COUNT} enable repeat-one loop",
 )
 @client.tree.command()
-async def play(ctx, url: str, show_download_log: Optional[bool] = False):
+async def play(ctx, url: str, show_download_log: Optional[bool] = False, repeat: Optional[int] = None):
     """Plays a YouTube video's audio, a YouTube playlist, or a search result."""
     record_command(ctx)
     await ctx.response.defer()
+    url, repeat_count, repeat_loop, repeat_explicit = parse_play_repeat_request(url, repeat)
+    if repeat_explicit and not url:
+        await ctx.followup.send("Provide a search term or YouTube link before `-repeat`.", ephemeral=True)
+        return
+    if repeat_explicit and user_has_group(ctx.user, "norepeat"):
+        await ctx.followup.send("You cannot use repeat because your account is in `norepeat`.", ephemeral=True)
+        return
     if is_play_last_query(url):
+        if repeat_explicit:
+            await ctx.followup.send("Repeat is only supported for single-track YouTube/search play requests.", ephemeral=True)
+            return
         await restore_last_session(ctx)
         return
     favorites_alias_user = parse_play_favorites_alias(url)
     if favorites_alias_user is not None:
+        if repeat_explicit:
+            await ctx.followup.send("Repeat is only supported for single-track YouTube/search play requests.", ephemeral=True)
+            return
         await play_favorites_alias(ctx, favorites_alias_user)
         return
     playlist = resolve_playlist_reference(url, ctx.user)
     if playlist:
+        if repeat_explicit:
+            await ctx.followup.send("Repeat is only supported for single-track YouTube/search play requests.", ephemeral=True)
+            return
         await play_playlist_now(ctx, playlist, "play")
         return
     if not client.currently_playing:
+        repeat_queue_count = 0 if repeat_loop else max(0, repeat_count - 1)
+        if repeat_queue_count and not await require_queue_room_for_count(ctx, repeat_queue_count):
+            return
         debug_report = await create_debug_playback_message(ctx, "play", force=bool(show_download_log))
         await append_debug_playback_event(debug_report, "checking voice connection", stage="voice-check", force=True)
         # Ensure we're connected to a voice channel before creating the player
@@ -5577,6 +5854,10 @@ async def play(ctx, url: str, show_download_log: Optional[bool] = False):
             track = tracks[0]
             update_suggestion(suggestion, track)
             if track.get("youtube_playlist_id"):
+                if repeat_explicit:
+                    await finish_debug_playback_message(debug_report, status="error", error="repeat requested for playlist URL")
+                    await ctx.followup.send("Repeat is only supported for single-track YouTube/search play requests.", ephemeral=True)
+                    return
                 await play_youtube_playlist_tracks(ctx, voice, tracks, "play", debug_report=debug_report)
                 if debug_report:
                     debug_report.stage = "playing"
@@ -5609,6 +5890,8 @@ async def play(ctx, url: str, show_download_log: Optional[bool] = False):
                     await finish_debug_playback_message(debug_report, status="error", error="large download cancelled by user")
                     await ctx.followup.send("Download canceled.")
                     return
+            if repeat_loop:
+                track["repeat_loop"] = True
             await append_debug_playback_event(debug_report, "building ffmpeg audio source", stage="ffmpeg", force=True)
             player = await build_audio_player(track)
             voice.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, ctx.channel))
@@ -5624,6 +5907,9 @@ async def play(ctx, url: str, show_download_log: Optional[bool] = False):
                 send_message=ctx.followup.send,
                 acknowledge=ctx.followup.send,
             )
+            if repeat_explicit:
+                queue_repeat_copies(track, repeat_count, already_started=True)
+                await announce_repeat_request(ctx, repeat_count, repeat_loop, started=True)
             await append_debug_playback_event(debug_report, "playback started", stage="playing", force=True)
             logger.info(f"Playing now: {track['title']} ({track['id']})")
             if debug_report:
@@ -5635,7 +5921,8 @@ async def play(ctx, url: str, show_download_log: Optional[bool] = False):
             await ctx.followup.send("Failed to play the requested track.")
     else:
         # If something is already playing, add the requested song to the queue
-        if not await require_queue_room(ctx):
+        repeat_queue_count = 1 if repeat_loop else repeat_count
+        if not await require_queue_room_for_count(ctx, repeat_queue_count):
             return
         debug_report = await create_debug_playback_message(ctx, "play", force=bool(show_download_log))
         try:
@@ -5644,6 +5931,10 @@ async def play(ctx, url: str, show_download_log: Optional[bool] = False):
             track = tracks[0]
             update_suggestion(suggestion, track)
             if track.get("youtube_playlist_id"):
+                if repeat_explicit:
+                    await finish_debug_playback_message(debug_report, status="error", error="repeat requested for playlist URL")
+                    await ctx.followup.send("Repeat is only supported for single-track YouTube/search play requests.", ephemeral=True)
+                    return
                 await enqueue_youtube_playlist_tracks(ctx, tracks, "play")
                 if debug_report:
                     debug_report.stage = "queued"
@@ -5654,6 +5945,19 @@ async def play(ctx, url: str, show_download_log: Optional[bool] = False):
                 filesize_mb = track.get('filesize', 0) / (1024 * 1024)
                 await finish_debug_playback_message(debug_report, status="error", error="large download requires /play confirmation")
                 await ctx.followup.send(f"Track **{track['title']}** (~{filesize_mb:.1f} MB) is too large to queue without confirmation. Please use /play to confirm.")
+                return
+            if repeat_explicit:
+                if repeat_loop:
+                    repeated = clone_track_for_repeat(track, repeat_loop=True)
+                    queue.append(repeated)
+                    client.song_history.append(repeated)
+                    logger.info(f"Queued repeat-loop track: {track.get('title')} ({track.get('id')})")
+                else:
+                    queue_repeat_copies(track, repeat_count)
+                await announce_repeat_request(ctx, repeat_count, repeat_loop, started=False)
+                if debug_report:
+                    debug_report.stage = "queued"
+                    await finish_debug_playback_message(debug_report)
                 return
             await enqueue_track_with_playlist_prompt(ctx, track, "play")
             if debug_report:
@@ -7242,6 +7546,7 @@ async def status(ctx, view: str = "latest"):
 client.tree.add_command(playlist_group)
 client.tree.add_command(favorites_group)
 client.tree.add_command(usergroup_group)
+client.tree.add_command(config_group)
 
 @client.tree.error
 async def on_app_command_error(ctx, error):
