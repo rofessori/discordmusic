@@ -80,7 +80,7 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/skip` (non-admins vote)
   - `/pause` / `/resume`
   - `/stop` (non-admins vote)
-  - `/volume <1–100>` (non-admins vote)
+  - `/volume <1–50>` (non-admins vote)
   - `/now` (alias `/nytsoi`)
   - `/getqueue`
 
@@ -129,8 +129,8 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/playlist predownload <playlist>` (disabled unless `PLAYLIST_PREDOWNLOAD_ENABLED=true`)
   - `/autoleave <enabled> [delay_seconds]`
   - `/setdeletetime <seconds>`
-  - `/volume_session <1–100>`
-  - `/volume_default <1–100>`
+  - `/volume_session <1–50>`
+  - `/volume_default <1–50>`
   - `/togglelog [toggle|debug|admin|all|normal|off]`
   - `/toggledownload`
   - `/disablelinks`

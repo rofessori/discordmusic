@@ -1,4 +1,6 @@
 ## 2026-05-05
+- Added hidden admin voice placement with `/adminjoin`, allowing admins to connect or move the bot by voice channel name or by the voice channel a selected user is in.
+- Added a 50% ear-safety ceiling to normal volume paths (`/volume`, `/volume_session`, and `/volume_default`) plus an admin `/volume_force` override for intentional louder session volume or forced channel defaults.
 - Fixed regressions from the favorites/user-restriction addition: favorites playback no longer uses the generic playlist cache path unless favorites autocache is enabled, `nodownload` users do not trigger favorites cache work or reuse cached restored tracks, and `noqueueskip` users no longer get the active-playlist move-next prompt.
 - Added per-user favorites as special playlist metadata: the now-playing `⭐` reaction stores the current song in the reacting user's favorites and edits the now-playing message with a short favorite notice.
 - Added `/favorites play/list/privacy/status/cacheuser/cacheglobal`, `/play -favorites username`, and `/permissions`, plus admin `/usergroup add/remove/list` runtime restriction groups.

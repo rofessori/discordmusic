@@ -6716,10 +6716,10 @@ async def autoleave(ctx, enabled: bool, delay_seconds: Optional[int] = None):
         f"({getattr(ctx.user, 'id', 0)}) with delay={delay_seconds}s."
     )
 
-@app_commands.describe(level="Volume percent from 1 to 100")
+@app_commands.describe(level=f"Volume percent from 1 to {SAFE_VOLUME_MAX_LEVEL}")
 @client.tree.command()
 async def volume(ctx, level: int):
-    """Sets the audio playback volume (1-100)."""
+    """Sets the audio playback volume within the normal safety cap."""
     record_command(ctx)
     if not await require_not_restricted(ctx, "novolumechange", "change volume"):
         return
@@ -6729,7 +6729,7 @@ async def volume(ctx, level: int):
         return
     await request_voice_vote(ctx.user, ctx.channel, "volume", f"set volume to {level}%", value=level, ctx=ctx)
 
-@app_commands.describe(level="Volume percent from 1 to 100")
+@app_commands.describe(level=f"Volume percent from 1 to {SAFE_VOLUME_MAX_LEVEL}")
 @client.tree.command(name="volume_session")
 async def volume_session(ctx, level: int):
     """Admin-only volume override until the bot disconnects."""
@@ -6796,7 +6796,7 @@ async def volume_force(ctx, level: int, save_default: Optional[bool] = False):
     await ctx.response.send_message(f"Forced volume set to {level}%{suffix}.")
     logger.info(f"Forced volume set to {level}% by {user_display(ctx.user)} save_default={bool(save_default)}.")
 
-@app_commands.describe(level="Volume percent from 1 to 100")
+@app_commands.describe(level=f"Volume percent from 1 to {SAFE_VOLUME_MAX_LEVEL}")
 @client.tree.command(name="volume_default")
 async def volume_default(ctx, level: int):
     """Admin-only persistent volume default for the current voice channel."""

@@ -20,7 +20,7 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/stop` | vote to stop playback, clear the queue, and disconnect from voice. admins bypass the vote. |
 | `/pause` | pause the current playing audio. requires the same voice channel unless the user is an admin. |
 | `/resume` | resume paused audio. requires the same voice channel unless the user is an admin. |
-| `/volume <1-100>` | vote to set playback volume from 1 to 100 percent. admins bypass the vote. |
+| `/volume <1-50>` | vote to set playback volume from 1 to 50 percent. admins bypass the vote, but the normal command keeps the ear-safety cap. |
 | `/now` | show the currently playing song. |
 | `/nytsoi` | finnish alias for `/now`. |
 | `/getqueue` | list all songs requested in the current session and show whether they are playing, queued, played, or removed. |
@@ -97,8 +97,8 @@ Users in `noplaylistcreate` cannot use playlist creation/import commands.
 | `/togglelog [toggle\|debug\|admin\|all\|normal\|off]` | toggle verbose debug logging. `debug` enables editable `/play` download debug messages; `admin`/`all` turn on the larger user-space operation event trail. admin only. |
 | `/toggledownload` | switch between download-and-play mode and stream-only mode. admin only. |
 | `/disablelinks` | toggle whether queue-style displays are allowed to show youtube links. admin only. |
-| `/volume_session <1-100>` | hard-set this bot session's volume until disconnect. admin only. |
-| `/volume_default <1-100>` | save the current voice channel's default volume in `channel-volume-config.json`. admin only. |
+| `/volume_session <1-50>` | hard-set this bot session's volume until disconnect within the safety cap. admin only. |
+| `/volume_default <1-50>` | save the current voice channel's safe default volume in `channel-volume-config.json`. admin only. |
 | `/autoleave <enabled> [delay_seconds]` | when enabled, save the current song and queue and leave if the bot is alone in voice for the configured delay. admin only. |
 | `/setdeletetime <seconds>` | set how long downloaded song files wait after playback before delayed cleanup deletes them. admin only. |
 | `/reboot` | save the queue, ask for confirmation, disconnect, and exit the bot process. admin only. |
