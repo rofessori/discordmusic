@@ -1,12 +1,20 @@
 # Recent Updates
 
-Source: local git history on `playlist-new` since `2026-05-03`; separate push timestamps are not available in this checkout.
+Source: local git history and maintainer notes.
+
+## 2026-05-06
+
+- Added `/nowplaying` URL-free controls with cooldown, plus hidden playspeed controls and `/play speed`.
+- Added admin `/cachequeue` to cache the current song plus upcoming queue immediately, with `nodownload` skips and queue-blackbox audit entries.
+- Hardened `/play last` so it only restores recent auto-leave recovery files and rejects stale or legacy previous-session data.
+- Made the now-playing star a true favorites toggle: pressing it again removes the song from that user's favorites and logs the change.
+- Added `/status play` for detailed current playback diagnostics, with an admin `/config show` toggle to allow that view publicly.
 
 ## 2026-05-05
 
 - Added `/whatsnew`, backed by this file, so Discord users can see recent bot changes without reading git.
 - Added `/play show_download_log:true` and `/togglelog download` for styled download progress logs without forcing DEBUG logging.
-- Added admin `/config show`, `/userstats <user>`, and single-track `/play repeat` support.
+- Added admin `/config show`, `/userstats <user>`, and single-track `/play repeat`.
 - Added a 50% ear-safety ceiling for `/volume`, `/volume_session`, and `/volume_default`. Admins can intentionally go louder with `/volume_force`, and can save a forced channel default when needed.
 - Added hidden admin voice placement with `/adminjoin`: admins can move/connect the bot by voice-channel name or by the channel where a selected user currently is.
 - Added per-user favorites: star reaction, `/favorites`, and `/play -favorites username`.

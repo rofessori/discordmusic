@@ -1,5 +1,13 @@
+## 2026-05-06
+- Added `/nowplaying`, which reposts the active now-playing controls without the YouTube URL and uses an admin-configurable per-channel cooldown to prevent spam.
+- Added hidden playback speed controls: `/playspeed`, `/playspeedaccess`, the `playspeed` allow group, and `/play speed`/`--speed:<number>` for single-track requests from 0.1x to 2x.
+- Fixed stale `/play last` recovery behavior by requiring recent auto-leave metadata before restoring `last_session_queue.tmp.json`; rejected legacy/stale recovery files are logged to `queue-blackbox.json` and removed.
+- Added admin `/cachequeue [include_current]` to download/cache the current session's eligible current/upcoming tracks into root `cache/`, while skipping `nodownload` users and respecting the cache hard cap.
+- Changed the now-playing `⭐` reaction into a favorites toggle. A second press removes the same song from that user's favorites, edits the now-playing notice, and logs the removal.
+- Added `/status play` for detailed music stream diagnostics and a `/config show` toggle that can make only that playback status view public.
+
 ## 2026-05-05
-- Added admin `/config show`, a reaction-toggleable runtime config panel that edits itself when admins flip download mode, download logs, DEBUG logging, operation trail, queue links, auto-leave, favorites autocache, or playlist cache policy.
+- Added admin `/config show`, a reaction-toggleable runtime config panel that edits itself when admins flip download mode, download logs, DEBUG logging, operation trail, queue links, auto-leave, favorites autocache, playlist cache policy, playspeed allow-all, or nowplaying cooldown.
 - Added admin `/userstats <user>` for cross-checking a user's restriction groups, favorites, playlists, queued/session requests, recent commands, and recent music requests.
 - Added `/play` single-track repeat support through the `repeat` slash option or trailing `-repeat <count>`; counts above 20 become repeat-one loop instead of queuing more than 20 copies.
 - Decoupled Discord download logs from Python DEBUG logging: `/togglelog download` now enables editable `/play` progress logs while keeping normal INFO logging, `/play show_download_log:true` enables the log for one request, and the message now shows a styled progress bar when download totals are available.

@@ -38,6 +38,7 @@ downloads_file = os.path.join(BASE_DIR, "downloads.json")
 LAST_SESSION_QUEUE_FILE = os.path.join(BASE_DIR, "last_session_queue.tmp.json")
 PLAYLISTS_DIR = os.path.join(BASE_DIR, "playlists")
 PLAYLIST_BLACKBOX_FILE = os.path.join(BASE_DIR, "playlists-blackbox.json")
+QUEUE_BLACKBOX_FILE = os.path.join(BASE_DIR, "queue-blackbox.json")
 PLAYLIST_CACHE_POLICY_FILE = os.path.join(BASE_DIR, "playlist-cache-policy.json")
 CHANNEL_VOLUME_CONFIG_FILE = os.path.join(BASE_DIR, "channel-volume-config.json")
 USER_PERMISSIONS_FILE = os.path.join(BASE_DIR, "user-permissions.json")
@@ -69,12 +70,18 @@ MIN_VOLUME_LEVEL = 1
 MAX_VOLUME_LEVEL = 100
 SAFE_VOLUME_MAX_LEVEL = 50
 MAX_PLAY_REPEAT_COUNT = 20
+MIN_PLAYBACK_SPEED = 0.1
+MAX_PLAYBACK_SPEED = 2.0
+DEFAULT_NOWPLAYING_COOLDOWN_SECONDS = 30
+NOWPLAYING_COOLDOWN_MIN_SECONDS = 5
+NOWPLAYING_COOLDOWN_MAX_SECONDS = 300
+LAST_SESSION_RECOVERY_MAX_AGE_SECONDS = 1800
 VOICE_VOTE_TIMEOUT_SECONDS = 45
 REPEAT_TOGGLE_RECENT_SECONDS = 300
 REPEAT_TOGGLE_VOTE_THRESHOLD = 2
 HELP_EXPAND_REACTION = "📖"
 DEBUG_COLLAPSE_REACTION = "🧹"
-CONFIG_REACTIONS = ("🎧", "📥", "🔍", "🧭", "🔗", "🚪", "⭐", "🌐", "📦")
+CONFIG_REACTIONS = ("🎧", "📥", "🔍", "🧭", "🔗", "🚪", "⭐", "🌐", "📦", "🏃", "⏱️", "📊")
 TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 def env_flag(name: str, default: bool = False) -> bool:
@@ -265,10 +272,45 @@ if YTDLP_COOKIEFILE:
 ytdl = yt_dlp.YoutubeDL(ytdl_options)
 
 # Setup ffmpeg options for Discord audio
-ffmpeg_options = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
-}
+FFMPEG_RECONNECT_OPTIONS = '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'
+
+def normalize_playback_speed(value) -> tuple:
+    try:
+        speed = float(value)
+    except (TypeError, ValueError):
+        return None, f"Playback speed must be a number from {MIN_PLAYBACK_SPEED:g} to {MAX_PLAYBACK_SPEED:g}."
+    if speed < MIN_PLAYBACK_SPEED or speed > MAX_PLAYBACK_SPEED:
+        return None, f"Playback speed must be between {MIN_PLAYBACK_SPEED:g} and {MAX_PLAYBACK_SPEED:g}."
+    return round(speed, 3), None
+
+def atempo_filter_for_speed(speed: float) -> str:
+    speed = float(speed or 1.0)
+    factors = []
+    while speed < 0.5:
+        factors.append(0.5)
+        speed /= 0.5
+    while speed > 2.0:
+        factors.append(2.0)
+        speed /= 2.0
+    factors.append(speed)
+    return ",".join(f"atempo={factor:.6g}" for factor in factors)
+
+def ffmpeg_audio_options_for_speed(speed: Optional[float] = None, *, reconnect: bool = False) -> dict:
+    speed = float(speed or 1.0)
+    options = "-vn"
+    if abs(speed - 1.0) > 0.001:
+        options += f" -filter:a {atempo_filter_for_speed(speed)}"
+    result = {"options": options}
+    if reconnect:
+        result["before_options"] = FFMPEG_RECONNECT_OPTIONS
+    return result
+
+ffmpeg_options = ffmpeg_audio_options_for_speed(1.0, reconnect=True)
+
+def playback_speed_for_track(track: Optional[dict] = None) -> float:
+    raw_speed = (track or {}).get("playback_speed") if track else None
+    speed, _ = normalize_playback_speed(raw_speed if raw_speed is not None else getattr(client, "playback_speed", 1.0))
+    return speed or 1.0
 
 def get_env_value(*names, default=None, required=True):
     """Return the first populated environment variable from the provided names."""
@@ -324,7 +366,9 @@ USER_RESTRICTION_GROUPS = {
     "noqueueskip",
     "noskip",
     "norepeat",
+    "playspeed",
 }
+NOWPLAYING_COOLDOWN_CHOICES = (5, 10, 20, 30, 60, 120, 300)
 
 TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{6,}\.[A-Za-z0-9_\-]{27,}$")
 MIN_DISCORD_PY_VERSION = (2, 6, 0)
@@ -942,6 +986,9 @@ def user_groups(user) -> set:
 def user_has_group(user, group: str) -> bool:
     return str(group).lower() in user_groups(user)
 
+def can_use_play_speed(user) -> bool:
+    return is_user_admin(user) or getattr(client, "playspeed_allow_all", False) or user_has_group(user, "playspeed")
+
 def favorite_cache_allowed_for_user(user) -> bool:
     entry = user_permissions_entry(user)
     value = entry.get("favorite_cache_enabled")
@@ -1014,6 +1061,9 @@ def config_panel_message() -> str:
         f"⭐ favorites autocache: `{bool_status(bool(policy.get('enabled')))}`",
         f"🌐 force global playlist cache: `{bool_status(client.force_global_playlist_cache_mode)}`",
         f"📦 playlist cache default: `{client.playlist_cache_default_mode}`",
+        f"🏃 playspeed for everyone: `{bool_status(client.playspeed_allow_all)}`",
+        f"⏱️ nowplaying cooldown: `{client.nowplaying_cooldown_seconds}s`",
+        f"📊 public `/status play`: `{bool_status(client.status_play_public)}`",
         "",
         "_Config changes are runtime changes unless that setting already has a persistent policy file._",
     ]
@@ -1058,6 +1108,21 @@ async def apply_config_reaction(emoji: str) -> str:
         client.playlist_cache_default_mode = next_mode
         save_playlist_cache_policy()
         return f"playlist cache default is now `{next_mode}`."
+    if emoji == "🏃":
+        client.playspeed_allow_all = not client.playspeed_allow_all
+        save_runtime_permissions_config()
+        return f"playspeed for everyone is now `{bool_status(client.playspeed_allow_all)}`."
+    if emoji == "⏱️":
+        choices = list(NOWPLAYING_COOLDOWN_CHOICES)
+        current = client.nowplaying_cooldown_seconds
+        next_value = choices[(choices.index(current) + 1) % len(choices)] if current in choices else DEFAULT_NOWPLAYING_COOLDOWN_SECONDS
+        client.nowplaying_cooldown_seconds = next_value
+        save_runtime_permissions_config()
+        return f"nowplaying cooldown is now `{next_value}s`."
+    if emoji == "📊":
+        client.status_play_public = not client.status_play_public
+        save_runtime_permissions_config()
+        return f"`/status play` public access is now `{bool_status(client.status_play_public)}`."
     return "unknown config reaction."
 
 async def handle_config_reaction(reaction, user) -> bool:
@@ -1181,6 +1246,11 @@ def load_channel_volume_config() -> dict:
 def load_user_permissions_config() -> dict:
     config = {
         "users": {},
+        "runtime": {
+            "playspeed_allow_all": False,
+            "nowplaying_cooldown_seconds": DEFAULT_NOWPLAYING_COOLDOWN_SECONDS,
+            "status_play_public": False,
+        },
         "favorites_cache": {
             "enabled": False,
             "max_bytes": FAVORITES_CACHE_DEFAULT_MAX_BYTES,
@@ -1213,6 +1283,18 @@ def load_user_permissions_config() -> dict:
                     "updated_by_user_id": entry.get("updated_by_user_id"),
                     "updated_by_discord_name": entry.get("updated_by_discord_name"),
                 }
+        runtime = loaded.get("runtime", {})
+        if isinstance(runtime, dict):
+            config["runtime"]["playspeed_allow_all"] = bool(runtime.get("playspeed_allow_all", False))
+            config["runtime"]["status_play_public"] = bool(runtime.get("status_play_public", False))
+            try:
+                cooldown = int(runtime.get("nowplaying_cooldown_seconds", DEFAULT_NOWPLAYING_COOLDOWN_SECONDS))
+            except (TypeError, ValueError):
+                cooldown = DEFAULT_NOWPLAYING_COOLDOWN_SECONDS
+            config["runtime"]["nowplaying_cooldown_seconds"] = max(
+                NOWPLAYING_COOLDOWN_MIN_SECONDS,
+                min(cooldown, NOWPLAYING_COOLDOWN_MAX_SECONDS),
+            )
         cache = loaded.get("favorites_cache", {})
         if isinstance(cache, dict):
             config["favorites_cache"]["enabled"] = bool(cache.get("enabled", False))
@@ -1249,6 +1331,20 @@ def save_channel_volume_config():
 def save_user_permissions_config():
     write_json_atomic(USER_PERMISSIONS_FILE, client.user_permissions_config)
 
+def runtime_permissions_config() -> dict:
+    runtime = client.user_permissions_config.setdefault("runtime", {})
+    runtime.setdefault("playspeed_allow_all", False)
+    runtime.setdefault("nowplaying_cooldown_seconds", DEFAULT_NOWPLAYING_COOLDOWN_SECONDS)
+    runtime.setdefault("status_play_public", False)
+    return runtime
+
+def save_runtime_permissions_config():
+    runtime = runtime_permissions_config()
+    runtime["playspeed_allow_all"] = bool(getattr(client, "playspeed_allow_all", False))
+    runtime["nowplaying_cooldown_seconds"] = int(getattr(client, "nowplaying_cooldown_seconds", DEFAULT_NOWPLAYING_COOLDOWN_SECONDS))
+    runtime["status_play_public"] = bool(getattr(client, "status_play_public", False))
+    save_user_permissions_config()
+
 class YTDLSource(discord.PCMVolumeTransformer):
     """
     Class for creating an audio source from YouTube using yt_dlp and ffmpeg.
@@ -1260,7 +1356,7 @@ class YTDLSource(discord.PCMVolumeTransformer):
         self.url = data.get('url')
 
     @classmethod
-    async def from_url(cls, url, *, loop=None, stream=False):
+    async def from_url(cls, url, *, loop=None, stream=False, speed: Optional[float] = None):
         """Gets an audio source from a YouTube URL (or search query)."""
         url, _ = normalize_youtube_query(url)
         loop = loop or asyncio.get_event_loop()
@@ -1273,7 +1369,8 @@ class YTDLSource(discord.PCMVolumeTransformer):
             return None, url
         # If stream=True, use the direct URL; otherwise use downloaded filename
         filename = data['url'] if stream else ytdl.prepare_filename(data)
-        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data, volume=client.volume), data.get('webpage_url', url)
+        ffmpeg_args = ffmpeg_audio_options_for_speed(speed or 1.0, reconnect=True)
+        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_args), data=data, volume=client.volume), data.get('webpage_url', url)
 
 class Client(discord.Client):
     def __init__(self, *, intents: discord.Intents):
@@ -1289,6 +1386,7 @@ class Client(discord.Client):
         self.last_track_info = None            # last played track's info (dict)
         self.current_track_message = None      # discord.Message for the "Now Playing" announcement
         self.current_track_message_show_queue = False
+        self.current_track_message_show_url = True
         # Admin-controllable flags
         self.download_mode = True              # True = download-and-play, False = stream-only
         self.log_verbose = False               # True = DEBUG logging on
@@ -1299,6 +1397,16 @@ class Client(discord.Client):
         self.force_global_playlist_cache_mode = playlist_cache_policy["force_global"]
         self.channel_volume_config = load_channel_volume_config()
         self.user_permissions_config = load_user_permissions_config()
+        runtime_config = self.user_permissions_config.get("runtime", {})
+        self.playspeed_allow_all = bool(runtime_config.get("playspeed_allow_all", False))
+        self.status_play_public = bool(runtime_config.get("status_play_public", False))
+        self.playback_speed = 1.0
+        self.nowplaying_cooldown_seconds = int(
+            runtime_config.get("nowplaying_cooldown_seconds", DEFAULT_NOWPLAYING_COOLDOWN_SECONDS)
+        )
+        self.nowplaying_last_used = {}
+        self.boot_id = secrets.token_urlsafe(8)
+        self.booted_at = time.time()
         self.download_delete_delay_seconds = DEFAULT_DOWNLOAD_DELETE_DELAY_SECONDS
         self.auto_leave_enabled = False
         self.auto_leave_delay_seconds = AUTO_LEAVE_DEFAULT_DELAY_SECONDS
@@ -1326,6 +1434,7 @@ class Client(discord.Client):
         self.repeat_track_id = None
         self.repeat_disable_history = []
         self.current_track_favorite_notice = ""
+        self.current_track_started_at = None
         # File deletion task tracking
         self.deletion_tasks = {}              # map video_id -> asyncio.Future
         # Played tracks tracking
@@ -1361,14 +1470,18 @@ def build_runtime_status():
         f"- queue length: `{len(queue)}`",
         f"- song history entries: `{len(client.song_history)}`",
         f"- currently playing: **{discord.utils.escape_markdown(str(current))}**",
+        f"- boot id: `{client.boot_id}`",
         f"- volume: `{int(round(client.volume * 100))}%` (`{'session' if client.session_volume_locked else 'channel/default'}`)",
+        f"- playback speed default: `{client.playback_speed:g}x` (`{'everyone' if client.playspeed_allow_all else 'admin/group'}`)",
         f"- log level: `{logging.getLevelName(logger.level)}`",
         f"- download log messages: `{'enabled' if client.download_debug_messages else 'disabled'}`",
         f"- admin operation messages: `{'enabled' if client.user_operation_debug_messages else 'disabled'}`",
         f"- repeat current track: `{'enabled' if client.repeat_current_track else 'disabled'}`",
         f"- queue links: `{'disabled' if client.queue_links_disabled else 'enabled'}`",
+        f"- public /status play: `{'enabled' if client.status_play_public else 'disabled'}`",
         f"- song delete delay: `{client.download_delete_delay_seconds}s`",
         f"- auto leave: `{'enabled' if client.auto_leave_enabled else 'disabled'}` (`{client.auto_leave_delay_seconds}s`)",
+        f"- nowplaying cooldown: `{client.nowplaying_cooldown_seconds}s`",
         f"- cache: `{cache_mb:.1f} MB / {cache_limit_mb} MB`",
         f"- playlist cache default: `{client.playlist_cache_default_mode}`",
         f"- force global playlist cache: `{client.force_global_playlist_cache_mode}`",
@@ -1384,6 +1497,78 @@ def build_runtime_status():
         lines.append("**outstanding warnings**")
         lines.extend(f"- {warn}" for warn in diag.warnings)
     return "\n".join(lines)
+
+def format_seconds(value) -> str:
+    try:
+        seconds = int(float(value or 0))
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds <= 0:
+        return "unknown"
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+def metadata_value(track: dict, *keys, default="unknown"):
+    for key in keys:
+        value = track.get(key)
+        if value not in (None, "", 0):
+            return value
+    return default
+
+def build_playback_status() -> str:
+    track = client.current_track_info or {}
+    voice = client.current_voice_channel
+    voice_channel = getattr(voice, "channel", None)
+    cached_file = cached_file_for_track(track) if track else None
+    duration = track.get("duration") or 0
+    elapsed = 0
+    if client.current_track_started_at:
+        elapsed = max(0, int(time.time() - client.current_track_started_at))
+    lines = ["**playback status**"]
+    if not track:
+        lines.append("- state: `idle`")
+        lines.append(f"- queue length: `{len(queue)}`")
+        lines.append(f"- cache use: `{human_bytes(cache_total_bytes())} / {human_bytes(CACHE_HARD_LIMIT_BYTES)}`")
+        return "\n".join(lines)
+    lines.extend([
+        f"- state: `{'playing' if client.currently_playing else 'not playing'}`",
+        f"- title: **{discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))}**",
+        f"- video id: `{discord.utils.escape_markdown(str(track.get('id') or '-'))}`",
+    ])
+    if not client.queue_links_disabled and track.get("webpage_url"):
+        lines.append(f"- url: {track.get('webpage_url')}")
+    lines.extend([
+        f"- voice channel: `{discord.utils.escape_markdown(str(getattr(voice_channel, 'name', 'none')))}`",
+        f"- paused: `{bool(voice and voice.is_paused())}`",
+        f"- queue length: `{len(queue)}`",
+        f"- playlist context: `{discord.utils.escape_markdown(str(track.get('playlist_name') or 'none'))}`",
+        f"- duration: `{format_seconds(duration)}`",
+        f"- estimated position: `{format_seconds(elapsed)}`",
+        f"- volume: `{int(round(client.volume * 100))}%`",
+        f"- playback speed: `{playback_speed_for_track(track):g}x`",
+        f"- repeat-one: `{bool(client.repeat_current_track and client.repeat_track_id == str(track.get('id') or ''))}`",
+        f"- cache mode: `{discord.utils.escape_markdown(str(track.get('cache_mode') or 'streaming'))}`",
+        f"- cached file: `{metadata_path_for_cache_file(cached_file) if cached_file else 'none'}`",
+        f"- file extension: `{discord.utils.escape_markdown(str(track.get('ext') or 'unknown'))}`",
+        f"- file size: `{human_bytes(track.get('filesize') or cache_file_size(cached_file) if cached_file else track.get('filesize'))}`",
+        f"- yt-dlp format id: `{discord.utils.escape_markdown(str(metadata_value(track, 'format_id')))}`",
+        f"- audio codec: `{discord.utils.escape_markdown(str(metadata_value(track, 'acodec')))}`",
+        f"- container/format: `{discord.utils.escape_markdown(str(metadata_value(track, 'format', 'format_note')))}`",
+        f"- audio bitrate: `{metadata_value(track, 'abr')} kbps`",
+        f"- total bitrate: `{metadata_value(track, 'tbr')} kbps`",
+        f"- sample rate: `{metadata_value(track, 'asr')} Hz`",
+        f"- channels: `{metadata_value(track, 'audio_channels')}`",
+        f"- dynamic range: `{discord.utils.escape_markdown(str(metadata_value(track, 'dynamic_range')))}`",
+        f"- bpm: `{metadata_value(track, 'bpm')}`",
+        f"- uploader/channel: `{discord.utils.escape_markdown(str(metadata_value(track, 'uploader', 'channel')))}`",
+        f"- live stream: `{bool(track.get('is_live'))}`",
+        f"- age limit: `{metadata_value(track, 'age_limit')}`",
+        f"- cache use: `{human_bytes(cache_total_bytes())} / {human_bytes(CACHE_HARD_LIMIT_BYTES)}`",
+    ])
+    return "\n".join(lines)[:DISCORD_MESSAGE_SAFE_LIMIT]
 
 async def safe_interaction_send(ctx, message: str, *, ephemeral: bool = False):
     """Send an interaction response without letting expired tokens mask root errors."""
@@ -1609,6 +1794,23 @@ def parse_play_repeat_request(query: str, repeat: Optional[int]) -> tuple:
     requested = max(1, requested)
     return text, min(requested, MAX_PLAY_REPEAT_COUNT), requested > MAX_PLAY_REPEAT_COUNT, True
 
+def parse_play_speed_request(query: str, speed: Optional[float]) -> tuple:
+    text = str(query or "").strip()
+    explicit = speed is not None
+    requested = speed
+    match = re.search(r"(?:^|\s)--?speed(?::|=|\s+)([0-9]+(?:\.[0-9]+)?)\s*$", text, flags=re.IGNORECASE)
+    if match:
+        explicit = True
+        requested = match.group(1)
+        text = text[:match.start()].strip()
+    if not explicit:
+        return text, 1.0, False, None
+    parsed, error = normalize_playback_speed(requested)
+    return text, parsed, True, error
+
+def normal_speed_message() -> str:
+    return "Speed `1` is normal time. Multiplying time by one changes nothing. Bold choice."
+
 def clone_track_for_repeat(track: dict, *, repeat_loop: bool = False) -> dict:
     clone = dict(track)
     if repeat_loop:
@@ -1637,6 +1839,12 @@ async def announce_repeat_request(ctx, repeat_count: int, repeat_loop: bool, *, 
     elif repeat_count > 1:
         action = "started and repeat copies were queued" if started else "queued"
         await ctx.followup.send(f"Repeat {action}: this track will play `{repeat_count}` time(s).")
+
+async def maybe_send_speed_notice(ctx, speed: float, explicit: bool):
+    if not explicit:
+        return
+    if abs(float(speed or 1.0) - 1.0) <= 0.001:
+        await ctx.followup.send(normal_speed_message())
 
 def track_requested_by_user(track: dict, user) -> bool:
     return user_id_value(track.get("requested_by_user_id")) == user_id_value(user)
@@ -1678,6 +1886,7 @@ def user_stats_message(user) -> str:
         f"**user stats: {discord.utils.escape_markdown(user_display(user))}**",
         f"- user id: `{uid}`",
         f"- permissions: {permissions_summary_for(user)}",
+        f"- playspeed access: `{'yes' if can_use_play_speed(user) else 'no'}`",
         f"- favorites: `{len(favorite_tracks)}` saved, `{favorite_visibility}` visibility, cache `{'eligible' if cache_allowed else 'disabled'}`",
         f"- playlists owned: `{len(owned)}` ({owned_names})",
         f"- playlists managed: `{len(managed)}` ({managed_names})",
@@ -1717,6 +1926,8 @@ def format_command_record(record: CommandRecord) -> str:
 
 def build_status_message(view: str = "latest") -> str:
     view = (view or "latest").lower()
+    if view in {"play", "playback", "musicstream", "stream"}:
+        return build_playback_status()
     if view == "session":
         lines = ["**music suggestion session history**"]
         if not client.suggestion_history:
@@ -1949,6 +2160,7 @@ async def perform_stop_action() -> str:
         await voice.disconnect()
         client.current_voice_channel = None
         client.currently_playing = False
+        client.current_track_started_at = None
         reset_session_volume("voice disconnect")
         return "Vittuun täältä keilahallista"
     logger.info("Stop requested while bot was not in a voice channel.")
@@ -1990,7 +2202,11 @@ async def refresh_current_track_message():
     if not message or not track:
         return
     try:
-        await message.edit(content=format_now_playing(track, show_queue=client.current_track_message_show_queue))
+        await message.edit(content=format_now_playing(
+            track,
+            show_queue=client.current_track_message_show_queue,
+            show_url=client.current_track_message_show_url,
+        ))
     except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
         logger.warning(f"Failed to refresh now-playing message: {exc}")
 
@@ -2260,6 +2476,42 @@ def current_playback_recovery_tracks() -> list:
     tracks.extend(dict(track) for track in queue)
     return tracks
 
+def queue_blackbox_track_entry(track: dict) -> dict:
+    return {
+        "id": str(track.get("id") or ""),
+        "title": str(track.get("title") or "Unknown title"),
+        "webpage_url": str(track.get("webpage_url") or ""),
+        "requested_by_user_id": track.get("requested_by_user_id"),
+        "playlist_id": track.get("playlist_id"),
+        "playlist_name": track.get("playlist_name"),
+    }
+
+def append_queue_blackbox_event(action: str, *, tracks: Optional[list] = None, actor=None, details: Optional[dict] = None):
+    entry = {
+        "timestamp": time.time(),
+        "action": action,
+        "boot_id": getattr(client, "boot_id", None),
+        "actor_user_id": user_id_value(actor) if actor else None,
+        "actor_discord_name": user_display(actor) if actor else None,
+        "current_track": queue_blackbox_track_entry(client.current_track_info) if client.current_track_info else None,
+        "queue_count": len(queue),
+        "tracks": [queue_blackbox_track_entry(track) for track in (tracks or [])],
+        "details": details or {},
+    }
+    try:
+        events = []
+        if os.path.isfile(QUEUE_BLACKBOX_FILE):
+            with open(QUEUE_BLACKBOX_FILE, "r") as f:
+                loaded = json.load(f)
+            if not isinstance(loaded, list):
+                logger.error("Queue blackbox file is not a JSON list; preserving it without appending.")
+                return
+            events = loaded
+        events.append(entry)
+        write_json_atomic(QUEUE_BLACKBOX_FILE, events)
+    except Exception as exc:
+        logger.error(f"Failed to append queue blackbox event: {exc}")
+
 def save_last_session_recovery(voice_channel=None) -> int:
     tracks = current_playback_recovery_tracks()
     if not tracks:
@@ -2269,29 +2521,60 @@ def save_last_session_recovery(voice_channel=None) -> int:
         text_channel = getattr(client.current_track_message, "channel", None)
     payload = {
         "timestamp": time.time(),
+        "reason": "auto_leave",
+        "boot_id": getattr(client, "boot_id", None),
         "voice_channel_id": getattr(voice_channel, "id", None),
         "voice_channel_name": getattr(voice_channel, "name", None),
         "text_channel_id": getattr(text_channel, "id", None),
         "tracks": tracks,
     }
     write_json_atomic(LAST_SESSION_QUEUE_FILE, payload)
+    append_queue_blackbox_event("last-session-saved", tracks=tracks, details={
+        "reason": "auto_leave",
+        "voice_channel_id": payload["voice_channel_id"],
+        "text_channel_id": payload["text_channel_id"],
+    })
     logger.info(f"Saved last session recovery with {len(tracks)} track(s) to {LAST_SESSION_QUEUE_FILE}.")
     return len(tracks)
 
-def load_last_session_recovery() -> Optional[dict]:
+def validate_last_session_recovery_payload(payload: dict) -> Optional[str]:
+    if payload.get("reason") != "auto_leave":
+        return "saved session is legacy or was not created by auto-leave"
+    try:
+        timestamp = float(payload.get("timestamp") or 0)
+    except (TypeError, ValueError):
+        timestamp = 0
+    if timestamp <= 0:
+        return "saved session has no valid timestamp"
+    age = time.time() - timestamp
+    if age > LAST_SESSION_RECOVERY_MAX_AGE_SECONDS:
+        return f"saved session is too old ({int(age)}s > {LAST_SESSION_RECOVERY_MAX_AGE_SECONDS}s)"
+    tracks = payload.get("tracks", [])
+    if not isinstance(tracks, list) or not tracks:
+        return "saved session has no tracks"
+    return None
+
+def load_last_session_recovery() -> tuple:
     if not os.path.isfile(LAST_SESSION_QUEUE_FILE):
-        return None
+        return None, "no saved last session file"
     try:
         with open(LAST_SESSION_QUEUE_FILE, "r") as f:
             payload = json.load(f)
+        if not isinstance(payload, dict):
+            return None, "saved session file is not a JSON object"
         tracks = payload.get("tracks", [])
         if not isinstance(tracks, list) or not tracks:
-            return None
+            return None, "saved session has no tracks"
+        reason = validate_last_session_recovery_payload(payload)
+        if reason:
+            append_queue_blackbox_event("last-session-rejected", tracks=tracks if isinstance(tracks, list) else [], details={"reason": reason})
+            remove_last_session_recovery()
+            return None, reason
         payload["tracks"] = tracks
-        return payload
+        return payload, None
     except Exception as exc:
         logger.error(f"Failed to load last session recovery file: {exc}")
-        return None
+        return None, str(exc)
 
 def remove_last_session_recovery():
     try:
@@ -2310,26 +2593,29 @@ async def play_saved_track_now(voice, channel, track: dict):
     requester = track.get("requested_by_user_id")
     await resolve_track_for_playback(track, requested_by=requester)
     cached_file = None if user_has_group(requester, "nodownload") else cached_file_for_track(track)
+    speed = playback_speed_for_track(track)
+    track["playback_speed"] = speed
     if cached_file:
         track["file"] = cached_file
-        source = discord.FFmpegPCMAudio(cached_file, options='-vn')
+        source = discord.FFmpegPCMAudio(cached_file, **ffmpeg_audio_options_for_speed(speed))
         player = discord.PCMVolumeTransformer(source, volume=client.volume)
     else:
-        player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True)
+        player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True, speed=speed)
     voice.play(player, after=lambda e, vid=track.get('id'): after_played_track(e, vid, channel))
     client.current_track_id = track.get('id')
     client.currently_playing = True
     client.last_track_info = client.current_track_info
     client.current_track_info = track
+    client.current_track_started_at = time.time()
     sync_repeat_for_started_track(track)
     if track not in client.song_history:
         client.song_history.append(track)
     await publish_now_playing(channel, track)
 
 async def restore_last_session(ctx) -> bool:
-    payload = load_last_session_recovery()
+    payload, reason = load_last_session_recovery()
     if not payload:
-        await ctx.followup.send("No saved last session is available.")
+        await ctx.followup.send(f"No valid saved last session is available. ({reason})")
         return False
     if client.currently_playing:
         await ctx.followup.send("Something is already playing. Stop playback before using `/play:last`.")
@@ -2367,6 +2653,10 @@ async def restore_last_session(ctx) -> bool:
         await ctx.followup.send("Failed to restore the saved last session.")
         return False
     remove_last_session_recovery()
+    append_queue_blackbox_event("last-session-restored", tracks=tracks, actor=ctx.user, details={
+        "saved_boot_id": payload.get("boot_id"),
+        "saved_at": payload.get("timestamp"),
+    })
     await ctx.followup.send(f"Restored last session with {len(tracks)} track(s).")
     logger.info(f"Restored last session through /play:last with {len(tracks)} track(s).")
     return True
@@ -2395,7 +2685,9 @@ async def perform_auto_leave_if_still_alone(voice_channel):
             client.currently_playing = False
             client.current_track_id = None
             client.current_track_info = None
+            client.current_track_started_at = None
             client.current_track_message_show_queue = False
+            client.current_track_message_show_url = True
             await voice.disconnect()
             reset_session_volume("auto-leave")
             if notify_channel and saved_count:
@@ -3018,6 +3310,10 @@ def favorite_added_notice(user, *, duplicate: bool = False) -> str:
         return f"{FAVORITE_REACTION} {name} already had this in their favorites."
     return f"{FAVORITE_REACTION} {name} added this to their favorites."
 
+def favorite_removed_notice(user) -> str:
+    name = discord.utils.escape_markdown(user_display(user))
+    return f"{FAVORITE_REACTION} {name} removed this from their favorites."
+
 async def add_current_track_to_favorites(user) -> tuple:
     track = client.current_track_info
     if not track:
@@ -3029,7 +3325,22 @@ async def add_current_track_to_favorites(user) -> tuple:
     candidate = playlist_track_from_track(track, user)
     identity = playlist_track_identity(candidate)
     if identity and identity in identities:
-        return False, favorite_added_notice(user, duplicate=True)
+        original_count = len(playlist.get("tracks", []))
+        playlist["tracks"] = [
+            saved for saved in playlist.get("tracks", [])
+            if playlist_track_identity(saved) != identity
+        ]
+        playlist["updated_at"] = time.time()
+        playlist["owner_discord_name"] = user_display(user)
+        playlist["name"] = f"{user_display(user)} favorites"
+        save_playlist(playlist)
+        append_playlist_blackbox_event("favorite-removed", playlist, user)
+        logger.info(
+            f"Favorite removed: user={user_display(user)} ({user_id_value(user)}) "
+            f"title={candidate.get('title')} id={candidate.get('id')} "
+            f"count={original_count}->{len(playlist.get('tracks', []))}"
+        )
+        return True, favorite_removed_notice(user)
     if len(playlist.get("tracks", [])) >= favorites_track_limit():
         return False, f"Favorites can store up to {favorites_track_limit()} song(s). Remove one before adding more."
     playlist.setdefault("tracks", []).append(candidate)
@@ -3037,6 +3348,7 @@ async def add_current_track_to_favorites(user) -> tuple:
     playlist["owner_discord_name"] = user_display(user)
     playlist["name"] = f"{user_display(user)} favorites"
     save_playlist(playlist)
+    append_playlist_blackbox_event("favorite-added", playlist, user)
     logger.info(
         f"Favorite added: user={user_display(user)} ({user_id_value(user)}) "
         f"title={candidate.get('title')} id={candidate.get('id')}"
@@ -3321,12 +3633,17 @@ def format_queue_section(*, max_chars=None, show_links=True) -> str:
         lines.extend(entry)
     return "\n".join(lines)
 
-def format_now_playing(track: dict, *, show_queue: bool = False) -> str:
+def format_now_playing(track: dict, *, show_queue: bool = False, show_url: bool = True) -> str:
     title, url = track_display_parts(track)
-    now_playing = f"🎵 Now playing: **{title}**\n*{url}*"
+    now_playing = f"🎵 Now playing: **{title}**"
+    if show_url:
+        now_playing += f"\n*{url}*"
     if track.get("playlist_name"):
         playlist_name = discord.utils.escape_markdown(str(track.get("playlist_name")))
         now_playing += f"\n_from playlist: **{playlist_name}**_"
+    speed = playback_speed_for_track(track)
+    if abs(speed - 1.0) > 0.001:
+        now_playing += f"\n_speed: **{speed:g}x**_"
     if client.repeat_current_track and client.repeat_track_id == str(track.get("id") or ""):
         now_playing += "\n_repeat: **on**_"
     if client.current_track_favorite_notice:
@@ -3336,7 +3653,7 @@ def format_now_playing(track: dict, *, show_queue: bool = False) -> str:
     divider = "━━━━━━━━━━━━"
     fixed_content = f"\n\n{divider}\n\n{now_playing}"
     queue_chars = DISCORD_MESSAGE_SAFE_LIMIT - len(fixed_content)
-    return f"{format_queue_section(max_chars=queue_chars)}{fixed_content}"
+    return f"{format_queue_section(max_chars=queue_chars, show_links=show_url)}{fixed_content}"
 
 async def has_newer_message(channel, message) -> bool:
     try:
@@ -3380,13 +3697,14 @@ async def publish_now_playing(channel, track: dict, *, send_message=None, acknow
     """Edit the active now-playing message when it is still the latest message."""
     old_message = client.current_track_message
     client.current_track_favorite_notice = ""
+    client.current_track_message_show_url = True
     same_channel = old_message and getattr(getattr(old_message, "channel", None), "id", None) == channel.id
     newer_message_exists = await has_newer_message(channel, old_message) if same_channel else None
     can_edit = same_channel and not newer_message_exists
 
     if can_edit:
         try:
-            content = format_now_playing(track, show_queue=client.current_track_message_show_queue)
+            content = format_now_playing(track, show_queue=client.current_track_message_show_queue, show_url=True)
             await old_message.edit(content=content)
             await add_control_reactions(old_message)
             if acknowledge:
@@ -3413,7 +3731,8 @@ async def publish_now_playing(channel, track: dict, *, send_message=None, acknow
         )
 
     client.current_track_message_show_queue = False
-    content = format_now_playing(track, show_queue=False)
+    client.current_track_message_show_url = True
+    content = format_now_playing(track, show_queue=False, show_url=True)
     if send_message:
         new_message = await send_message(content, wait=True)
     else:
@@ -3428,6 +3747,50 @@ async def publish_now_playing(channel, track: dict, *, send_message=None, acknow
     )
     return new_message
 
+def nowplaying_cooldown_key(ctx) -> tuple:
+    guild_id = getattr(getattr(ctx, "guild", None), "id", 0) or 0
+    channel_id = getattr(getattr(ctx, "channel", None), "id", 0) or 0
+    return (guild_id, channel_id)
+
+async def require_nowplaying_cooldown(ctx) -> bool:
+    if is_user_admin(ctx.user):
+        return True
+    key = nowplaying_cooldown_key(ctx)
+    now = time.time()
+    last_used = client.nowplaying_last_used.get(key, 0)
+    remaining = int(math.ceil(client.nowplaying_cooldown_seconds - (now - last_used)))
+    if remaining > 0:
+        await ctx.response.send_message(
+            f"`/nowplaying` is on cooldown for `{remaining}s` in this channel.",
+            ephemeral=True,
+        )
+        return False
+    client.nowplaying_last_used[key] = now
+    return True
+
+async def send_nowplaying_controls(ctx):
+    if not client.currently_playing or not client.current_track_info:
+        await ctx.response.send_message("No song is currently playing.", ephemeral=True)
+        return
+    if not await require_voice_control(ctx, "show now-playing controls"):
+        return
+    if not await require_nowplaying_cooldown(ctx):
+        return
+    old_message = client.current_track_message
+    content = format_now_playing(client.current_track_info, show_queue=False, show_url=False)
+    await ctx.response.send_message(content)
+    message = await ctx.original_response()
+    client.current_track_message = message
+    client.current_track_message_show_queue = False
+    client.current_track_message_show_url = False
+    await add_control_reactions(message)
+    if old_message and old_message.id != message.id:
+        await remove_control_reactions(old_message)
+    logger.info(
+        f"Sent user-requested nowplaying controls {message.id} in channel {getattr(ctx.channel, 'id', 0)} "
+        f"for {client.current_track_info.get('title', 'Unknown title')}."
+    )
+
 async def toggle_now_playing_queue(message):
     if not client.current_track_info:
         logger.info("Queue reaction ignored because no track is currently tracked.")
@@ -3438,6 +3801,7 @@ async def toggle_now_playing_queue(message):
             content=format_now_playing(
                 client.current_track_info,
                 show_queue=client.current_track_message_show_queue,
+                show_url=client.current_track_message_show_url,
             )
         )
         state = "shown" if client.current_track_message_show_queue else "hidden"
@@ -3459,6 +3823,7 @@ async def handle_favorite_reaction(user, message):
             content=format_now_playing(
                 client.current_track_info,
                 show_queue=client.current_track_message_show_queue,
+                show_url=client.current_track_message_show_url,
             )
         )
         logger.info(f"Updated now-playing favorite notice on message {message.id}: {notice}")
@@ -3512,6 +3877,7 @@ def compact_help_message() -> str:
         "**music bot help**",
         "/play <youtube url, playlist url, or search> [repeat] - play or queue music",
         "/play:last - restore last auto-saved session",
+        "/nowplaying - repost controls without the video URL",
         "/playtop <query or playlist url> - add next",
         "/enqueue <query or playlist url> (alias /q) - add to queue",
         "/queue - show queue",
@@ -3535,7 +3901,7 @@ def expanded_help_message() -> str:
         "/queuefirst <position, playlist URL, or playlist:name> (alias: /qfirst) - Move a song or playlist to play next.",
         f"/skip, /pause, /resume, /stop, /volume <1-{SAFE_VOLUME_MAX_LEVEL}> - Playback controls; skip/stop/volume use votes for non-admins.",
         f"Now-playing reactions: {FAVORITE_REACTION} favorite, ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat-one, {QUEUE_REACTION} queue.",
-        "/now (alias: /nytsoi), /getqueue - Current/session info.",
+        "/nowplaying, /now (alias: /nytsoi), /getqueue - Current/session info.",
         "/favorites play [user], /favorites list [user], /favorites privacy <public|private>, /favorites status.",
         "/whatsnew - Show recent bot updates from RECENT_UPDATES.md.",
         "",
@@ -3560,7 +3926,7 @@ def expanded_help_message() -> str:
         "**admin / other**",
         "/favorites cacheglobal, /favorites cacheuser, /usergroup add/remove/list, /permissions",
         "/config show, /userstats <user> - Admin debug panels.",
-        "/clear_queue, /restorequeue, /purgequeue, /purgecache, /cachestatus, /autoleave, /setdeletetime, /volume_session, /volume_default, /volume_force, /togglelog, /toggledownload, /disablelinks, /reboot, /status",
+        "/clear_queue, /restorequeue, /cachequeue, /purgequeue, /purgecache, /cachestatus, /autoleave, /setdeletetime, /volume_session, /volume_default, /volume_force, /togglelog, /toggledownload, /disablelinks, /reboot, /status",
         "/backup_teekkari_quotes, /random_quote",
         "",
         "Detailed help: `/help command:play`, `/help command:nytsoi`, `/help command:playlist new`.",
@@ -3785,11 +4151,11 @@ def command_help_pages() -> dict:
         },
         "play": {
             "purpose": "play or queue YouTube audio",
-            "synopsis": ["/play <youtube url or search> [repeat] [show_download_log]", "/play <search> -repeat <count>", "/play <youtube playlist url>", "/play playlist:<name>", "/play -favorites <username>", "/play last"],
+            "synopsis": ["/play <youtube url or search> [repeat] [speed] [show_download_log]", "/play <search> -repeat <count>", "/play <search> --speed:<number>", "/play <youtube playlist url>", "/play playlist:<name>", "/play -favorites <username>", "/play last"],
             "description": "Resolves YouTube URLs, YouTube playlist URLs, favorites, or search text with yt-dlp. If nothing is playing, a single track or the selected playlist/favorites entry starts immediately; otherwise the result is queued. Playlist names can start or queue saved playlists.",
-            "arguments": ["<query> - YouTube video URL, YouTube playlist URL, YouTube search text, playlist:name, -favorites username, or last/play:last.", f"repeat - optional repeat count for single-track requests; values above {MAX_PLAY_REPEAT_COUNT} turn into repeat-one loop.", "show_download_log - true shows an editable sanitized download progress log for this request."],
-            "examples": ["/play viidestoista yö", "/play viidestoista yö -repeat 3", "/play https://youtube.com/watch?v=... repeat:4 show_download_log:true", "/play https://youtube.com/playlist?list=...", "/play playlist:Roadtrip", "/play -favorites jantso", "/play last"],
-            "notes": ["Raw non-YouTube URLs are rejected.", f"YouTube playlist URLs are capped at {MAX_PLAYLIST_TRACKS} track(s) and respect the queue length limit for non-admins.", "A watch URL with both `v=` and `list=` starts from that video when possible, then queues the rest of the playlist block.", "Repeat is only for single-track YouTube/search requests; playlists, favorites, and last-session restore are rejected when repeat is requested.", "Favorites are private by default; public favorites can be played by others, and admins get a confirmation warning before overriding private favorites.", "Users in `nodownload` always stream and do not create normal downloads.", "Users in `norepeat` cannot use repeat requests.", "Download mode caches individual tracks when they reach playback; stream-only mode skips local caching.", "`show_download_log:true` shows the editable progress log once; `/togglelog download` enables it globally while keeping normal INFO logging."],
+            "arguments": ["<query> - YouTube video URL, YouTube playlist URL, YouTube search text, playlist:name, -favorites username, or last/play:last.", f"repeat - optional repeat count for single-track requests; values above {MAX_PLAY_REPEAT_COUNT} turn into repeat-one loop.", f"speed - optional playback speed from {MIN_PLAYBACK_SPEED:g} to {MAX_PLAYBACK_SPEED:g}; requires admin, playspeed group, or allow-all.", "show_download_log - true shows an editable sanitized download progress log for this request."],
+            "examples": ["/play viidestoista yö", "/play viidestoista yö -repeat 3", "/play viidestoista yö --speed:1.25", "/play https://youtube.com/watch?v=... repeat:4 speed:1.1 show_download_log:true", "/play https://youtube.com/playlist?list=...", "/play playlist:Roadtrip", "/play -favorites jantso", "/play last"],
+            "notes": ["Raw non-YouTube URLs are rejected.", f"YouTube playlist URLs are capped at {MAX_PLAYLIST_TRACKS} track(s) and respect the queue length limit for non-admins.", "A watch URL with both `v=` and `list=` starts from that video when possible, then queues the rest of the playlist block.", "Repeat and speed are only for single-track YouTube/search requests; playlists, favorites, and last-session restore are rejected when either is requested.", "Favorites are private by default; public favorites can be played by others, and admins get a confirmation warning before overriding private favorites.", "Users in `nodownload` always stream and do not create normal downloads.", "Users in `norepeat` cannot use repeat requests.", "The `playspeed` group grants speed controls when allow-all is off.", "Download mode caches individual tracks when they reach playback; stream-only mode skips local caching.", "`show_download_log:true` shows the editable progress log once; `/togglelog download` enables it globally while keeping normal INFO logging."],
             "errors": ["Need voice channel - join voice first.", "Extraction failed - check yt-dlp, deno/node, and output.log.", "Large download - admin confirmation may be required."],
         },
         "playtop": {
@@ -3918,6 +4284,15 @@ def command_help_pages() -> dict:
             "notes": ["Use `/help command:now` for the non-alias page."],
             "errors": ["No song is currently playing."],
         },
+        "nowplaying": {
+            "purpose": "repost now-playing controls without the video URL",
+            "synopsis": ["/nowplaying"],
+            "description": "Posts a fresh now-playing control message for the current track without showing the YouTube URL. The new message receives the normal playback reactions and old controls are removed.",
+            "arguments": ["none"],
+            "examples": ["/nowplaying"],
+            "notes": ["Requires the same voice channel unless the user is an admin.", "Non-admins share a per-channel cooldown configured by admins."],
+            "errors": ["No song is currently playing.", "Cooldown active.", "You must be in the bot's voice channel."],
+        },
         "getqueue": {
             "purpose": "show session song history",
             "synopsis": ["/getqueue"],
@@ -3939,7 +4314,7 @@ def command_help_pages() -> dict:
         "favorites": {
             "purpose": "play and manage per-user favorites",
             "synopsis": ["/favorites play [user]", "/favorites list [user]", "/favorites privacy <public|private>", "/favorites status", "/favorites cacheuser <user> <enabled>", "/favorites cacheglobal <enabled> [max_gb] [per_user_tracks]"],
-            "description": "Favorites are special per-user saved playlists. The now-playing star reaction adds the current song to the reacting user's favorites.",
+            "description": "Favorites are special per-user saved playlists. The now-playing star reaction toggles the current song in the reacting user's favorites.",
             "arguments": ["user - optional Discord user for public favorites.", "privacy - public lets others play your favorites, private blocks normal users.", "cacheuser/cacheglobal - admin cache controls."],
             "examples": ["/favorites play", "/favorites play @friend", "/favorites privacy public", "/favorites cacheglobal true 6 30"],
             "notes": ["Favorites are private by default.", "Favorites privacy is a social bot setting, not strong secrecy: admins can override with confirmation and anyone with filesystem access can read metadata.", "Favorites media cache uses cache/ only and is capped globally at 6 GiB.", "Each user can store up to 100 favorites; the default cache pass considers 30 per user."],
@@ -3951,14 +4326,14 @@ def command_help_pages() -> dict:
             "description": "Shows `normal user` when no restriction groups are assigned, otherwise lists assigned groups.",
             "arguments": ["none"],
             "examples": ["/permissions"],
-            "notes": ["Groups are stored in user-permissions.json runtime config.", "Known groups: nodownload, novolumechange, noplaylistcreate, noqueueskip, noskip, norepeat."],
+            "notes": ["Groups are stored in user-permissions.json runtime config.", "Known groups: nodownload, novolumechange, noplaylistcreate, noqueueskip, noskip, norepeat, playspeed."],
             "errors": ["none"],
         },
         "usergroup": {
             "purpose": "admin manage user restriction groups",
             "synopsis": ["/usergroup add <user> <group>", "/usergroup remove <user> <group>", "/usergroup list <user>"],
             "description": "Adds, removes, or lists user restriction groups used by playback, queue, playlist, repeat, and download paths.",
-            "arguments": ["user - Discord member.", "group - nodownload, novolumechange, noplaylistcreate, noqueueskip, noskip, or norepeat."],
+            "arguments": ["user - Discord member.", "group - nodownload, novolumechange, noplaylistcreate, noqueueskip, noskip, norepeat, or playspeed."],
             "examples": ["/usergroup add @user nodownload", "/usergroup remove @user noskip", "/usergroup list @user"],
             "notes": ["Admin only.", "`nodownload` forces that user's requests to stream and prevents favorite cache entries for that user.", "The config is runtime state and should not be committed."],
             "errors": ["Admin permission required.", "Unknown group."],
@@ -3969,7 +4344,7 @@ def command_help_pages() -> dict:
             "description": "Posts a runtime configuration panel. Each setting has an emoji reaction; admin reactions flip or cycle the setting and edit the same message.",
             "arguments": ["none"],
             "examples": ["/config show"],
-            "notes": ["Admin only.", "The panel covers download mode, Discord download logs, Python DEBUG logging, admin operation trail, queue links, auto-leave, favorites autocache, and playlist cache policy.", "Most toggles are runtime state unless that setting already writes to a policy file."],
+            "notes": ["Admin only.", "The panel covers download mode, Discord download logs, Python DEBUG logging, admin operation trail, queue links, auto-leave, favorites autocache, playlist cache policy, playspeed allow-all, and nowplaying cooldown.", "Most toggles are runtime state unless that setting already writes to a policy file."],
             "errors": ["Admin permission required.", "Discord may block reaction cleanup if the bot lacks reaction permissions."],
         },
         "userstats": {
@@ -3980,6 +4355,33 @@ def command_help_pages() -> dict:
             "examples": ["/userstats @user"],
             "notes": ["Admin only.", "Recent command memory is intentionally small and resets on bot restart."],
             "errors": ["Admin permission required."],
+        },
+        "playspeed": {
+            "purpose": "set playback speed for future audio sources",
+            "synopsis": ["/playspeed <speed>"],
+            "description": "Sets the session playback speed used when the bot builds the next FFmpeg audio source.",
+            "arguments": [f"speed - number from {MIN_PLAYBACK_SPEED:g} to {MAX_PLAYBACK_SPEED:g}; 1 is normal time."],
+            "examples": ["/playspeed 1.25", "/playspeed 0.75"],
+            "notes": ["Hidden operational command.", "Usable by admins, users in the `playspeed` group, or everyone when admins enable playspeed allow-all.", "Already-running audio keeps its current FFmpeg source until the next track or replay."],
+            "errors": ["Permission denied.", "Speed outside allowed range."],
+        },
+        "playspeedaccess": {
+            "purpose": "admin allow or restrict playspeed for everyone",
+            "synopsis": ["/playspeedaccess <enabled>"],
+            "description": "Toggles whether all users may use `/playspeed` and `/play speed` without the `playspeed` group.",
+            "arguments": ["enabled - true or false."],
+            "examples": ["/playspeedaccess true", "/playspeedaccess false"],
+            "notes": ["Admin only.", "The setting is stored in ignored runtime user-permissions config."],
+            "errors": ["Admin permission required."],
+        },
+        "nowplayingcooldown": {
+            "purpose": "admin configure nowplaying spam guard",
+            "synopsis": ["/nowplayingcooldown <seconds>"],
+            "description": "Sets the per-channel non-admin cooldown for `/nowplaying`.",
+            "arguments": [f"seconds - value from {NOWPLAYING_COOLDOWN_MIN_SECONDS} to {NOWPLAYING_COOLDOWN_MAX_SECONDS}."],
+            "examples": ["/nowplayingcooldown 30"],
+            "notes": ["Admin only.", "Admins bypass the cooldown."],
+            "errors": ["Admin permission required.", "Seconds outside allowed range."],
         },
         "clear_queue": {
             "purpose": "clear the upcoming queue",
@@ -4007,6 +4409,15 @@ def command_help_pages() -> dict:
             "examples": ["/cachestatus"],
             "notes": ["Admin only.", "Only validated media files are counted."],
             "errors": ["Admin permission required."],
+        },
+        "cachequeue": {
+            "purpose": "download the current session queue into cache",
+            "synopsis": ["/cachequeue [include_current]"],
+            "description": "Admin-only command that walks the current song plus upcoming queue and downloads safe eligible tracks into root cache/ using the normal cache key/path helpers.",
+            "arguments": ["include_current - true also considers the currently playing track."],
+            "examples": ["/cachequeue", "/cachequeue false"],
+            "notes": ["Admin only.", "Tracks requested by users in `nodownload` are skipped.", "The command writes queue-blackbox audit events and respects the hard cache cap."],
+            "errors": ["Admin permission required.", "Cache hard limit reached.", "Some downloads failed - check output.log."],
         },
         "purgecache": {
             "purpose": "delete validated cache files",
@@ -4136,11 +4547,11 @@ def command_help_pages() -> dict:
         },
         "status": {
             "purpose": "show runtime status and session audit",
-            "synopsis": ["/status", "/status latest", "/status session", "/status commands"],
-            "description": "Shows runtime mode, queue/cache state, warning summary, latest suggestion, session suggestions, or recent commands.",
-            "arguments": ["view - latest, session, or commands."],
-            "examples": ["/status", "/status session"],
-            "notes": ["Admin only.", "Session audit lives in memory and resets when the bot restarts."],
+            "synopsis": ["/status", "/status play", "/status session", "/status commands"],
+            "description": "Shows runtime mode, queue/cache state, warning summary, detailed current playback diagnostics, session suggestions, or recent commands.",
+            "arguments": ["view - latest, play, session, or commands."],
+            "examples": ["/status", "/status play", "/status session"],
+            "notes": ["Admin only except `/status play` when public access is enabled in `/config show`.", "Session audit lives in memory and resets when the bot restarts.", "Playback diagnostics show any known bitrate, BPM, codec, duration, cache, speed, and voice state fields; unavailable metadata is shown as unknown."],
             "errors": ["Admin permission required."],
         },
     }
@@ -4338,6 +4749,22 @@ def youtube_playlist_watch_url(playlist_id: str, video_id: Optional[str] = None)
     if video_id:
         return f"{youtube_watch_url}{video_id}&list={urllib.parse.quote(playlist_id)}"
     return f"{youtube_base_url}playlist?list={urllib.parse.quote(playlist_id)}"
+
+def track_metadata_from_ytdlp(data: dict, *, filesize: Optional[int] = None) -> dict:
+    metadata = {}
+    for key in (
+        "duration", "format_id", "format", "format_note", "acodec", "abr", "tbr",
+        "asr", "audio_channels", "dynamic_range", "bpm", "uploader", "channel",
+        "is_live", "age_limit",
+    ):
+        value = data.get(key)
+        if value not in (None, ""):
+            metadata[key] = value
+    if filesize:
+        metadata["filesize"] = filesize
+    elif data.get("filesize") or data.get("filesize_approx"):
+        metadata["filesize"] = data.get("filesize") or data.get("filesize_approx")
+    return metadata
 
 def playlist_entry_video_id(entry: dict) -> Optional[str]:
     if not isinstance(entry, dict):
@@ -4600,6 +5027,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
             abr = data.get('abr')  # average bitrate in kbps
             if abr and duration:
                 filesize = int((abr * 1000 / 8) * duration)  # bytes
+        metadata = track_metadata_from_ytdlp(data, filesize=filesize)
 
         # Define limits (in seconds for length, bytes for sizes)
         MAX_LENGTH_NORMAL = 3 * 60 * 60       # 3 hours
@@ -4642,6 +5070,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
                 'cache_path': metadata_path_for_cache_file(existing_cache),
                 'cache_mode': cache_mode,
                 'ext': os.path.splitext(existing_cache)[1].lstrip(".").lower(),
+                **metadata,
             }
 
         total_bytes = estimate_total_downloaded_bytes()
@@ -4652,7 +5081,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
                 raise Exception(f"Less than {MIN_FREE_DOWNLOAD_MB}MB free on disk; download refused.")
             if not cache_has_room(filesize or 0):
                 logger.warning("Cache hard limit reached; streaming without downloading.")
-                return {'id': video_id, 'title': title, 'webpage_url': page_url, 'cache_key': cache_key, 'cache_mode': 'streaming', 'cache_path': None}
+                return {'id': video_id, 'title': title, 'webpage_url': page_url, 'cache_key': cache_key, 'cache_mode': 'streaming', 'cache_path': None, **metadata}
             new_total = total_bytes + (filesize or 0)
             if new_total > TOTAL_LIMIT_NORMAL and not is_user_admin(requested_by):
                 raise Exception("Total download cache size limit exceeded (normal user).")
@@ -4667,7 +5096,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
                 # Admin user with a very large file: require confirmation before downloading
                 return {
                     'id': video_id, 'title': title, 'webpage_url': page_url,
-                    'needs_confirm': True, 'filesize': filesize, 'duration': duration
+                    'needs_confirm': True, **metadata
                 }
 
         # At this point, the track is within allowed limits
@@ -4680,7 +5109,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
                 detail = "nodownload restriction; skipping cache/download" if force_stream_only else "stream-only mode; skipping download"
                 await append_debug_playback_event(debug_report, detail, force=True)
                 await edit_debug_playback_message(debug_report, force=True)
-            return {'id': video_id, 'title': title, 'webpage_url': page_url, 'cache_key': cache_key, 'cache_mode': 'streaming', 'cache_path': None}
+            return {'id': video_id, 'title': title, 'webpage_url': page_url, 'cache_key': cache_key, 'cache_mode': 'streaming', 'cache_path': None, **metadata}
 
         # Download mode: download the audio file using yt_dlp
         logger.info(f"Downloading track '{title}' ({video_id})...")
@@ -4711,6 +5140,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
             'cache_path': metadata_path_for_cache_file(file_path),
             'cache_mode': 'shortterm',
             'ext': ext,
+            **metadata,
         }
     except Exception as e:
         if debug_report:
@@ -4746,11 +5176,13 @@ async def ensure_voice_for_playback(ctx):
 async def build_audio_player(track: dict):
     await resolve_track_for_playback(track, requested_by=track.get("requested_by_user_id"))
     cached_file = None if user_has_group(track.get("requested_by_user_id"), "nodownload") else cached_file_for_track(track)
+    speed = playback_speed_for_track(track)
+    track["playback_speed"] = speed
     if cached_file:
         track["file"] = cached_file
-        source = discord.FFmpegPCMAudio(cached_file, options='-vn')
+        source = discord.FFmpegPCMAudio(cached_file, **ffmpeg_audio_options_for_speed(speed))
         return discord.PCMVolumeTransformer(source, volume=client.volume)
-    player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True)
+    player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True, speed=speed)
     return player
 
 async def start_track_now(ctx, voice, track: dict, *, debug_report: Optional[DebugPlaybackMessage] = None):
@@ -4762,6 +5194,7 @@ async def start_track_now(ctx, voice, track: dict, *, debug_report: Optional[Deb
     client.currently_playing = True
     client.last_track_info = client.current_track_info
     client.current_track_info = track
+    client.current_track_started_at = time.time()
     sync_repeat_for_started_track(track)
     client.song_history.append(track)
     await publish_now_playing(
@@ -5170,6 +5603,60 @@ async def predownload_playlist_files(playlist: dict) -> int:
     save_playlist(playlist)
     return downloaded_count
 
+def current_session_cache_targets(*, include_current: bool = True) -> list:
+    tracks = []
+    if include_current and client.current_track_info:
+        tracks.append(client.current_track_info)
+    tracks.extend(queue)
+    return [
+        track for track in tracks
+        if isinstance(track, dict) and (track.get("webpage_url") or track.get("id"))
+    ]
+
+async def cache_current_session_tracks(*, include_current: bool = True) -> dict:
+    result = {
+        "total": 0,
+        "downloaded": 0,
+        "reused": 0,
+        "skipped": 0,
+        "restricted": 0,
+        "failed": 0,
+        "bytes": 0,
+    }
+    tracks = current_session_cache_targets(include_current=include_current)
+    result["total"] = len(tracks)
+    for track in tracks:
+        requester = track.get("requested_by_user_id")
+        if user_has_group(requester, "nodownload"):
+            result["restricted"] += 1
+            logger.info(f"Session cache skipped nodownload track: {track.get('title')} ({track.get('id')})")
+            continue
+        cache_key = cache_key_for_track(track)
+        video_id = str(track.get("id") or "").strip()
+        if not cache_key or not video_id:
+            result["skipped"] += 1
+            continue
+        existing = cached_file_for_track(track) or find_existing_cache_file(cache_key, prefer_playlist=True, video_id=video_id)
+        if existing:
+            apply_cache_fields(track, existing, cache_mode="playlist" if os.path.basename(existing).startswith("plst-") else "shortterm")
+            result["reused"] += 1
+            continue
+        try:
+            did_download, size = await cache_playlist_track(track, playlist_cache=False)
+        except Exception as exc:
+            result["failed"] += 1
+            logger.warning(f"Session cache download failed for {track.get('title')} ({video_id}): {exc}")
+            continue
+        if did_download:
+            result["downloaded"] += 1
+            result["bytes"] += size
+        else:
+            if cached_file_for_track(track):
+                result["reused"] += 1
+            else:
+                result["skipped"] += 1
+    return result
+
 async def playlist_creation_timeout(key: tuple, channel, marker: float):
     await asyncio.sleep(PLAYLIST_CREATION_TIMEOUT_SECONDS)
     session = client.playlist_creation_sessions.get(key)
@@ -5466,12 +5953,14 @@ async def play_next_channel(channel):
         try:
             await resolve_track_for_playback(track, requested_by=track.get("requested_by_user_id"))
             cached_file = None if user_has_group(track.get("requested_by_user_id"), "nodownload") else cached_file_for_track(track)
+            speed = playback_speed_for_track(track)
+            track["playback_speed"] = speed
             if cached_file:
                 track["file"] = cached_file
-                source = discord.FFmpegPCMAudio(cached_file, options='-vn')
+                source = discord.FFmpegPCMAudio(cached_file, **ffmpeg_audio_options_for_speed(speed))
                 player = discord.PCMVolumeTransformer(source, volume=client.volume)
             else:
-                player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True)
+                player, _ = await YTDLSource.from_url(track['webpage_url'], stream=True, speed=speed)
             guild = channel.guild
             client.current_track_id = track['id']
             # Start playback and provide callback
@@ -5480,6 +5969,7 @@ async def play_next_channel(channel):
             # Update current and last track info
             client.last_track_info = client.current_track_info
             client.current_track_info = track
+            client.current_track_started_at = time.time()
             sync_repeat_for_started_track(track)
             await publish_now_playing(channel, track)
             logger.info(f"Started playing: {track['title']} ({track['id']})")
@@ -5490,9 +5980,11 @@ async def play_next_channel(channel):
             logger.error(f"Failed to play next track: {e}")
             await channel.send("Failed to play the next track.")
             client.currently_playing = False
+            client.current_track_started_at = None
     else:
         # Queue is empty
         client.currently_playing = False
+        client.current_track_started_at = None
         logger.info("No more songs to play. Queue is now clear.")
         await channel.send("No more songs in queue.")
 
@@ -5516,6 +6008,7 @@ async def on_voice_state_update(member, before, after):
             cancel_auto_leave_task("bot disconnected")
         client.current_voice_channel = None
         client.currently_playing = False
+        client.current_track_started_at = None
         client.auto_leave_disconnect_in_progress = False
         reset_session_volume("bot disconnected")
         return
@@ -5776,36 +6269,58 @@ async def skip(ctx):
     url="YouTube URL, YouTube playlist URL, search term, or playlist:name",
     show_download_log="Show an editable download progress log for this play request",
     repeat=f"Repeat a single-track request; values above {MAX_PLAY_REPEAT_COUNT} enable repeat-one loop",
+    speed=f"Playback speed from {MIN_PLAYBACK_SPEED:g} to {MAX_PLAYBACK_SPEED:g}; requires admin, playspeed group, or allow-all",
 )
 @client.tree.command()
-async def play(ctx, url: str, show_download_log: Optional[bool] = False, repeat: Optional[int] = None):
+async def play(
+    ctx,
+    url: str,
+    show_download_log: Optional[bool] = False,
+    repeat: Optional[int] = None,
+    speed: Optional[float] = None,
+):
     """Plays a YouTube video's audio, a YouTube playlist, or a search result."""
     record_command(ctx)
     await ctx.response.defer()
     url, repeat_count, repeat_loop, repeat_explicit = parse_play_repeat_request(url, repeat)
+    url, playback_speed, speed_explicit, speed_error = parse_play_speed_request(url, speed)
+    url, suffix_repeat_count, suffix_repeat_loop, suffix_repeat_explicit = parse_play_repeat_request(url, None)
+    if suffix_repeat_explicit:
+        repeat_count = suffix_repeat_count
+        repeat_loop = suffix_repeat_loop
+        repeat_explicit = True
     if repeat_explicit and not url:
         await ctx.followup.send("Provide a search term or YouTube link before `-repeat`.", ephemeral=True)
+        return
+    if speed_explicit and not url:
+        await ctx.followup.send("Provide a search term or YouTube link before `--speed`.", ephemeral=True)
+        return
+    if speed_error:
+        await ctx.followup.send(speed_error, ephemeral=True)
+        return
+    if speed_explicit and not can_use_play_speed(ctx.user):
+        await ctx.followup.send("You do not have permission to use playback speed controls.", ephemeral=True)
         return
     if repeat_explicit and user_has_group(ctx.user, "norepeat"):
         await ctx.followup.send("You cannot use repeat because your account is in `norepeat`.", ephemeral=True)
         return
     if is_play_last_query(url):
-        if repeat_explicit:
-            await ctx.followup.send("Repeat is only supported for single-track YouTube/search play requests.", ephemeral=True)
+        if repeat_explicit or speed_explicit:
+            await ctx.followup.send("Repeat and speed are only supported for single-track YouTube/search play requests.", ephemeral=True)
             return
         await restore_last_session(ctx)
         return
     favorites_alias_user = parse_play_favorites_alias(url)
     if favorites_alias_user is not None:
-        if repeat_explicit:
-            await ctx.followup.send("Repeat is only supported for single-track YouTube/search play requests.", ephemeral=True)
+        if repeat_explicit or speed_explicit:
+            await ctx.followup.send("Repeat and speed are only supported for single-track YouTube/search play requests.", ephemeral=True)
             return
         await play_favorites_alias(ctx, favorites_alias_user)
         return
     playlist = resolve_playlist_reference(url, ctx.user)
     if playlist:
-        if repeat_explicit:
-            await ctx.followup.send("Repeat is only supported for single-track YouTube/search play requests.", ephemeral=True)
+        if repeat_explicit or speed_explicit:
+            await ctx.followup.send("Repeat and speed are only supported for single-track YouTube/search play requests.", ephemeral=True)
             return
         await play_playlist_now(ctx, playlist, "play")
         return
@@ -5854,9 +6369,9 @@ async def play(ctx, url: str, show_download_log: Optional[bool] = False, repeat:
             track = tracks[0]
             update_suggestion(suggestion, track)
             if track.get("youtube_playlist_id"):
-                if repeat_explicit:
-                    await finish_debug_playback_message(debug_report, status="error", error="repeat requested for playlist URL")
-                    await ctx.followup.send("Repeat is only supported for single-track YouTube/search play requests.", ephemeral=True)
+                if repeat_explicit or speed_explicit:
+                    await finish_debug_playback_message(debug_report, status="error", error="repeat or speed requested for playlist URL")
+                    await ctx.followup.send("Repeat and speed are only supported for single-track YouTube/search play requests.", ephemeral=True)
                     return
                 await play_youtube_playlist_tracks(ctx, voice, tracks, "play", debug_report=debug_report)
                 if debug_report:
@@ -5890,6 +6405,8 @@ async def play(ctx, url: str, show_download_log: Optional[bool] = False, repeat:
                     await finish_debug_playback_message(debug_report, status="error", error="large download cancelled by user")
                     await ctx.followup.send("Download canceled.")
                     return
+            if speed_explicit:
+                track["playback_speed"] = playback_speed
             if repeat_loop:
                 track["repeat_loop"] = True
             await append_debug_playback_event(debug_report, "building ffmpeg audio source", stage="ffmpeg", force=True)
@@ -5899,6 +6416,7 @@ async def play(ctx, url: str, show_download_log: Optional[bool] = False, repeat:
             client.currently_playing = True
             client.last_track_info = client.current_track_info
             client.current_track_info = track
+            client.current_track_started_at = time.time()
             sync_repeat_for_started_track(track)
             client.song_history.append(track)
             await publish_now_playing(
@@ -5910,6 +6428,7 @@ async def play(ctx, url: str, show_download_log: Optional[bool] = False, repeat:
             if repeat_explicit:
                 queue_repeat_copies(track, repeat_count, already_started=True)
                 await announce_repeat_request(ctx, repeat_count, repeat_loop, started=True)
+            await maybe_send_speed_notice(ctx, playback_speed, speed_explicit)
             await append_debug_playback_event(debug_report, "playback started", stage="playing", force=True)
             logger.info(f"Playing now: {track['title']} ({track['id']})")
             if debug_report:
@@ -5931,9 +6450,9 @@ async def play(ctx, url: str, show_download_log: Optional[bool] = False, repeat:
             track = tracks[0]
             update_suggestion(suggestion, track)
             if track.get("youtube_playlist_id"):
-                if repeat_explicit:
-                    await finish_debug_playback_message(debug_report, status="error", error="repeat requested for playlist URL")
-                    await ctx.followup.send("Repeat is only supported for single-track YouTube/search play requests.", ephemeral=True)
+                if repeat_explicit or speed_explicit:
+                    await finish_debug_playback_message(debug_report, status="error", error="repeat or speed requested for playlist URL")
+                    await ctx.followup.send("Repeat and speed are only supported for single-track YouTube/search play requests.", ephemeral=True)
                     return
                 await enqueue_youtube_playlist_tracks(ctx, tracks, "play")
                 if debug_report:
@@ -5946,6 +6465,8 @@ async def play(ctx, url: str, show_download_log: Optional[bool] = False, repeat:
                 await finish_debug_playback_message(debug_report, status="error", error="large download requires /play confirmation")
                 await ctx.followup.send(f"Track **{track['title']}** (~{filesize_mb:.1f} MB) is too large to queue without confirmation. Please use /play to confirm.")
                 return
+            if speed_explicit:
+                track["playback_speed"] = playback_speed
             if repeat_explicit:
                 if repeat_loop:
                     repeated = clone_track_for_repeat(track, repeat_loop=True)
@@ -5955,11 +6476,16 @@ async def play(ctx, url: str, show_download_log: Optional[bool] = False, repeat:
                 else:
                     queue_repeat_copies(track, repeat_count)
                 await announce_repeat_request(ctx, repeat_count, repeat_loop, started=False)
+                if not repeat_loop and repeat_count <= 1:
+                    title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
+                    await ctx.followup.send(f"Added to queue: {title} ({track.get('id', '')})")
+                await maybe_send_speed_notice(ctx, playback_speed, speed_explicit)
                 if debug_report:
                     debug_report.stage = "queued"
                     await finish_debug_playback_message(debug_report)
                 return
             await enqueue_track_with_playlist_prompt(ctx, track, "play")
+            await maybe_send_speed_notice(ctx, playback_speed, speed_explicit)
             if debug_report:
                 debug_report.stage = "queued"
                 await finish_debug_playback_message(debug_report)
@@ -6017,6 +6543,7 @@ async def playtop(ctx, *, query: str):
             client.currently_playing = True
             client.last_track_info = client.current_track_info
             client.current_track_info = track
+            client.current_track_started_at = time.time()
             sync_repeat_for_started_track(track)
             client.song_history.append(track)
             await publish_now_playing(
@@ -6316,6 +6843,7 @@ async def usergroup_list(ctx, user: discord.Member):
     app_commands.Choice(name="noqueueskip", value="noqueueskip"),
     app_commands.Choice(name="noskip", value="noskip"),
     app_commands.Choice(name="norepeat", value="norepeat"),
+    app_commands.Choice(name="playspeed", value="playspeed"),
 ])
 @usergroup_group.command(name="add", description="Admin-only add a user restriction group.")
 async def usergroup_add(ctx, user: discord.Member, group: str):
@@ -6338,6 +6866,7 @@ async def usergroup_add(ctx, user: discord.Member, group: str):
     app_commands.Choice(name="noqueueskip", value="noqueueskip"),
     app_commands.Choice(name="noskip", value="noskip"),
     app_commands.Choice(name="norepeat", value="norepeat"),
+    app_commands.Choice(name="playspeed", value="playspeed"),
 ])
 @usergroup_group.command(name="remove", description="Admin-only remove a user restriction group.")
 async def usergroup_remove(ctx, user: discord.Member, group: str):
@@ -6888,6 +7417,39 @@ async def playlist_predownload(ctx, playlist: str):
         ephemeral=True,
     )
 
+@app_commands.describe(include_current="Also cache the currently playing track")
+@client.tree.command(name="cachequeue")
+async def cachequeue(ctx, include_current: Optional[bool] = True):
+    """Admin-only cache download for the current song plus upcoming queue."""
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    await ctx.response.defer(ephemeral=True)
+    targets = current_session_cache_targets(include_current=bool(include_current))
+    if not targets:
+        await ctx.followup.send("No current session tracks are available to cache.", ephemeral=True)
+        return
+    append_queue_blackbox_event("cachequeue-started", tracks=[dict(track) for track in targets], actor=ctx.user, details={
+        "include_current": bool(include_current),
+    })
+    result = await cache_current_session_tracks(include_current=bool(include_current))
+    append_queue_blackbox_event("cachequeue-finished", tracks=[dict(track) for track in targets], actor=ctx.user, details=result)
+    await ctx.followup.send(
+        "\n".join([
+            "**cachequeue complete**",
+            f"- tracks considered: `{result['total']}`",
+            f"- downloaded: `{result['downloaded']}` (`{human_bytes(result['bytes'])}`)",
+            f"- reused existing cache: `{result['reused']}`",
+            f"- skipped: `{result['skipped']}`",
+            f"- skipped by `nodownload`: `{result['restricted']}`",
+            f"- failed: `{result['failed']}`",
+            f"- cache use: `{human_bytes(cache_total_bytes())} / {human_bytes(CACHE_HARD_LIMIT_BYTES)}`",
+        ]),
+        ephemeral=True,
+    )
+    logger.info(f"/cachequeue completed by {user_display(ctx.user)} ({user_id_value(ctx.user)}): {result}")
+
 def purge_cache_files(*, keep_current: bool = True) -> PurgeCacheResult:
     result = PurgeCacheResult()
     current_file = None
@@ -7317,13 +7879,72 @@ async def disablelinks(ctx):
     if client.current_track_message and client.current_track_info and client.current_track_message_show_queue:
         try:
             await client.current_track_message.edit(
-                content=format_now_playing(client.current_track_info, show_queue=True)
+                content=format_now_playing(
+                    client.current_track_info,
+                    show_queue=True,
+                    show_url=client.current_track_message_show_url,
+                )
             )
             logger.info("Refreshed open now-playing queue section after queue link toggle.")
         except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
             logger.warning(f"Failed to refresh now-playing queue section after link toggle: {exc}")
     await ctx.response.send_message(f"Queue links are now **{state}**.")
     logger.info(f"Queue links toggled by admin: now {state}")
+
+@app_commands.describe(speed=f"Playback speed from {MIN_PLAYBACK_SPEED:g} to {MAX_PLAYBACK_SPEED:g}")
+@client.tree.command(name="playspeed")
+async def playspeed_cmd(ctx, speed: float):
+    """Hidden speed control for admins, the playspeed group, or everyone when enabled."""
+    record_command(ctx)
+    if not can_use_play_speed(ctx.user):
+        await ctx.response.send_message("You do not have permission to use playspeed.", ephemeral=True)
+        return
+    parsed, error = normalize_playback_speed(speed)
+    if error:
+        await ctx.response.send_message(error, ephemeral=True)
+        return
+    if client.current_track_info and "playback_speed" not in client.current_track_info:
+        client.current_track_info["playback_speed"] = playback_speed_for_track(client.current_track_info)
+    client.playback_speed = parsed
+    if abs(parsed - 1.0) <= 0.001:
+        await ctx.response.send_message(normal_speed_message())
+    else:
+        await ctx.response.send_message(
+            f"Playback speed set to `{parsed:g}x` for future audio sources. Current audio changes on the next track or replay."
+        )
+    logger.info(f"Playback speed set to {parsed:g}x by {user_display(ctx.user)} ({user_id_value(ctx.user)}).")
+
+@app_commands.describe(enabled="Allow all users to use /playspeed and /play speed")
+@client.tree.command(name="playspeedaccess")
+async def playspeed_access(ctx, enabled: bool):
+    """Hidden admin command to allow or restrict playspeed use."""
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    client.playspeed_allow_all = enabled
+    save_runtime_permissions_config()
+    await ctx.response.send_message(f"Playspeed access for everyone is now **{bool_status(enabled)}**.", ephemeral=True)
+    logger.info(f"Playspeed allow-all set to {enabled} by {user_display(ctx.user)} ({user_id_value(ctx.user)}).")
+
+@app_commands.describe(seconds=f"Cooldown from {NOWPLAYING_COOLDOWN_MIN_SECONDS} to {NOWPLAYING_COOLDOWN_MAX_SECONDS} seconds")
+@client.tree.command(name="nowplayingcooldown")
+async def nowplaying_cooldown(ctx, seconds: int):
+    """Hidden admin command to set /nowplaying cooldown."""
+    record_command(ctx)
+    if not is_user_admin(ctx.user):
+        await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+        return
+    if seconds < NOWPLAYING_COOLDOWN_MIN_SECONDS or seconds > NOWPLAYING_COOLDOWN_MAX_SECONDS:
+        await ctx.response.send_message(
+            f"Cooldown must be between {NOWPLAYING_COOLDOWN_MIN_SECONDS} and {NOWPLAYING_COOLDOWN_MAX_SECONDS} seconds.",
+            ephemeral=True,
+        )
+        return
+    client.nowplaying_cooldown_seconds = int(seconds)
+    save_runtime_permissions_config()
+    await ctx.response.send_message(f"`/nowplaying` cooldown set to `{seconds}s`.", ephemeral=True)
+    logger.info(f"Nowplaying cooldown set to {seconds}s by {user_display(ctx.user)} ({user_id_value(ctx.user)}).")
 
 @client.tree.command(name="now")
 async def now_cmd(ctx):
@@ -7336,6 +7957,12 @@ async def now_cmd(ctx):
         title = track.get('title', 'Unknown title')
         vid = track.get('id', '')
         await ctx.response.send_message(f"Currently playing: **{title}** ({vid})")
+
+@client.tree.command(name="nowplaying")
+async def nowplaying_cmd(ctx):
+    """Posts now-playing controls without exposing the video URL."""
+    record_command(ctx)
+    await send_nowplaying_controls(ctx)
 
 @client.tree.command(name="nytsoi")
 async def nytsoi_cmd(ctx):
@@ -7528,20 +8155,23 @@ async def help(ctx, topic: Optional[str] = None, command: Optional[str] = None):
     except Exception as exc:
         logger.warning(f"Failed to add help expand reaction: {exc}")
 
-@app_commands.describe(view="latest, session, or commands")
+@app_commands.describe(view="latest, play, session, or commands")
 @app_commands.choices(view=[
     app_commands.Choice(name="latest", value="latest"),
+    app_commands.Choice(name="play", value="play"),
     app_commands.Choice(name="session", value="session"),
     app_commands.Choice(name="commands", value="commands"),
 ])
 @client.tree.command()
 async def status(ctx, view: str = "latest"):
-    """Displays runtime diagnostics (admin only)."""
+    """Displays runtime diagnostics."""
     record_command(ctx)
-    if not is_user_admin(ctx.user):
+    view = (view or "latest").lower()
+    public_play = view in {"play", "playback", "musicstream", "stream"} and client.status_play_public
+    if not is_user_admin(ctx.user) and not public_play:
         await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
-    await ctx.response.send_message(build_status_message(view), ephemeral=True)
+    await ctx.response.send_message(build_status_message(view), ephemeral=not public_play)
 
 client.tree.add_command(playlist_group)
 client.tree.add_command(favorites_group)
