@@ -706,6 +706,7 @@ class DebugPlaybackMessage:
     status: str = "active"
     error: str = ""
     last_edit_at: float = 0.0
+    events: list = field(default_factory=list)
 
 def run_startup_diagnostics() -> StartupReport:
     report = StartupReport(errors=[], warnings=[], notes=[])
@@ -1028,6 +1029,7 @@ class Client(discord.Client):
         # Admin-controllable flags
         self.download_mode = True              # True = download-and-play, False = stream-only
         self.log_verbose = False               # True = DEBUG logging on
+        self.user_operation_debug_messages = False
         self.queue_links_disabled = False
         playlist_cache_policy = load_playlist_cache_policy()
         self.playlist_cache_default_mode = playlist_cache_policy["default_mode"]
@@ -1054,6 +1056,9 @@ class Client(discord.Client):
         self.active_voice_votes = {}
         self.download_debug_messages = False
         self.debug_playback_messages = {}
+        self.repeat_current_track = False
+        self.repeat_track_id = None
+        self.repeat_disable_history = []
         # File deletion task tracking
         self.deletion_tasks = {}              # map video_id -> asyncio.Future
         # Played tracks tracking
@@ -1090,6 +1095,8 @@ def build_runtime_status():
         f"- volume: `{int(round(client.volume * 100))}%` (`{'session' if client.session_volume_locked else 'channel/default'}`)",
         f"- log level: `{logging.getLevelName(logger.level)}`",
         f"- download debug messages: `{'enabled' if client.download_debug_messages else 'disabled'}`",
+        f"- admin operation messages: `{'enabled' if client.user_operation_debug_messages else 'disabled'}`",
+        f"- repeat current track: `{'enabled' if client.repeat_current_track else 'disabled'}`",
         f"- queue links: `{'disabled' if client.queue_links_disabled else 'enabled'}`",
         f"- song delete delay: `{client.download_delete_delay_seconds}s`",
         f"- auto leave: `{'enabled' if client.auto_leave_enabled else 'disabled'}` (`{client.auto_leave_delay_seconds}s`)",
@@ -1133,6 +1140,9 @@ def debug_playback_content(report: DebugPlaybackMessage, *, collapsed: bool = Fa
             f"- track: **{discord.utils.escape_markdown(report.title or 'unknown')}** "
             f"(`{discord.utils.escape_markdown(report.video_id or '-')}`)"
         )
+    if client.current_voice_channel and getattr(client.current_voice_channel, "channel", None):
+        channel_name = getattr(client.current_voice_channel.channel, "name", "voice")
+        lines.append(f"- voice: `{discord.utils.escape_markdown(str(channel_name))}`")
     if report.cache_state:
         lines.append(f"- cache: `{discord.utils.escape_markdown(report.cache_state)}`")
     if report.format_id:
@@ -1142,6 +1152,9 @@ def debug_playback_content(report: DebugPlaybackMessage, *, collapsed: bool = Fa
         lines.append(f"- downloaded: `{human_bytes(report.downloaded_bytes)} / {total}`")
     if report.speed:
         lines.append(f"- speed: `{human_bytes(report.speed)}/s`")
+    if report.events:
+        lines.append("**events**")
+        lines.extend(f"- {discord.utils.escape_markdown(event)}" for event in report.events[-8:])
     if report.error:
         lines.append(f"- internal error: `{discord.utils.escape_markdown(truncate_text(sanitize_debug_text(report.error), 140))}`")
         lines.append("- user error: `normal command error was sent separately`")
@@ -1151,11 +1164,22 @@ def debug_playback_content(report: DebugPlaybackMessage, *, collapsed: bool = Fa
         lines.append(f"_react {DEBUG_COLLAPSE_REACTION} to hide debug details._")
     return "\n".join(lines)
 
+async def append_debug_playback_event(report: Optional[DebugPlaybackMessage], event: str, *, stage: Optional[str] = None, force: bool = False):
+    if not report:
+        return
+    clean = truncate_text(sanitize_debug_text(event), 160)
+    report.events.append(f"{format_timestamp(time.time())} {clean}")
+    if stage:
+        report.stage = stage
+    await edit_debug_playback_message(report, force=force)
+
 def sanitize_debug_text(value: str) -> str:
     text = str(value or "")
     replacements = [
         (CACHE_DIR, "cache"),
         (BASE_DIR, "<repo>"),
+        (YTDLP_COOKIEFILE, "<yt-dlp-cookiefile>"),
+        (BOT_TOKEN, "<bot-token>"),
     ]
     for absolute, label in replacements:
         if absolute:
@@ -1193,6 +1217,7 @@ async def create_debug_playback_message(ctx, command: str) -> Optional[DebugPlay
         )
         report = DebugPlaybackMessage(message=message, normal_content=normal, stage="starting")
         client.debug_playback_messages[message.id] = report
+        await append_debug_playback_event(report, "command accepted; preparing playback", force=True)
         return report
     except Exception as exc:
         logger.warning(f"Could not create debug playback message: {exc}")
@@ -1493,6 +1518,89 @@ async def perform_volume_action(level: int) -> str:
     logger.info(f"Volume set to {level}%.")
     return f"Volume set to {level}%."
 
+def current_repeat_track_id() -> Optional[str]:
+    track = client.current_track_info or {}
+    track_id = str(track.get("id") or "").strip()
+    return track_id or None
+
+def prune_repeat_disable_history():
+    cutoff = time.time() - REPEAT_TOGGLE_RECENT_SECONDS
+    client.repeat_disable_history = [
+        item for item in client.repeat_disable_history
+        if item.get("timestamp", 0) >= cutoff
+    ]
+
+def recent_repeat_disable_users(track_id: str, *, excluding_user_id: Optional[int] = None) -> set:
+    prune_repeat_disable_history()
+    users = set()
+    for item in client.repeat_disable_history:
+        if item.get("track_id") != track_id:
+            continue
+        user_id = int(item.get("user_id") or 0)
+        if excluding_user_id and user_id == excluding_user_id:
+            continue
+        if user_id:
+            users.add(user_id)
+    return users
+
+async def refresh_current_track_message():
+    message = client.current_track_message
+    track = client.current_track_info
+    if not message or not track:
+        return
+    try:
+        await message.edit(content=format_now_playing(track, show_queue=client.current_track_message_show_queue))
+    except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
+        logger.warning(f"Failed to refresh now-playing message: {exc}")
+
+async def set_repeat_current_track(enabled: bool, user=None, *, record_disable: bool = True) -> str:
+    track_id = current_repeat_track_id()
+    if not track_id:
+        return "No track is currently playing."
+    title = discord.utils.escape_markdown(str((client.current_track_info or {}).get("title") or "current track"))
+    if enabled:
+        client.repeat_current_track = True
+        client.repeat_track_id = track_id
+        logger.info(f"Repeat enabled for {track_id} by {user_display(user) if user else 'system'}.")
+        await refresh_current_track_message()
+        return f"Repeat enabled for **{title}**."
+    if record_disable and user:
+        client.repeat_disable_history.append({
+            "track_id": track_id,
+            "user_id": user_id_value(user),
+            "timestamp": time.time(),
+        })
+        prune_repeat_disable_history()
+    client.repeat_current_track = False
+    client.repeat_track_id = None
+    logger.info(f"Repeat disabled for {track_id} by {user_display(user) if user else 'system'}.")
+    await refresh_current_track_message()
+    return f"Repeat disabled for **{title}**."
+
+async def perform_repeat_off_action() -> str:
+    return await set_repeat_current_track(False, record_disable=False)
+
+async def handle_repeat_reaction(user, text_channel) -> str:
+    track_id = current_repeat_track_id()
+    if not track_id:
+        return "No track is currently playing."
+    if not client.repeat_current_track or client.repeat_track_id != track_id:
+        return await set_repeat_current_track(True, user)
+    if is_user_admin(user):
+        return await set_repeat_current_track(False, user)
+    recent_other_users = recent_repeat_disable_users(track_id, excluding_user_id=user_id_value(user))
+    if len(recent_other_users) >= REPEAT_TOGGLE_VOTE_THRESHOLD:
+        await request_voice_vote(user, text_channel, "repeat_off", "turn off repeat")
+        return "Repeat-off vote started."
+    return await set_repeat_current_track(False, user)
+
+def sync_repeat_for_started_track(track: dict):
+    track_id = str(track.get("id") or "").strip()
+    if client.repeat_current_track and client.repeat_track_id and client.repeat_track_id != track_id:
+        logger.info(f"Repeat cleared because playback moved from {client.repeat_track_id} to {track_id}.")
+        client.repeat_current_track = False
+        client.repeat_track_id = None
+
 async def apply_voice_vote(vote: VoiceVote):
     voice = client.current_voice_channel
     channel = getattr(voice, "channel", None)
@@ -1501,7 +1609,7 @@ async def apply_voice_vote(vote: VoiceVote):
         if vote.message:
             await vote.message.channel.send("Vote cancelled because the bot is no longer in that voice channel.")
         return
-    if vote.action in {"skip", "previous"} and vote.track_id and vote.track_id != client.current_track_id:
+    if vote.action in {"skip", "previous", "repeat_off"} and vote.track_id and vote.track_id != client.current_track_id:
         await finish_voice_vote(vote, "cancelled")
         if vote.message:
             await vote.message.channel.send("Vote cancelled because the current track changed.")
@@ -1514,6 +1622,8 @@ async def apply_voice_vote(vote: VoiceVote):
         result = await perform_stop_action()
     elif vote.action == "volume" and vote.value is not None:
         result = await perform_volume_action(vote.value)
+    elif vote.action == "repeat_off":
+        result = await perform_repeat_off_action()
     else:
         result = "Unknown vote action."
     await finish_voice_vote(vote, "passed")
@@ -1553,7 +1663,7 @@ async def request_voice_vote(user, text_channel, action: str, title: str, *, val
         else:
             await text_channel.send(message)
         return False
-    if action in {"skip", "previous"} and not (voice.is_playing() or voice.is_paused()):
+    if action in {"skip", "previous", "repeat_off"} and not (voice.is_playing() or voice.is_paused()):
         if ctx:
             await safe_interaction_send(ctx, "No track is currently playing.")
         else:
@@ -1568,6 +1678,8 @@ async def request_voice_vote(user, text_channel, action: str, title: str, *, val
             result = await perform_stop_action()
         elif action == "volume" and value is not None:
             result = await perform_volume_action(value)
+        elif action == "repeat_off":
+            result = await perform_repeat_off_action()
         else:
             result = "Unknown vote action."
         if ctx:
@@ -1595,7 +1707,7 @@ async def request_voice_vote(user, text_channel, action: str, title: str, *, val
         value=value,
         voice_channel_id=voice_channel_id(voice_channel),
         text_channel_id=getattr(text_channel, "id", 0),
-        track_id=client.current_track_id if action in {"skip", "previous"} else "",
+        track_id=client.current_track_id if action in {"skip", "previous", "repeat_off"} else "",
         votes={user_id},
         created_at=now,
         expires_at=now + VOICE_VOTE_TIMEOUT_SECONDS,
@@ -1607,6 +1719,8 @@ async def request_voice_vote(user, text_channel, action: str, title: str, *, val
             result = await perform_stop_action()
         elif action == "previous":
             result = await perform_previous_action()
+        elif action == "repeat_off":
+            result = await perform_repeat_off_action()
         else:
             result = await perform_volume_action(value)
         if ctx:
@@ -1735,6 +1849,7 @@ async def play_saved_track_now(voice, channel, track: dict):
     client.currently_playing = True
     client.last_track_info = client.current_track_info
     client.current_track_info = track
+    sync_repeat_for_started_track(track)
     if track not in client.song_history:
         client.song_history.append(track)
     await publish_now_playing(channel, track)
@@ -2508,6 +2623,8 @@ def format_now_playing(track: dict, *, show_queue: bool = False) -> str:
     if track.get("playlist_name"):
         playlist_name = discord.utils.escape_markdown(str(track.get("playlist_name")))
         now_playing += f"\n_from playlist: **{playlist_name}**_"
+    if client.repeat_current_track and client.repeat_track_id == str(track.get("id") or ""):
+        now_playing += "\n_repeat: **on**_"
     if not show_queue:
         return now_playing
     divider = "━━━━━━━━━━━━"
@@ -2686,6 +2803,7 @@ def expanded_help_message() -> str:
         "/queue [links] (alias: /queuelist) - Show upcoming songs.",
         "/queuefirst <position, playlist URL, or playlist:name> (alias: /qfirst) - Move a song or playlist to play next.",
         "/skip, /pause, /resume, /stop, /volume <1-100> - Playback controls; skip/stop/volume use votes for non-admins.",
+        f"Now-playing reactions: ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat-one, {QUEUE_REACTION} queue.",
         "/now (alias: /nytsoi), /getqueue - Current/session info.",
         "",
         "**playlists**",
@@ -3157,11 +3275,11 @@ def command_help_pages() -> dict:
         },
         "togglelog": {
             "purpose": "toggle server debug logging",
-            "synopsis": ["/togglelog", "/togglelog debug", "/togglelog normal"],
-            "description": "Turns DEBUG logging on or off. Debug mode also enables sanitized editable `/play` download debug messages.",
-            "arguments": ["mode - toggle, debug, normal, or off."],
-            "examples": ["/togglelog debug", "/togglelog normal"],
-            "notes": ["Admin only.", "Debug messages can be collapsed with the cleanup reaction.", "Do not leave verbose logs on forever in production."],
+            "synopsis": ["/togglelog", "/togglelog debug", "/togglelog admin", "/togglelog all", "/togglelog normal"],
+            "description": "Turns DEBUG logging on or off. Debug mode enables sanitized editable `/play` download messages; admin/all also labels them as larger user-space operation messages and keeps the event trail visible as the bot edits the same message.",
+            "arguments": ["mode - toggle, debug, admin, all, normal, or off."],
+            "examples": ["/togglelog admin", "/togglelog all", "/togglelog normal"],
+            "notes": ["Admin only.", "The `/play` debug message is posted before voice connection work so users see immediate progress.", "Debug messages can be collapsed with the cleanup reaction.", "Do not leave verbose logs on forever in production."],
             "errors": ["Admin permission required."],
         },
         "toggledownload": {
@@ -3337,6 +3455,7 @@ async def download_youtube_to_cache(
     if debug_report:
         debug_report.stage = "downloading"
         debug_report.cache_state = "miss"
+        await append_debug_playback_event(debug_report, "download started", force=True)
         await edit_debug_playback_message(debug_report, force=True)
 
         def debug_progress_hook(status):
@@ -3364,6 +3483,7 @@ async def download_youtube_to_cache(
     if debug_report:
         debug_report.format_id = str(data.get("format_id") or debug_report.format_id or "")
         debug_report.stage = "downloaded"
+        await append_debug_playback_event(debug_report, "download completed; moving into cache", force=True)
         await edit_debug_playback_message(debug_report, force=True)
     ext = os.path.splitext(temp_path)[1].lstrip(".").lower()
     target_path = cache_path_for_key(cache_key, ext, playlist=playlist)
@@ -3459,6 +3579,7 @@ async def fetch_youtube_playlist_tracks(query: str, requested_by=None, debug_rep
     if debug_report:
         debug_report.stage = "playlist"
         debug_report.cache_state = "metadata"
+        await append_debug_playback_event(debug_report, "reading YouTube playlist metadata", force=True)
         await edit_debug_playback_message(debug_report, force=True)
 
     loop = asyncio.get_event_loop()
@@ -3503,6 +3624,7 @@ async def fetch_youtube_playlist_tracks(query: str, requested_by=None, debug_rep
         f"Resolved YouTube playlist {playlist_id} into {len(tracks)} track(s) "
         f"for {user_display(requested_by) if requested_by else 'unknown user'}."
     )
+    await append_debug_playback_event(debug_report, f"playlist metadata resolved: {len(tracks)} track(s)", stage="playlist-ready", force=True)
     return tracks
 
 async def fetch_media_tracks(query: str, requested_by=None, debug_report: Optional[DebugPlaybackMessage] = None) -> list:
@@ -3546,6 +3668,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
     cache_key = canonical_cache_key_from_video_id(video_id) if video_id else None
     if debug_report:
         debug_report.stage = "normalizing"
+        await append_debug_playback_event(debug_report, "normalizing media query", force=True)
         await edit_debug_playback_message(debug_report, force=True)
 
     # If we have a video_id and it's cached (and in download mode), use the cached file.
@@ -3559,6 +3682,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
                 debug_report.video_id = video_id
                 debug_report.cache_state = "hit"
                 debug_report.stage = "cache-hit"
+                await append_debug_playback_event(debug_report, "cache hit from metadata", force=True)
                 await edit_debug_playback_message(debug_report, force=True)
             page_url = youtube_watch_url + video_id
             cache_mode = "playlist" if os.path.basename(existing_cache).startswith("plst-") else "shortterm"
@@ -3602,6 +3726,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
         if debug_report:
             debug_report.stage = "resolving"
             debug_report.cache_state = "checking"
+            await append_debug_playback_event(debug_report, "asking yt-dlp for metadata", force=True)
             await edit_debug_playback_message(debug_report, force=True)
         loop = asyncio.get_event_loop()
         # Always extract metadata without downloading first (to get info like duration and size)
@@ -3621,6 +3746,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
             debug_report.title = title
             debug_report.video_id = video_id
             debug_report.format_id = str(data.get("format_id") or "")
+            await append_debug_playback_event(debug_report, "metadata resolved", force=True)
             await edit_debug_playback_message(debug_report, force=True)
         page_url = canonical_youtube_url(video_id)
         cache_key = canonical_cache_key_from_video_id(video_id)
@@ -3651,6 +3777,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
             if debug_report:
                 debug_report.cache_state = f"hit:{cache_mode}"
                 debug_report.stage = "cache-hit"
+                await append_debug_playback_event(debug_report, f"cache hit: {cache_mode}", force=True)
                 await edit_debug_playback_message(debug_report, force=True)
             if cache_mode != "playlist":
                 downloaded[video_id] = {
@@ -3707,11 +3834,13 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
             if debug_report:
                 debug_report.cache_state = "stream-only"
                 debug_report.stage = "streaming"
+                await append_debug_playback_event(debug_report, "stream-only mode; skipping download", force=True)
                 await edit_debug_playback_message(debug_report, force=True)
             return {'id': video_id, 'title': title, 'webpage_url': page_url, 'cache_key': cache_key, 'cache_mode': 'streaming', 'cache_path': None}
 
         # Download mode: download the audio file using yt_dlp
         logger.info(f"Downloading track '{title}' ({video_id})...")
+        await append_debug_playback_event(debug_report, "cache miss; downloading audio", stage="downloading", force=True)
         file_path, ext, _ = await download_youtube_to_cache(video_url, cache_key, playlist=False, debug_report=debug_report)
         # Cache the downloaded file info
         downloaded[video_id] = {
@@ -3727,6 +3856,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
         if debug_report:
             debug_report.cache_state = "downloaded"
             debug_report.stage = "cached"
+            await append_debug_playback_event(debug_report, "cached audio ready for playback", force=True)
             await edit_debug_playback_message(debug_report, force=True)
         return {
             'id': video_id,
@@ -3781,12 +3911,14 @@ async def build_audio_player(track: dict):
 
 async def start_track_now(ctx, voice, track: dict, *, debug_report: Optional[DebugPlaybackMessage] = None):
     await resolve_track_for_playback(track, requested_by=ctx.user, debug_report=debug_report)
+    await append_debug_playback_event(debug_report, "building ffmpeg audio source", stage="ffmpeg", force=True)
     player = await build_audio_player(track)
     voice.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, ctx.channel))
     client.current_track_id = track['id']
     client.currently_playing = True
     client.last_track_info = client.current_track_info
     client.current_track_info = track
+    sync_repeat_for_started_track(track)
     client.song_history.append(track)
     await publish_now_playing(
         ctx.channel,
@@ -3794,6 +3926,7 @@ async def start_track_now(ctx, voice, track: dict, *, debug_report: Optional[Deb
         send_message=ctx.followup.send,
         acknowledge=ctx.followup.send,
     )
+    await append_debug_playback_event(debug_report, "playback started", stage="playing", force=True)
     logger.info(f"Playing now: {track['title']} ({track['id']})")
 
 async def prompt_move_track_next(ctx, track: dict, playlist_name: str):
@@ -4373,6 +4506,16 @@ def after_played_track(error, video_id, channel):
         logger.info("Playback callback suppressed because auto-leave is disconnecting.")
         return
 
+    if (
+        client.repeat_current_track
+        and video_id
+        and client.repeat_track_id == video_id
+        and client.current_track_info
+    ):
+        replay_track = dict(client.current_track_info)
+        queue.insert(0, replay_track)
+        logger.info(f"Repeat-one queued current track again: {replay_track.get('title')} ({video_id})")
+
     # Proceed to the next track in queue
     asyncio.run_coroutine_threadsafe(play_next_channel(channel), client.loop)
 
@@ -4396,6 +4539,7 @@ async def play_next_channel(channel):
             # Update current and last track info
             client.last_track_info = client.current_track_info
             client.current_track_info = track
+            sync_repeat_for_started_track(track)
             await publish_now_playing(channel, track)
             logger.info(f"Started playing: {track['title']} ({track['id']})")
             # Add track to session history if not already recorded
@@ -4503,6 +4647,10 @@ async def on_reaction_add(reaction, user):
         elif emoji == "▶️":
             # Skip to next track
             await request_voice_vote(user, reaction.message.channel, "skip", "skip the current track")
+        elif emoji == REPEAT_REACTION:
+            result = await handle_repeat_reaction(user, reaction.message.channel)
+            if result != "Repeat-off vote started.":
+                await reaction.message.channel.send(result)
         elif emoji == "⏸️":
             # Pause or resume
             if client.current_voice_channel:
@@ -4633,6 +4781,8 @@ async def play(ctx, *, url: str):
         await play_playlist_now(ctx, playlist, "play")
         return
     if not client.currently_playing:
+        debug_report = await create_debug_playback_message(ctx, "play")
+        await append_debug_playback_event(debug_report, "checking voice connection", stage="voice-check", force=True)
         # Ensure we're connected to a voice channel before creating the player
         voice = client.current_voice_channel or ctx.guild.voice_client
         if voice is None or not voice.is_connected():
@@ -4643,19 +4793,29 @@ async def play(ctx, *, url: str):
                     apply_channel_volume_default(ctx.user.voice.channel, "play join")
                     cancel_auto_leave_task("play joined voice")
                     client.song_history = []  # reset history for new session
-                    await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
+                    await append_debug_playback_event(
+                        debug_report,
+                        f"joined voice channel {ctx.user.voice.channel.name}",
+                        stage="voice-ready",
+                        force=True,
+                    )
+                    if not debug_report:
+                        await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
                 except Exception as e:
                     logger.error(f"Voice connection failed: {e}")
+                    await finish_debug_playback_message(debug_report, status="error", error=str(e))
                     await ctx.followup.send("Couldn't join voice channel.")
                     return
             else:
+                await finish_debug_playback_message(debug_report, status="error", error="user is not in a voice channel")
                 await ctx.followup.send("You need to join a voice channel first.")
                 return
         else:
             client.current_voice_channel = voice
             if not await require_voice_control(ctx, "start playback"):
+                await finish_debug_playback_message(debug_report, status="error", error="voice control denied")
                 return
-        debug_report = await create_debug_playback_message(ctx, "play")
+            await append_debug_playback_event(debug_report, "using existing voice connection", stage="voice-ready", force=True)
         try:
             suggestion = record_suggestion(ctx, "play", url)
             tracks = await fetch_media_tracks(url, requested_by=ctx.user, debug_report=debug_report)
@@ -4694,12 +4854,14 @@ async def play(ctx, *, url: str):
                     await finish_debug_playback_message(debug_report, status="error", error="large download cancelled by user")
                     await ctx.followup.send("Download canceled.")
                     return
+            await append_debug_playback_event(debug_report, "building ffmpeg audio source", stage="ffmpeg", force=True)
             player = await build_audio_player(track)
             voice.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, ctx.channel))
             client.current_track_id = track['id']
             client.currently_playing = True
             client.last_track_info = client.current_track_info
             client.current_track_info = track
+            sync_repeat_for_started_track(track)
             client.song_history.append(track)
             await publish_now_playing(
                 ctx.channel,
@@ -4707,6 +4869,7 @@ async def play(ctx, *, url: str):
                 send_message=ctx.followup.send,
                 acknowledge=ctx.followup.send,
             )
+            await append_debug_playback_event(debug_report, "playback started", stage="playing", force=True)
             logger.info(f"Playing now: {track['title']} ({track['id']})")
             if debug_report:
                 debug_report.stage = "playing"
@@ -4793,6 +4956,7 @@ async def playtop(ctx, *, query: str):
             client.currently_playing = True
             client.last_track_info = client.current_track_info
             client.current_track_info = track
+            sync_repeat_for_started_track(track)
             client.song_history.append(track)
             await publish_now_playing(
                 ctx.channel,
@@ -5807,10 +5971,12 @@ async def stop(ctx):
     record_command(ctx)
     await request_voice_vote(ctx.user, ctx.channel, "stop", "stop playback")
 
-@app_commands.describe(mode="debug enables verbose logs and /play download debug messages; normal disables them")
+@app_commands.describe(mode="debug enables logs; admin/all also enable larger edited /play operation messages")
 @app_commands.choices(mode=[
     app_commands.Choice(name="toggle", value="toggle"),
     app_commands.Choice(name="debug", value="debug"),
+    app_commands.Choice(name="admin", value="admin"),
+    app_commands.Choice(name="all", value="all"),
     app_commands.Choice(name="normal", value="normal"),
     app_commands.Choice(name="off", value="off"),
 ])
@@ -5822,24 +5988,30 @@ async def togglelog(ctx, mode: Optional[str] = "toggle"):
         await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
         return
     mode = str(mode or "toggle").lower()
-    if mode == "debug":
+    if mode in {"debug", "admin", "all"}:
         client.log_verbose = True
         client.download_debug_messages = True
+        client.user_operation_debug_messages = mode in {"admin", "all"}
     elif mode in {"normal", "off"}:
         client.log_verbose = False
         client.download_debug_messages = False
+        client.user_operation_debug_messages = False
     else:
         client.log_verbose = not client.log_verbose
         client.download_debug_messages = client.log_verbose
+        client.user_operation_debug_messages = False
     if client.log_verbose:
         logger.setLevel(logging.DEBUG)
-        msg = (
-            "Verbose logging enabled."
-            + (" Download debug messages enabled for `/play`." if client.download_debug_messages else "")
-        )
+        if client.user_operation_debug_messages:
+            msg = "Verbose logging enabled. Admin user-space operation messages enabled for `/play`."
+        else:
+            msg = (
+                "Verbose logging enabled."
+                + (" Download debug messages enabled for `/play`." if client.download_debug_messages else "")
+            )
     else:
         logger.setLevel(logging.INFO)
-        msg = "Verbose logging disabled. Download debug messages disabled."
+        msg = "Verbose logging disabled. Download debug messages disabled. Admin operation messages disabled."
     await ctx.response.send_message(msg)
     logger.info(f"Logging level toggled by admin: {msg}")
 

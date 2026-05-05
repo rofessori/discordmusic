@@ -40,7 +40,7 @@ cache keys are url-safe base64 of the canonical youtube watch URL. raw youtube t
 
 admins can use `/toggledownload` to switch between download-and-play and stream-only mode. stream-only mode skips the local file cache and asks `yt-dlp` for a direct stream url. this uses less disk space, but playback depends more directly on the remote stream staying healthy.
 
-admins can use `/togglelog debug` to enable verbose logs and editable `/play` download debug messages. those messages show sanitized track id, cache state, format id, downloaded amount, speed, and final ffmpeg playback path without exposing local absolute file paths. reacting with the cleanup emoji collapses the debug message back to a normal summary.
+admins can use `/togglelog debug` to enable verbose logs and editable `/play` download debug messages. `/togglelog admin` and `/togglelog all` enable the larger user-space operation trail: `/play` posts the sanitized progress message before voice connection work, then edits that same message through voice join, metadata extraction, cache lookup, download progress, and ffmpeg startup. those messages show sanitized track id, cache state, format id, downloaded amount, speed, and final ffmpeg playback path without exposing local absolute file paths. reacting with the cleanup emoji collapses the debug message back to a normal summary.
 
 ## queue and playback flow
 
@@ -48,7 +48,7 @@ the queue is an in-memory list of upcoming track dictionaries. `/play` starts pl
 
 when a track ends or is skipped, the bot pops the next queued track and starts it. session history is also kept so `/getqueue` can show whether requested songs are playing, queued, played, or removed. non-admin queueing is capped to limit public-server abuse. youtube playlist URL extraction is capped by `MAX_PLAYLIST_TRACKS`, and queued playlist entries are resolved through the normal safe track-fetch path when they reach playback.
 
-`/skip`, `/stop`, and `/volume` are vote-based for non-admins in the bot's voice channel. quorum is 50% of the current human members in that voice channel, rounded up, and bots are excluded. admins bypass votes. the bot starts at 20% volume, admins can hard-set the current session with `/volume_session`, and admins can save a voice-channel default with `/volume_default` in `channel-volume-config.json`.
+`/skip`, `/stop`, and `/volume` are vote-based for non-admins in the bot's voice channel. quorum is 50% of the current human members in that voice channel, rounded up, and bots are excluded. admins bypass votes. the `🔂` now-playing reaction toggles repeat-one for the current track; repeat-off is instant for ordinary use, but after two other recent repeat-off toggles for the same song it uses the same voice quorum unless the user is an admin. the bot starts at 20% volume, admins can hard-set the current session with `/volume_session`, and admins can save a voice-channel default with `/volume_default` in `channel-volume-config.json`.
 
 admins can enable `/autoleave` so that if the bot is alone in voice for the configured delay, it saves the current song plus upcoming queue to `last_session_queue.tmp.json`, disconnects, and reports that the session can be started again with `/play:last`. the saved session is restored by running `/play` with `last`, `play:last`, or `/play:last` as the value.
 
@@ -81,7 +81,7 @@ the now-playing message is the control surface for playback. it shows:
 - a note emoji.
 - a bold song title.
 - an italic youtube url.
-- reaction controls for previous, pause/resume, next, and queue display.
+- reaction controls for previous, pause/resume, next, repeat-one, and queue display.
 
 the bot tries to edit the latest now-playing message when no one has posted after it in the same channel. if another message exists after it, the bot sends a new now-playing message and removes playback-control reactions from the old one.
 

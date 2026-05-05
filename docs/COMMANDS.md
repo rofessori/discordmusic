@@ -32,6 +32,7 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `◀️` | vote to replay the previous track when one is available. admins bypass the vote. |
 | `⏸️` | pause or resume playback. requires the same voice channel unless the user is an admin. |
 | `▶️` | vote to skip to the next track. admins bypass the vote. |
+| `🔂` | toggle repeat-one for the current track. admins bypass repeat-off votes; non-admin repeat-off only starts a vote after two other recent repeat-off toggles for that same song. |
 | `📜` | toggle the current queue above the now-playing message. requires the same voice channel unless the user is an admin. |
 
 ## queue management
@@ -76,7 +77,7 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | --- | --- |
 | `/cachestatus` | show cache directory, size, file count, global playlist cache mode, and force-global state. admin only. |
 | `/purgecache` | delete validated media files from `cache/`, keeping the current playing file if present, and report scanned/removed/skipped/metadata-cleaned counts. admin only. |
-| `/togglelog [toggle\|debug\|normal\|off]` | toggle verbose debug logging. `debug` also enables editable `/play` download debug messages. admin only. |
+| `/togglelog [toggle\|debug\|admin\|all\|normal\|off]` | toggle verbose debug logging. `debug` enables editable `/play` download debug messages; `admin`/`all` turn on the larger user-space operation event trail. admin only. |
 | `/toggledownload` | switch between download-and-play mode and stream-only mode. admin only. |
 | `/disablelinks` | toggle whether queue-style displays are allowed to show youtube links. admin only. |
 | `/volume_session <1-100>` | hard-set this bot session's volume until disconnect. admin only. |

@@ -1,5 +1,7 @@
 ## 2026-05-05
 - Added YouTube playlist URL ingestion for playback and saved-playlist import flows. `/play`, `/playtop`, `/enqueue`, `/q`, `/queuefirst`, `/qfirst`, guided `/playlist new`, and `/playlist add ... url` now understand `list=` links; watch links with both `v=` and `list=` start from the selected video when possible and keep the rest as one playlist block.
+- Expanded admin logging controls with `/togglelog admin` and `/togglelog all`, which make `/play` post a sanitized progress message before voice join and edit it through voice, metadata, cache, download, and ffmpeg events.
+- Added the now-playing `🔂` repeat-one reaction with admin bypass and a repeat-off quorum guard after two other recent repeat-off toggles for the same song.
 
 ## 2026-05-03
 - Added admin `/autoleave <enabled> [delay_seconds]` and `/play:last` recovery so the bot can leave after being alone, save the current song plus queue, and resume that saved session later.

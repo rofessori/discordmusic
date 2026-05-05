@@ -73,6 +73,7 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/enqueue <query|youtube playlist url|playlist:name>` (alias: `/q`)
   - `/queue [links]` (alias: `/queuelist`)
   - `/queuefirst <position|youtube playlist url|playlist:name>` (alias: `/qfirst`)
+  - react `🔂` on now-playing to toggle repeat-one
   - react `📜` on now-playing to toggle the queue above the current song
   - `/skip` (non-admins vote)
   - `/pause` / `/resume`
@@ -115,7 +116,7 @@ Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS cer
   - `/setdeletetime <seconds>`
   - `/volume_session <1–100>`
   - `/volume_default <1–100>`
-  - `/togglelog [toggle|debug|normal|off]`
+  - `/togglelog [toggle|debug|admin|all|normal|off]`
   - `/toggledownload`
   - `/disablelinks`
   - `/reboot`
