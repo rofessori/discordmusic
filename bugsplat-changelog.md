@@ -6,6 +6,7 @@
 - Fixed long saved playlist playback so `/play playlist:...` queues or starts immediately and bounded playlist cache warming runs in the background instead of blocking on up to 15 downloads first.
 - Added sanitized `runtime-audit.json` entries for impactful runtime actions, including config toggles, cache purge/cachequeue, queue file deletion, delayed cleanup, cache hits/downloads, stream fallback, and `/play last` decisions.
 - Added automatic playback-speed normalization: when the bot is alone for the configured alone delay, speed resets to `1x`, logs to `output.log` and `runtime-audit.json`, and posts an admin operation notice when that larger logging mode is enabled.
+- Added playback-aware Discord presence: idle shows `/play (yt-link)`, active playback prefers `song - artist` from YouTube metadata, and fallback or hard-error paths are logged.
 - Improved yt-dlp failure handling: unavailable videos now produce a specific user message, admins get a missing `deno`/`node` hint, and search requests try bounded fallback results before failing.
 - Added `/nowplaying`, which reposts the active now-playing controls without the YouTube URL and uses an admin-configurable per-channel cooldown to prevent spam.
 - Added hidden playback speed controls: `/playspeed`, `/playspeedaccess`, the `playspeed` allow group, and `/play speed`/`--speed:<number>` for single-track requests from 0.1x to 2x.

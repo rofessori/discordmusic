@@ -76,6 +76,9 @@ MAX_PLAYBACK_SPEED = 2.0
 DEFAULT_NOWPLAYING_COOLDOWN_SECONDS = 30
 NOWPLAYING_COOLDOWN_MIN_SECONDS = 5
 NOWPLAYING_COOLDOWN_MAX_SECONDS = 300
+DEFAULT_BOT_PRESENCE = "/play (yt-link)"
+UNKNOWN_BOT_PRESENCE = "???"
+BOT_PRESENCE_MAX_LENGTH = 120
 LAST_SESSION_RECOVERY_MAX_AGE_SECONDS = 1800
 VOICE_VOTE_TIMEOUT_SECONDS = 45
 REPEAT_TOGGLE_RECENT_SECONDS = 300
@@ -1551,6 +1554,7 @@ class Client(discord.Client):
         self.repeat_disable_history = []
         self.current_track_favorite_notice = ""
         self.current_track_started_at = None
+        self.last_presence_text = None
         # File deletion task tracking
         self.deletion_tasks = {}              # map video_id -> asyncio.Future
         # Played tracks tracking
@@ -1586,6 +1590,7 @@ def build_runtime_status():
         f"- queue length: `{len(queue)}`",
         f"- song history entries: `{len(client.song_history)}`",
         f"- currently playing: **{discord.utils.escape_markdown(str(current))}**",
+        f"- bot status: `{discord.utils.escape_markdown(str(client.last_presence_text or DEFAULT_BOT_PRESENCE))}`",
         f"- boot id: `{client.boot_id}`",
         f"- volume: `{int(round(client.volume * 100))}%` (`{'session' if client.session_volume_locked else 'channel/default'}`)",
         f"- playback speed default: `{client.playback_speed:g}x` (`{'everyone' if client.playspeed_allow_all else 'admin/group'}`)",
@@ -1648,12 +1653,15 @@ def build_playback_status() -> str:
     lines = ["**playback status**"]
     if not track:
         lines.append("- state: `idle`")
+        lines.append(f"- bot status: `{discord.utils.escape_markdown(str(client.last_presence_text or DEFAULT_BOT_PRESENCE))}`")
         lines.append(f"- queue length: `{len(queue)}`")
         lines.append(f"- cache use: `{human_bytes(cache_total_bytes())} / {human_bytes(CACHE_HARD_LIMIT_BYTES)}`")
         return "\n".join(lines)
     lines.extend([
         f"- state: `{'playing' if client.currently_playing else 'not playing'}`",
+        f"- bot status: `{discord.utils.escape_markdown(str(client.last_presence_text or DEFAULT_BOT_PRESENCE))}`",
         f"- title: **{discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))}**",
+        f"- song/artist status source: `{bot_presence_for_track(track)[1]}`",
         f"- video id: `{discord.utils.escape_markdown(str(track.get('id') or '-'))}`",
     ])
     if not client.queue_links_disabled and track.get("webpage_url"):
@@ -2337,6 +2345,7 @@ async def perform_stop_action() -> str:
         client.currently_playing = False
         client.current_track_started_at = None
         reset_session_volume("voice disconnect")
+        await update_bot_presence_idle(reason="stop command")
         return "Vittuun täältä keilahallista"
     logger.info("Stop requested while bot was not in a voice channel.")
     return "Not currently in a voice channel."
@@ -2935,6 +2944,7 @@ async def perform_auto_leave_if_still_alone(voice_channel):
             client.current_track_message_show_url = True
             await voice.disconnect()
             reset_session_volume("auto-leave")
+            await update_bot_presence_idle(reason="auto-leave", channel=notify_channel)
             if notify_channel and saved_count:
                 try:
                     await notify_channel.send(
@@ -3889,6 +3899,110 @@ def track_display_parts(track: dict) -> tuple:
     url = discord.utils.escape_markdown(str(url))
     return title, url
 
+def first_metadata_text(track: dict, *keys) -> str:
+    for key in keys:
+        value = track.get(key)
+        if isinstance(value, (list, tuple)):
+            parts = [str(item).strip() for item in value if str(item or "").strip()]
+            if parts:
+                return ", ".join(parts[:3])
+            continue
+        text = str(value or "").strip()
+        if text and text.lower() not in {"unknown", "unknown title", "none", "null"}:
+            return text
+    return ""
+
+def clean_presence_text(value: str) -> str:
+    text = truncate_text(sanitize_debug_text(value), BOT_PRESENCE_MAX_LENGTH)
+    return text.strip() or UNKNOWN_BOT_PRESENCE
+
+def parse_song_artist_from_title(title: str) -> tuple:
+    text = str(title or "").strip()
+    if " - " not in text:
+        return "", ""
+    artist, song = [part.strip() for part in text.split(" - ", 1)]
+    if not artist or not song:
+        return "", ""
+    return song, artist
+
+def bot_presence_for_track(track: Optional[dict]) -> tuple:
+    if track is None:
+        return DEFAULT_BOT_PRESENCE, "idle"
+    try:
+        song = first_metadata_text(track, "track", "alt_title")
+        artist = first_metadata_text(track, "artist", "artists", "creator", "uploader", "channel")
+        if song and artist:
+            return clean_presence_text(f"{song} - {artist}"), "metadata"
+
+        title = first_metadata_text(track, "title", "fulltitle")
+        parsed_song, parsed_artist = parse_song_artist_from_title(title)
+        if parsed_song and parsed_artist:
+            return clean_presence_text(f"{parsed_song} - {parsed_artist}"), "title-parse"
+        if title and artist:
+            return clean_presence_text(f"{title} - {artist}"), "metadata-title"
+        if title:
+            return clean_presence_text(f"PLAYING ({title})"), "title-fallback"
+
+        return UNKNOWN_BOT_PRESENCE, "unknown"
+    except Exception as exc:
+        logger.error(f"Failed to format bot presence for track: {exc}")
+        return DEFAULT_BOT_PRESENCE, "format-error"
+
+async def send_presence_operation_notice(channel, message: str):
+    if not client.user_operation_debug_messages or channel is None:
+        return
+    try:
+        await channel.send(message)
+    except Exception as exc:
+        logger.warning(f"Failed to send bot presence operation notice: {exc}")
+
+async def update_bot_presence(track: Optional[dict] = None, *, reason: str = "", channel=None):
+    presence_text, source = bot_presence_for_track(track if client.currently_playing else None)
+    fallback_title = track.get("title", "-") if isinstance(track, dict) else "-"
+    if source == "title-fallback":
+        logger.info(
+            "Bot presence used title fallback formatting: "
+            f"reason={reason} track={fallback_title}"
+        )
+    elif source in {"unknown", "format-error"}:
+        logger.warning(
+            "Bot presence used fallback formatting: "
+            f"source={source} reason={reason} track={fallback_title}"
+        )
+    if presence_text == client.last_presence_text:
+        logger.debug(f"Bot presence unchanged ({presence_text}) during {reason or 'unknown reason'}.")
+        return
+    try:
+        await client.change_presence(activity=discord.Game(name=presence_text))
+        client.last_presence_text = presence_text
+        logger.info(f"Bot presence updated: {presence_text} (source={source}, reason={reason or 'unspecified'}).")
+    except Exception as exc:
+        logger.error(f"Failed to update bot presence to {presence_text!r}: {exc}")
+        append_runtime_audit_event("bot-presence-error", details={
+            "requested_presence": presence_text,
+            "source": source,
+            "reason": reason,
+            "error": str(exc),
+            "track_id": track.get("id") if isinstance(track, dict) else None,
+            "title": track.get("title") if isinstance(track, dict) else None,
+        })
+        try:
+            await client.change_presence(activity=discord.Game(name=DEFAULT_BOT_PRESENCE))
+            client.last_presence_text = DEFAULT_BOT_PRESENCE
+            logger.info(f"Bot presence fell back to {DEFAULT_BOT_PRESENCE} after update error.")
+        except Exception as fallback_exc:
+            logger.error(f"Failed to apply fallback bot presence: {fallback_exc}")
+        await send_presence_operation_notice(
+            channel or getattr(getattr(client, "current_track_message", None), "channel", None),
+            "**admin operation**\n"
+            "- bot status update failed\n"
+            f"- fallback: `{DEFAULT_BOT_PRESENCE}`\n"
+            f"- reason: `{discord.utils.escape_markdown(truncate_text(str(exc), 180))}`",
+        )
+
+async def update_bot_presence_idle(*, reason: str = "", channel=None):
+    await update_bot_presence(None, reason=reason, channel=channel)
+
 def format_queue_section(*, max_chars=None, show_links=True) -> str:
     lines = ["📜 **Queue**"]
     if not queue:
@@ -3993,6 +4107,7 @@ async def publish_now_playing(channel, track: dict, *, send_message=None, acknow
                 f"Edited now-playing message {old_message.id} in channel {channel.id} "
                 f"for {track.get('title', 'Unknown title')} ({track.get('id', '')})."
             )
+            await update_bot_presence(track, reason="now-playing edit", channel=channel)
             return old_message
         except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
             logger.warning(f"Could not edit now-playing message; sending a new one: {exc}")
@@ -4024,6 +4139,7 @@ async def publish_now_playing(channel, track: dict, *, send_message=None, acknow
         f"Sent now-playing message {new_message.id} in channel {channel.id} "
         f"for {track.get('title', 'Unknown title')} ({track.get('id', '')})."
     )
+    await update_bot_presence(track, reason="now-playing send", channel=channel)
     return new_message
 
 def nowplaying_cooldown_key(ctx) -> tuple:
@@ -4764,7 +4880,7 @@ def command_help_pages() -> dict:
             "description": "Sets the session playback speed used when the bot builds the next FFmpeg audio source.",
             "arguments": [f"speed - number from {MIN_PLAYBACK_SPEED:g} to {MAX_PLAYBACK_SPEED:g}; 1 is normal time."],
             "examples": ["/playspeed 1.25", "/playspeed 0.75"],
-            "notes": ["Hidden operational command.", "Usable by admins, users in the `playspeed` group, or everyone when admins enable playspeed allow-all.", "Already-running audio keeps its current FFmpeg source until the next track or replay."],
+            "notes": ["Hidden operational command.", "Usable by admins, users in the `playspeed` group, or everyone when admins enable playspeed allow-all.", "Already-running audio keeps its current FFmpeg source until the next track or replay.", "If the bot is alone for the configured alone delay, playback speed resets back to normal `1x`."],
             "errors": ["Permission denied.", "Speed outside allowed range."],
         },
         "playspeedaccess": {
@@ -4890,7 +5006,7 @@ def command_help_pages() -> dict:
             "description": "Controls Python log verbosity and the editable Discord `/play` download log independently.",
             "arguments": ["mode - toggle, download, debug, admin, all, normal, or off."],
             "examples": ["/togglelog download", "/togglelog debug", "/togglelog normal"],
-            "notes": ["Admin only.", "`download` keeps normal INFO logging but enables the sanitized `/play` download progress message.", "`debug` enables DEBUG logging plus the download log.", "`admin` and `all` keep the larger user-space operation trail, including automatic alone speed-reset notices.", "Download log messages can be collapsed with the cleanup reaction."],
+            "notes": ["Admin only.", "`download` keeps normal INFO logging but enables the sanitized `/play` download progress message.", "`debug` enables DEBUG logging plus the download log.", "`admin` and `all` keep the larger user-space operation trail, including automatic alone speed-reset notices and bot status update errors.", "Download log messages can be collapsed with the cleanup reaction."],
             "errors": ["Admin permission required."],
         },
         "toggledownload": {
@@ -4953,7 +5069,7 @@ def command_help_pages() -> dict:
             "description": "Shows runtime mode, queue/cache state, warning summary, detailed current playback diagnostics, session suggestions, or recent commands.",
             "arguments": ["view - latest, play, session, or commands."],
             "examples": ["/status", "/status play", "/status session"],
-            "notes": ["Admin only except `/status play` when public access is enabled in `/config show`.", "Session audit lives in memory and resets when the bot restarts.", "Playback diagnostics show any known bitrate, BPM, codec, duration, cache, speed, and voice state fields; unavailable metadata is shown as unknown."],
+            "notes": ["Admin only except `/status play` when public access is enabled in `/config show`.", "Session audit lives in memory and resets when the bot restarts.", "Playback diagnostics show any known bitrate, BPM, codec, duration, cache, speed, bot status, and voice state fields; unavailable metadata is shown as unknown."],
             "errors": ["Admin permission required."],
         },
     }
@@ -5159,6 +5275,7 @@ def track_metadata_from_ytdlp(data: dict, *, filesize: Optional[int] = None) -> 
     for key in (
         "duration", "format_id", "format", "format_note", "acodec", "abr", "tbr",
         "asr", "audio_channels", "dynamic_range", "bpm", "uploader", "channel",
+        "creator", "artist", "artists", "track", "alt_title", "fulltitle",
         "is_live", "age_limit",
     ):
         value = data.get(key)
@@ -6657,16 +6774,18 @@ async def play_next_channel(channel):
             await channel.send("Failed to play the next track.")
             client.currently_playing = False
             client.current_track_started_at = None
+            await update_bot_presence_idle(reason="play-next error", channel=channel)
     else:
         # Queue is empty
         client.currently_playing = False
         client.current_track_started_at = None
         logger.info("No more songs to play. Queue is now clear.")
+        await update_bot_presence_idle(reason="queue empty", channel=channel)
         await channel.send("No more songs in queue.")
 
 @client.event
 async def on_ready():
-    await client.change_presence(activity=discord.Game(name="/help for commands"))
+    await update_bot_presence_idle(reason="startup")
     logger.info(f"{client.user} on käynnistynyt.")
     logger.info(build_runtime_status())
     try:
@@ -6688,6 +6807,7 @@ async def on_voice_state_update(member, before, after):
         client.current_track_started_at = None
         client.auto_leave_disconnect_in_progress = False
         reset_session_volume("bot disconnected")
+        await update_bot_presence_idle(reason="bot disconnected")
         return
     voice = client.current_voice_channel
     voice_channel = getattr(voice, "channel", None)

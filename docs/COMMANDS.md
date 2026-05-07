@@ -98,7 +98,7 @@ Users in `noplaylistcreate` cannot use playlist creation/import commands.
 | `/cachestatus` | show cache directory, size, file count, global playlist cache mode, and force-global state. admin only. |
 | `/cachequeue [include_current]` | download the current song plus upcoming queue into `cache/` immediately. skips tracks requested by `nodownload` users and writes `queue-blackbox.json` audit events. admin only. |
 | `/purgecache` | delete validated media files from `cache/`, keeping the current playing file if present, and report scanned/removed/skipped/metadata-cleaned counts. admin only. |
-| `/togglelog [toggle\|download\|debug\|admin\|all\|normal\|off]` | control logging and Discord download logs. `download` keeps normal INFO logging but enables editable `/play` progress messages; `debug` enables DEBUG logging too; `admin`/`all` turn on the larger user-space operation event trail, including automatic alone speed-reset notices. admin only. |
+| `/togglelog [toggle\|download\|debug\|admin\|all\|normal\|off]` | control logging and Discord download logs. `download` keeps normal INFO logging but enables editable `/play` progress messages; `debug` enables DEBUG logging too; `admin`/`all` turn on the larger user-space operation event trail, including automatic alone speed-reset notices and bot status update errors. admin only. |
 | `/toggledownload` | switch between download-and-play mode and stream-only mode. admin only. |
 | `/disablelinks` | toggle whether queue-style displays are allowed to show youtube links. admin only. |
 | `/volume_session <1-50>` | hard-set this bot session's volume until disconnect within the safety cap. admin only. |
@@ -128,9 +128,11 @@ restriction groups live in `user-permissions.json`: `nodownload` makes that user
 status views:
 
 - `latest`: runtime status plus the latest music suggestion.
-- `play`: detailed current playback status, including known codec, bitrate, BPM, duration, cache, speed, queue, voice, and repeat fields. admins can make this public through `/config show`.
+- `play`: detailed current playback status, including known codec, bitrate, BPM, duration, cache, speed, queue, voice, repeat, and bot status fields. admins can make this public through `/config show`.
 - `session`: music suggestion history for the current bot session.
 - `commands`: the last five slash commands used this session.
+
+the bot's Discord presence is also playback-aware: idle shows `/play (yt-link)`, active playback prefers `song - artist` from YouTube metadata, then falls back to `PLAYING (video title)`, `???`, or the idle prompt on hard update errors.
 
 ## quotes
 
