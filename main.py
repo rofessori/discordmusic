@@ -112,23 +112,6 @@ PLAYLIST_PREDOWNLOAD_ENABLED = (
 )
 YTDLP_NO_CHECK_CERTIFICATE = env_flag("YTDLP_NO_CHECK_CERTIFICATE", False)
 SPOTIFY_ENABLED = env_flag("SPOTIFY_ENABLED", False)
-WEBUI_ENABLED = env_flag("WEBUI_ENABLED", False)
-
-_webui_module = None
-if WEBUI_ENABLED:
-    try:
-        import webui as _webui_module
-        missing_webui = _webui_module.check_dependencies()
-        if missing_webui:
-            logger.warning(
-                "WEBUI_ENABLED=true but required packages are missing. "
-                f"Run: pip install {' '.join(missing_webui)}"
-            )
-            _webui_module = None
-        else:
-            logger.info("Web UI module loaded.")
-    except ImportError as _e:
-        logger.warning(f"WEBUI_ENABLED=true but webui module not found: {_e}")
 
 _spotify_module = None
 if SPOTIFY_ENABLED:
@@ -1224,7 +1207,6 @@ def config_panel_message() -> str:
         f"🌐 force global playlist cache: `{bool_status(client.force_global_playlist_cache_mode)}`",
         f"📦 playlist cache default: `{client.playlist_cache_default_mode}`",
         f"🏃 playspeed for everyone: `{bool_status(client.playspeed_allow_all)}`",
-        f"🏃 alone speed reset: `1x after {alone_speed_reset_delay_seconds()}s alone`",
         f"⏱️ nowplaying cooldown: `{client.nowplaying_cooldown_seconds}s`",
         f"📊 public `/status play`: `{bool_status(client.status_play_public)}`",
         f"🗳️ voice votes: `{bool_status(client.voice_votes_enabled)}`",
@@ -1259,7 +1241,7 @@ async def apply_config_reaction(emoji: str, actor=None) -> str:
         if not client.auto_leave_enabled:
             cancel_auto_leave_task("config panel")
         else:
-            voice = active_voice_client()
+            voice = client.current_voice_channel
             schedule_auto_leave_if_needed(getattr(voice, "channel", None))
         append_runtime_audit_event("config-toggle", actor=actor, details={"setting": "auto_leave_enabled", "enabled": client.auto_leave_enabled})
         return f"auto-leave is now `{bool_status(client.auto_leave_enabled)}`."
@@ -2423,7 +2405,8 @@ async def perform_stop_action() -> str:
         queue.clear()
         await voice.disconnect()
         client.current_voice_channel = None
-        await clear_playback_tracking("stop command")
+        client.currently_playing = False
+        client.current_track_started_at = None
         reset_session_volume("voice disconnect")
         await update_bot_presence_idle(reason="stop command")
         return "Vittuun täältä keilahallista"
@@ -3017,7 +3000,12 @@ async def perform_auto_leave_if_still_alone(voice_channel):
             if voice.is_playing() or voice.is_paused():
                 voice.stop()
             queue.clear()
-            await clear_playback_tracking("auto-leave")
+            client.currently_playing = False
+            client.current_track_id = None
+            client.current_track_info = None
+            client.current_track_started_at = None
+            client.current_track_message_show_queue = False
+            client.current_track_message_show_url = True
             await voice.disconnect()
             reset_session_volume("auto-leave")
             await update_bot_presence_idle(reason="auto-leave", channel=notify_channel)
@@ -4259,25 +4247,286 @@ async def handle_playlist_pager_reaction(reaction, user) -> bool:
 def compact_help_message() -> str:
     return "\n".join([
         "**music bot help**",
-        "",
-        "**playback**",
-        "`/play` - play YouTube, search, saved playlists, or favorites.",
-        "`/playtop` - put a request next.",
-        "`/enqueue` / `/q` - add to the queue.",
-        "`/queue` - show upcoming songs.",
-        "",
-        "**controls**",
-        "`/nowplaying` - repost controls without the video URL.",
-        "`/skip` `/pause` `/resume` `/stop` `/volume` - voice controls.",
-        f"Reactions: {FAVORITE_REACTION} favorite, {QUEUE_REACTION} queue, {REPEAT_REACTION} repeat.",
-        "",
-        "**more**",
-        "`/favorites` - play and manage starred songs.",
-        "`/playlist` - create, play, and edit saved playlists.",
-        "`/whatsnew` - recent bot updates.",
-        "`/help topic:all` - literally every command.",
-        f"React {HELP_EXPAND_REACTION} for common commands.",
+        "/play <youtube url, playlist url, or search> [repeat] - play or queue music",
+        "/play:last - restore last auto-saved session",
+        "/nowplaying - repost controls without the video URL",
+        "/playtop <query or playlist url> - add next",
+        "/enqueue <query or playlist url> (alias /q) - add to queue",
+        "/queue - show queue",
+        "/favorites play - play your starred songs",
+        "/permissions - show your restriction groups",
+        "/whatsnew - recent bot updates",
+        "/help command:<command> - detailed command help",
+        "/help - react 📖 for full help",
     ])
+
+def expanded_help_message() -> str:
+    return expanded_help_pages()[0]
+
+def expanded_help_pages() -> list:
+    pages = [
+        "\n".join([
+            "**music playback**",
+            "/join - Join your voice channel.",
+            "/play <YouTube URL, playlist URL, search, or playlist:name> [repeat] - Play now or queue; single tracks can repeat.",
+            "/play -favorites username - Play a user's public favorites; admins get a warning prompt for private favorites.",
+            "/play:last - Restore the last auto-saved voice session.",
+            "/playtop <query or playlist URL> - Play next.",
+            "/enqueue <query, playlist URL, or playlist:name> (alias: /q) - Add to queue.",
+            "/queue [links] (alias: /queuelist) - Show upcoming songs.",
+            "/queuefirst <position, playlist URL, or playlist:name> (alias: /qfirst) - Move a song or playlist to play next.",
+            f"/skip, /pause, /resume, /stop, /volume <1-{SAFE_VOLUME_MAX_LEVEL}> - Controls. Admins bypass votes; disabling voice votes makes same-channel users direct.",
+            f"Now-playing reactions: {FAVORITE_REACTION} favorite toggle, ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat-one, {QUEUE_REACTION} queue.",
+            "/nowplaying, /now (alias: /nytsoi), /getqueue - Current/session info.",
+            "/favorites play/list/privacy/status - Per-user favorites.",
+            "/whatsnew - Show recent bot updates from RECENT_UPDATES.md.",
+        ]),
+        "\n".join([
+            "**playlists**",
+            "/playlist list - Browse your playlists and visible public playlists.",
+            "/playlist new - Guided playlist creation.",
+            "/playlist new <name> <private|public|current|currentqueue|jono> - Create or import.",
+            "/playlist show <name> - Show playlist details.",
+            "/playlist play <name> - Play or queue a playlist.",
+            "/playlist edit <name> - Show editable playlist details.",
+            "/playlist add <playlist> <current|queue|url> [queue_position] [url] - Add a song.",
+            "/playlist fill current <playlist> - Add queued songs missing from a playlist.",
+            "/playlist addmod <playlist> <user> - Add manager (owner only).",
+            "/playlist remove <playlist> [flags] (alias delete) - Remove with 600s rescue.",
+            "/playlist rename <playlist> <new_name> - Rename a playlist.",
+            "/playlist removesong <playlist> <position> - Remove a song.",
+            "/playlist move <playlist> <from> <to> - Reorder songs.",
+            "/playlist lock <playlist> <locked> - Lock or unlock edits.",
+            "/playlist cachemode <playlist> <mode> - Admin cache policy for one playlist.",
+            "/playlist cacheglobal <mode> [force] - Admin global playlist cache policy.",
+        ]),
+        "\n".join([
+            "**admin / other**",
+            "/favorites cacheglobal, /favorites cacheuser - Favorites cache policy.",
+            "/usergroup add/remove/list, /permissions - Restriction groups.",
+            "/config show - Reaction-toggle runtime config, including voice votes and public `/status play`.",
+            "/userstats <user> - Admin user diagnostics.",
+            "/clear_queue, /restorequeue, /cachequeue - Queue cleanup/recovery/cache.",
+            "/purgequeue, /purgecache, /cachestatus - Cache and disk tools.",
+            "/autoleave, /setdeletetime - Recovery and cleanup timers.",
+            "/volume_session, /volume_default, /volume_force - Admin volume controls.",
+            "/togglelog, /toggledownload, /disablelinks, /reboot, /status - Runtime controls.",
+            "/backup_teekkari_quotes, /random_quote - Quote tools.",
+            "",
+            "Detailed help: `/help command:play`, `/help command:nytsoi`, `/help command:playlist new`.",
+        ]),
+    ]
+    return [trim_discord_message(page) for page in pages]
+
+def trim_discord_message(content: str) -> str:
+    if len(content) <= DISCORD_MESSAGE_SAFE_LIMIT:
+        return content
+    suffix = "\n\n_This help page was shortened to fit Discord._"
+    return content[:DISCORD_MESSAGE_SAFE_LIMIT - len(suffix)].rstrip() + suffix
+
+def help_message_content(*, expanded: bool, page: int = 0) -> str:
+    if not expanded:
+        return compact_help_message()
+    pages = expanded_help_pages()
+    page = max(0, min(page, len(pages) - 1))
+    footer = f"\n\n_page {page + 1}/{len(pages)} - react {HELP_EXPAND_REACTION} to close, ◀️/▶️ to change page_"
+    content = pages[page] + footer
+    return trim_discord_message(content)
+
+async def handle_help_reaction(reaction, user) -> bool:
+    if not client.help_message_id or reaction.message.id != client.help_message_id:
+        return False
+    emoji = str(reaction.emoji)
+    if emoji not in {HELP_EXPAND_REACTION, *HELP_PAGE_REACTIONS}:
+        return True
+    pages = expanded_help_pages()
+    if emoji == HELP_EXPAND_REACTION:
+        client.help_expanded = not client.help_expanded
+        client.help_page = 0
+    elif client.help_expanded and emoji == "◀️":
+        client.help_page = max(0, getattr(client, "help_page", 0) - 1)
+    elif client.help_expanded and emoji == "▶️":
+        client.help_page = min(len(pages) - 1, getattr(client, "help_page", 0) + 1)
+    else:
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception as exc:
+            logger.warning(f"Failed to remove inactive help reaction: {exc}")
+        return True
+    try:
+        await reaction.message.edit(content=help_message_content(
+            expanded=client.help_expanded,
+            page=getattr(client, "help_page", 0),
+        ))
+        if client.help_expanded:
+            for page_emoji in HELP_PAGE_REACTIONS:
+                await reaction.message.add_reaction(page_emoji)
+        await reaction.message.remove_reaction(reaction.emoji, user)
+        state = "expanded" if client.help_expanded else "compacted"
+        logger.info(f"{state.title()} help message {reaction.message.id} page={getattr(client, 'help_page', 0)}.")
+    except Exception as exc:
+        logger.warning(f"Failed to update help message: {exc}")
+    return True
+
+def expanded_help_message() -> str:
+    return expanded_help_pages()[0]
+
+def expanded_help_pages() -> list:
+    pages = [
+        "\n".join([
+            "**help - playback**",
+            "",
+            "`/join` - join your voice channel.",
+            "`/play` - play now or queue YouTube, search, `playlist:name`, or favorites.",
+            "`/playtop` - place a request next.",
+            "`/enqueue` / `/q` - append to the queue.",
+            "`/queue` / `/queuelist` - show upcoming songs.",
+            "`/queuefirst` / `/qfirst` - move a queued item or playlist block next.",
+            "",
+            "**now playing**",
+            "`/nowplaying` - repost controls without the URL.",
+            "`/now` / `/nytsoi` - compact current-song view.",
+            "`/getqueue` - session request history.",
+            f"`/volume` - set volume up to {SAFE_VOLUME_MAX_LEVEL}% for normal users.",
+            "`/skip` `/pause` `/resume` `/stop` - voice controls.",
+            f"Reactions: {FAVORITE_REACTION} favorite, ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat, {QUEUE_REACTION} queue.",
+        ]),
+        "\n".join([
+            "**help - playlists and favorites**",
+            "",
+            "`/playlist list` - browse saved playlists.",
+            "`/playlist new` - guided creation.",
+            "`/playlist new <name> current` - import the upcoming queue.",
+            "`/playlist show` / `/playlist edit` - inspect playlist details.",
+            "`/playlist play` - play or queue a saved playlist.",
+            "`/playlist add` - add current, queued, or URL media.",
+            "`/playlist fill current` - bulk-add queued songs not already present.",
+            "`/playlist remove` / `/playlist delete` - delete with rescue window.",
+            "`/playlist rescue` - restore a recently deleted playlist.",
+            "`/playlist removesong` / `/playlist move` / `/playlist rename` / `/playlist lock` - edit tools.",
+            "`/playlist cachemode` / `/playlist cacheglobal` - admin cache policy.",
+            "`/favorites play` / `/favorites list` - use starred songs.",
+            "`/favorites privacy` / `/favorites status` - manage favorites visibility.",
+        ]),
+        "\n".join([
+            "**help - admin and utilities**",
+            "",
+            "`/config show` - reaction-toggle runtime settings.",
+            "`/status` / `/status play` - runtime and playback diagnostics.",
+            "`/userstats` - admin diagnostics for one user.",
+            "`/usergroup` / `/permissions` - restriction groups.",
+            "`/cachequeue` / `/cachestatus` / `/purgecache` / `/purgequeue` - cache tools.",
+            "`/clear_queue` / `/restorequeue` - queue cleanup and recovery.",
+            "`/autoleave` / `/setdeletetime` - leave and cleanup timers.",
+            "`/volume_session` / `/volume_default` / `/volume_force` - admin volume controls.",
+            "`/togglelog` / `/toggledownload` / `/disablelinks` / `/reboot` - runtime controls.",
+            "`/playspeed` / `/playspeedaccess` / `/nowplayingcooldown` - hidden/admin tuning.",
+            "`/backup_teekkari_quotes` / `/random_quote` - quote tools.",
+            "`/whatsnew` - recent bot changes.",
+            "",
+            "Use `/help topic:all` for every slash command.",
+            "Use `/help command:play` or `/help command:playlist new` for details.",
+        ]),
+    ]
+    return [trim_discord_message(page) for page in pages]
+
+def command_description(command) -> str:
+    return str(getattr(command, "description", "") or "no description").strip()
+
+def all_command_entries() -> list:
+    entries = []
+    for command in client.tree.get_commands():
+        children = list(getattr(command, "commands", []) or [])
+        entries.append(f"`/{command.name}` - {command_description(command)}")
+        for child in children:
+            entries.append(f"`/{command.name} {child.name}` - {command_description(child)}")
+    return entries
+
+def paginate_help_entries(title: str, intro: str, entries: list) -> list:
+    pages = []
+    header = [f"**{title}**", intro, ""]
+    current = list(header)
+    for entry in entries:
+        candidate = "\n".join([*current, entry])
+        if len(candidate) > DISCORD_MESSAGE_SAFE_LIMIT - 120 and len(current) > len(header):
+            pages.append("\n".join(current))
+            current = list(header)
+        current.append(entry)
+    if len(current) > len(header):
+        pages.append("\n".join(current))
+    return [trim_discord_message(page) for page in pages] or ["**all commands**\nNo commands are registered."]
+
+def all_help_pages() -> list:
+    return paginate_help_entries(
+        "all commands",
+        "Every registered slash command and subcommand. Use `/help command:<name>` for details.",
+        all_command_entries(),
+    )
+
+def trim_discord_message(content: str) -> str:
+    if len(content) <= DISCORD_MESSAGE_SAFE_LIMIT:
+        return content
+    suffix = "\n\n_This help page was shortened to fit Discord._"
+    return content[:DISCORD_MESSAGE_SAFE_LIMIT - len(suffix)].rstrip() + suffix
+
+def help_message_content(*, expanded: bool, page: int = 0) -> str:
+    if not expanded:
+        return compact_help_message()
+    pages = client.help_pages or expanded_help_pages()
+    page = max(0, min(page, len(pages) - 1))
+    footer = f"\n\n_page {page + 1}/{len(pages)} - react {HELP_EXPAND_REACTION} to close, ◀️/▶️ to change page_"
+    content = pages[page] + footer
+    return trim_discord_message(content)
+
+async def send_help_pages(ctx, pages: list):
+    client.help_pages = pages
+    client.help_expanded = True
+    client.help_page = 0
+    await ctx.response.send_message(help_message_content(expanded=True, page=0))
+    message = await ctx.original_response()
+    client.help_message_id = message.id
+    for emoji in (HELP_EXPAND_REACTION, *HELP_PAGE_REACTIONS):
+        try:
+            await message.add_reaction(emoji)
+        except Exception as exc:
+            logger.warning(f"Failed to add help reaction {emoji}: {exc}")
+    return message
+
+async def handle_help_reaction(reaction, user) -> bool:
+    if not client.help_message_id or reaction.message.id != client.help_message_id:
+        return False
+    emoji = str(reaction.emoji)
+    if emoji not in {HELP_EXPAND_REACTION, *HELP_PAGE_REACTIONS}:
+        return True
+    pages = client.help_pages or expanded_help_pages()
+    if emoji == HELP_EXPAND_REACTION:
+        client.help_expanded = not client.help_expanded
+        client.help_page = 0
+        client.help_pages = expanded_help_pages() if client.help_expanded else None
+    elif client.help_expanded and emoji == "◀️":
+        client.help_page = max(0, getattr(client, "help_page", 0) - 1)
+    elif client.help_expanded and emoji == "▶️":
+        client.help_page = min(len(pages) - 1, getattr(client, "help_page", 0) + 1)
+    else:
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception as exc:
+            logger.warning(f"Failed to remove inactive help reaction: {exc}")
+        return True
+    try:
+        await reaction.message.edit(content=help_message_content(
+            expanded=client.help_expanded,
+            page=getattr(client, "help_page", 0),
+        ))
+        if client.help_expanded:
+            for page_emoji in HELP_PAGE_REACTIONS:
+                await reaction.message.add_reaction(page_emoji)
+        await reaction.message.remove_reaction(reaction.emoji, user)
+        state = "expanded" if client.help_expanded else "compacted"
+        logger.info(f"{state.title()} help message {reaction.message.id} page={getattr(client, 'help_page', 0)}.")
+    except Exception as exc:
+        logger.warning(f"Failed to update help message: {exc}")
+    return True
 
 def expanded_help_message() -> str:
     return expanded_help_pages()[0]
@@ -4869,7 +5118,7 @@ def command_help_pages() -> dict:
             "description": "Sets the session playback speed used when the bot builds the next FFmpeg audio source.",
             "arguments": [f"speed - number from {MIN_PLAYBACK_SPEED:g} to {MAX_PLAYBACK_SPEED:g}; 1 is normal time."],
             "examples": ["/playspeed 1.25", "/playspeed 0.75"],
-            "notes": ["Hidden operational command.", "Usable by admins, users in the `playspeed` group, or everyone when admins enable playspeed allow-all.", "Already-running audio keeps its current FFmpeg source until the next track or replay.", "If the bot is alone for the configured alone delay, playback speed resets back to normal `1x`."],
+            "notes": ["Hidden operational command.", "Usable by admins, users in the `playspeed` group, or everyone when admins enable playspeed allow-all.", "Already-running audio keeps its current FFmpeg source until the next track or replay."],
             "errors": ["Permission denied.", "Speed outside allowed range."],
         },
         "playspeedaccess": {
@@ -4995,7 +5244,7 @@ def command_help_pages() -> dict:
             "description": "Controls Python log verbosity and the editable Discord `/play` download log independently.",
             "arguments": ["mode - toggle, download, debug, admin, all, normal, or off."],
             "examples": ["/togglelog download", "/togglelog debug", "/togglelog normal"],
-            "notes": ["Admin only.", "`download` keeps normal INFO logging but enables the sanitized `/play` download progress message.", "`debug` enables DEBUG logging plus the download log.", "`admin` and `all` keep the larger user-space operation trail, including automatic alone speed-reset notices and bot status update errors.", "Download log messages can be collapsed with the cleanup reaction."],
+            "notes": ["Admin only.", "`download` keeps normal INFO logging but enables the sanitized `/play` download progress message.", "`debug` enables DEBUG logging plus the download log.", "`admin` and `all` keep the larger user-space operation trail.", "Download log messages can be collapsed with the cleanup reaction."],
             "errors": ["Admin permission required."],
         },
         "toggledownload": {
@@ -5058,7 +5307,7 @@ def command_help_pages() -> dict:
             "description": "Shows runtime mode, queue/cache state, warning summary, detailed current playback diagnostics, session suggestions, or recent commands.",
             "arguments": ["view - latest, play, session, or commands."],
             "examples": ["/status", "/status play", "/status session"],
-            "notes": ["Admin only except `/status play` when public access is enabled in `/config show`.", "Session audit lives in memory and resets when the bot restarts.", "Playback diagnostics show any known bitrate, BPM, codec, duration, cache, speed, bot status, and voice state fields; unavailable metadata is shown as unknown."],
+            "notes": ["Admin only except `/status play` when public access is enabled in `/config show`.", "Session audit lives in memory and resets when the bot restarts.", "Playback diagnostics show any known bitrate, BPM, codec, duration, cache, speed, and voice state fields; unavailable metadata is shown as unknown."],
             "errors": ["Admin permission required."],
         },
     }
@@ -5264,7 +5513,6 @@ def track_metadata_from_ytdlp(data: dict, *, filesize: Optional[int] = None) -> 
     for key in (
         "duration", "format_id", "format", "format_note", "acodec", "abr", "tbr",
         "asr", "audio_channels", "dynamic_range", "bpm", "uploader", "channel",
-        "creator", "artist", "artists", "track", "alt_title", "fulltitle",
         "is_live", "age_limit",
     ):
         value = data.get(key)
@@ -5861,7 +6109,7 @@ async def prompt_move_track_next(ctx, track: dict, playlist_name: str):
         await ctx.followup.send(f"Keeping **{title}** after the playlist.")
 
 def active_playlist_prompt_human_count() -> int:
-    voice = active_voice_client()
+    voice = client.current_voice_channel
     voice_channel = getattr(voice, "channel", None)
     return len(voice_channel_human_members(voice_channel)) if voice_channel else 0
 
@@ -6764,10 +7012,12 @@ async def play_next_channel(channel):
         except Exception as e:
             logger.error(f"Failed to play next track: {e}")
             await channel.send("Failed to play the next track.")
-            await clear_playback_tracking("play-next error")
-            await update_bot_presence_idle(reason="play-next error", channel=channel)
+            client.currently_playing = False
+            client.current_track_started_at = None
     else:
         # Queue is empty
+        client.currently_playing = False
+        client.current_track_started_at = None
         logger.info("No more songs to play. Queue is now clear.")
         await clear_playback_tracking("queue empty")
         await update_bot_presence_idle(reason="queue empty", channel=channel)
@@ -6796,7 +7046,8 @@ async def on_voice_state_update(member, before, after):
             cancel_auto_leave_task("bot disconnected")
         cancel_alone_speed_reset_task("bot disconnected")
         client.current_voice_channel = None
-        await clear_playback_tracking("bot disconnected")
+        client.currently_playing = False
+        client.current_track_started_at = None
         client.auto_leave_disconnect_in_progress = False
         reset_session_volume("bot disconnected")
         await update_bot_presence_idle(reason="bot disconnected")
@@ -8980,13 +9231,6 @@ async def playspeed_cmd(ctx, speed: float):
     if client.current_track_info and "playback_speed" not in client.current_track_info:
         client.current_track_info["playback_speed"] = playback_speed_for_track(client.current_track_info)
     client.playback_speed = parsed
-    voice = active_voice_client(ctx.guild)
-    schedule_alone_speed_reset_if_needed(getattr(voice, "channel", None))
-    append_runtime_audit_event("playback-speed-changed", actor=ctx.user, details={
-        "speed": parsed,
-        "voice_channel_id": getattr(getattr(voice, "channel", None), "id", None),
-        "voice_channel_name": getattr(getattr(voice, "channel", None), "name", None),
-    })
     if abs(parsed - 1.0) <= 0.001:
         await ctx.response.send_message(normal_speed_message())
     else:
@@ -9212,7 +9456,7 @@ async def whatsnew(ctx):
     record_command(ctx)
     await ctx.response.send_message(recent_updates_message())
 
-@app_commands.describe(topic="Help topic, for example all or playlists", command="Command name, for example nytsoi, play, playlist new, or all")
+@app_commands.describe(topic="Help topic, for example playlists", command="Command name, for example nytsoi, play, or playlist new")
 @app_commands.choices(topic=[
     app_commands.Choice(name="all", value="all"),
     app_commands.Choice(name="playlists", value="playlists"),
@@ -9237,7 +9481,6 @@ async def help(ctx, topic: Optional[str] = None, command: Optional[str] = None):
     client.help_message_id = message.id
     client.help_expanded = False
     client.help_page = 0
-    client.help_pages = None
     try:
         await message.add_reaction(HELP_EXPAND_REACTION)
     except Exception as exc:
@@ -9265,127 +9508,6 @@ client.tree.add_command(playlist_group)
 client.tree.add_command(favorites_group)
 client.tree.add_command(usergroup_group)
 client.tree.add_command(config_group)
-
-# ---------------------------------------------------------------------------
-# /spotify commands (only registered when SPOTIFY_ENABLED=true)
-# ---------------------------------------------------------------------------
-
-if _spotify_module is not None:
-    spotify_group = app_commands.Group(name="spotify", description="import Spotify playlists into bot playlists")
-
-    @app_commands.describe(
-        url="Spotify playlist URL or URI",
-        name="Name for the new bot playlist (defaults to the Spotify playlist name)",
-        auto="Skip review and auto-import all matched tracks immediately",
-    )
-    @spotify_group.command(name="import", description="Import a Spotify playlist into a bot playlist.")
-    async def spotify_import_cmd(ctx, url: str, name: Optional[str] = None, auto: Optional[bool] = False):
-        record_command(ctx)
-        if not _spotify_module.extract_spotify_playlist_id(url):
-            await ctx.response.send_message(
-                "That doesn't look like a Spotify playlist URL. "
-                "Use a link like `https://open.spotify.com/playlist/...`",
-                ephemeral=True,
-            )
-            return
-        await ctx.response.defer()
-        progress_msg = await ctx.followup.send("🔍 Reading Spotify playlist…", wait=True)
-        _last_edit = [time.time()]
-
-        async def _progress(done: int, total: int, label: str):
-            now = time.time()
-            if now - _last_edit[0] < 1.5 and done < total - 1:
-                return   # throttle edits to ~1 per 1.5 s to avoid rate-limit
-            _last_edit[0] = now
-            pct = int(100 * done / total) if total else 0
-            filled = pct // 5
-            bar = "█" * filled + "░" * (20 - filled)
-            try:
-                await progress_msg.edit(
-                    content=f"🎵 Matching tracks… [{bar}] {done}/{total}\n_{discord.utils.escape_markdown(label)}_"
-                )
-            except Exception:
-                pass
-
-        try:
-            pending = await _spotify_module.process_spotify_playlist(
-                url,
-                name_override=name,
-                requested_by_user_id=user_id_value(ctx.user),
-                progress_callback=_progress,
-            )
-        except ValueError as exc:
-            await progress_msg.edit(content=f"❌ {discord.utils.escape_markdown(str(exc))}")
-            return
-        except Exception as exc:
-            logger.error(f"Spotify import failed: {exc}", exc_info=True)
-            await progress_msg.edit(content="❌ Failed to read the Spotify playlist. Check output.log.")
-            return
-
-        if not pending.tracks:
-            await progress_msg.edit(content="❌ The Spotify playlist appears to be empty.")
-            return
-
-        uid = user_id_value(ctx.user)
-        uname = user_display(ctx.user)
-
-        # auto mode or zero uncertain tracks: save immediately
-        if auto or not pending.pending_tracks:
-            playlist = await _spotify_save_playlist(pending, uid, uname)
-            n = len(pending.accepted_tracks)
-            n_skipped = len(pending.no_match_tracks)
-            skip_note = f" ({n_skipped} tracks had no match and used search fallback)" if n_skipped else ""
-            if playlist:
-                await progress_msg.edit(
-                    content=(
-                        f"✅ Imported **{discord.utils.escape_markdown(playlist['name'])}** — "
-                        f"**{n}** track(s){skip_note} (`{playlist['id']}`).\n"
-                        f"Play it with `/playlist play {discord.utils.escape_markdown(playlist['name'])}`."
-                    )
-                )
-            else:
-                await progress_msg.edit(content="❌ Nothing to save.")
-            return
-
-        # Show review summary with reaction controls
-        summary = _spotify_module.format_summary_message(pending)
-        try:
-            await progress_msg.edit(content=summary)
-            for emoji in _spotify_module.REVIEW_SUMMARY_EMOJIS:
-                await progress_msg.add_reaction(emoji)
-        except Exception as exc:
-            logger.warning(f"Failed to set up spotify review message: {exc}")
-            await progress_msg.edit(content=summary)
-
-        client.pending_spotify_imports[pending.import_id] = pending
-        client.spotify_review_message_ids[progress_msg.id] = pending.import_id
-        logger.info(
-            f"Spotify import {pending.import_id!r} queued for review by "
-            f"{user_display(ctx.user)} ({uid}): "
-            f"{len(pending.auto_tracks)} auto, {len(pending.pending_tracks)} pending."
-        )
-
-    @spotify_group.command(name="status", description="List your pending Spotify imports.")
-    async def spotify_status_cmd(ctx):
-        record_command(ctx)
-        uid = user_id_value(ctx.user)
-        mine = [
-            p for p in client.pending_spotify_imports.values()
-            if p.requested_by_user_id == uid and not p.is_expired()
-        ]
-        if not mine:
-            await ctx.response.send_message("You have no pending Spotify imports.", ephemeral=True)
-            return
-        lines = ["**Pending Spotify imports:**"]
-        for p in mine:
-            age = int(time.time() - p.created_at)
-            lines.append(
-                f"- `{p.import_id}` — *{discord.utils.escape_markdown(p.playlist_name)}* · "
-                f"{len(p.auto_tracks)} auto, {len(p.pending_tracks)} pending · {age}s ago"
-            )
-        await ctx.response.send_message("\n".join(lines), ephemeral=True)
-
-    client.tree.add_command(spotify_group)
 
 @client.tree.error
 async def on_app_command_error(ctx, error):

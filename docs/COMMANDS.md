@@ -99,7 +99,7 @@ Users in `noplaylistcreate` cannot use playlist creation/import commands.
 | `/cachestatus` | show cache directory, size, file count, global playlist cache mode, and force-global state. admin only. |
 | `/cachequeue [include_current]` | download the current song plus upcoming queue into `cache/` immediately. skips tracks requested by `nodownload` users and writes `queue-blackbox.json` audit events. admin only. |
 | `/purgecache` | delete validated media files from `cache/`, keeping the current playing file if present, and report scanned/removed/skipped/metadata-cleaned counts. admin only. |
-| `/togglelog [toggle\|download\|debug\|admin\|all\|normal\|off]` | control logging and Discord download logs. `download` keeps normal INFO logging but enables editable `/play` progress messages; `debug` enables DEBUG logging too; `admin`/`all` turn on the larger user-space operation event trail, including automatic alone speed-reset notices and bot status update errors. admin only. |
+| `/togglelog [toggle\|download\|debug\|admin\|all\|normal\|off]` | control logging and Discord download logs. `download` keeps normal INFO logging but enables editable `/play` progress messages; `debug` enables DEBUG logging too; `admin`/`all` turn on the larger user-space operation event trail. admin only. |
 | `/toggledownload` | switch between download-and-play mode and stream-only mode. admin only. |
 | `/disablelinks` | toggle whether queue-style displays are allowed to show youtube links. admin only. |
 | `/volume_session <1-50>` | hard-set this bot session's volume until disconnect within the safety cap. admin only. |
@@ -111,7 +111,7 @@ Users in `noplaylistcreate` cannot use playlist creation/import commands.
 | `/status [view]` | show runtime diagnostics, detailed playback status, the full suggestion session, or the last five commands. admin only except `/status play` when public access is enabled. |
 | `/config show` | show a reaction-toggleable runtime config panel for download mode, Discord download logs, DEBUG logging, admin operation trail, queue links, auto-leave, favorites autocache, playlist cache policy, playspeed allow-all, `/nowplaying` cooldown, public `/status play`, and voice votes. admin only. |
 | `/userstats <user>` | show one user's restriction groups, favorites summary, playlist ownership/management, queued/session requests, recent commands, and recent music requests. admin only. |
-| `/playspeed <speed>` | hidden operational speed command. usable by admins, users in `playspeed`, or everyone when allow-all is enabled. applies to future audio sources; current audio changes on next track or replay. if the bot is alone for the configured alone delay, speed resets to normal `1x`. |
+| `/playspeed <speed>` | hidden operational speed command. usable by admins, users in `playspeed`, or everyone when allow-all is enabled. applies to future audio sources; current audio changes on next track or replay. |
 | `/playspeedaccess <enabled>` | allow or restrict speed controls for everyone. admin only. |
 | `/nowplayingcooldown <seconds>` | configure the `/nowplaying` per-channel non-admin cooldown. admin only. |
 | `/usergroup add <user> <group>` | add a runtime restriction group to a user. admin only. |
@@ -129,7 +129,7 @@ restriction groups live in `user-permissions.json`: `nodownload` makes that user
 status views:
 
 - `latest`: runtime status plus the latest music suggestion.
-- `play`: detailed current playback status, including known codec, bitrate, BPM, duration, cache, speed, queue, voice, repeat, and bot status fields. admins can make this public through `/config show`.
+- `play`: detailed current playback status, including known codec, bitrate, BPM, duration, cache, speed, queue, voice, and repeat fields. admins can make this public through `/config show`.
 - `session`: music suggestion history for the current bot session.
 - `commands`: the last five slash commands used this session.
 
@@ -158,7 +158,6 @@ spotify imports match tracks to youtube using a confidence score built from titl
 | command | purpose |
 | --- | --- |
 | `/help` | show the in-discord command summary. react `📖` to expand or compact it; expanded help is paged with `◀️` and `▶️` so it stays under Discord's message limit. |
-| `/help topic:all` | show every registered slash command and subcommand in paged help. |
 | `/help command:<command>` | show a manpage-style help page for any root command, for example `/help command:nytsoi`, `/help command:play`, or `/help command:purgecache`. |
 | `/help command:playlist <subcommand>` | show playlist subcommand help without setting a topic, for example `/help command:playlist new`. |
 | `/help topic:playlists` | show the playlist quick-start help page. |
