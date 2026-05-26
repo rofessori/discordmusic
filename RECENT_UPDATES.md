@@ -12,6 +12,9 @@ Source: local git history and maintainer notes.
 - Added `runtime-audit.json` for sanitized high-impact runtime events such as config toggles, cache purge/cachequeue, queue file deletion, cache playback, and `/play last` decisions.
 - Playback speed now resets to normal `1x` after the bot has been alone for the configured alone delay; the reset is logged and announced when admin operation messages are enabled.
 - Bot status now changes with playback: idle shows `/play (yt-link)`, active tracks prefer `song - artist` from YouTube metadata, and fallback/error cases are logged.
+- Added a `/config show` voice-vote toggle. Admins always bypass votes; when votes are disabled, same-channel users act directly while restriction groups still apply.
+- Reduced active-playlist move-next prompts: admins and disabled-vote sessions act directly, and small voice sessions no longer get the prompt.
+- Added `runtime-audit.json` for sanitized high-impact runtime events such as config toggles, cache purge/cachequeue, queue file deletion, cache playback, and `/play last` decisions.
 - Improved YouTube failure handling so unavailable videos get a useful message and search requests try fallback results before failing.
 - Added `/nowplaying` URL-free controls with cooldown, plus hidden playspeed controls and `/play speed`.
 - Added admin `/cachequeue` to cache the current song plus upcoming queue immediately, with `nodownload` skips and queue-blackbox audit entries.
