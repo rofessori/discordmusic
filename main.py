@@ -112,6 +112,23 @@ PLAYLIST_PREDOWNLOAD_ENABLED = (
 )
 YTDLP_NO_CHECK_CERTIFICATE = env_flag("YTDLP_NO_CHECK_CERTIFICATE", False)
 SPOTIFY_ENABLED = env_flag("SPOTIFY_ENABLED", False)
+WEBUI_ENABLED = env_flag("WEBUI_ENABLED", False)
+
+_webui_module = None
+if WEBUI_ENABLED:
+    try:
+        import webui as _webui_module
+        missing_webui = _webui_module.check_dependencies()
+        if missing_webui:
+            logger.warning(
+                "WEBUI_ENABLED=true but required packages are missing. "
+                f"Run: pip install {' '.join(missing_webui)}"
+            )
+            _webui_module = None
+        else:
+            logger.info("Web UI module loaded.")
+    except ImportError as _e:
+        logger.warning(f"WEBUI_ENABLED=true but webui module not found: {_e}")
 
 _spotify_module = None
 if SPOTIFY_ENABLED:
