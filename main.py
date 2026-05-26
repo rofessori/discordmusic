@@ -111,6 +111,23 @@ PLAYLIST_PREDOWNLOAD_ENABLED = (
     env_flag("PLAYLIST_PREDOWNLOAD_ENABLED")
 )
 YTDLP_NO_CHECK_CERTIFICATE = env_flag("YTDLP_NO_CHECK_CERTIFICATE", False)
+SPOTIFY_ENABLED = env_flag("SPOTIFY_ENABLED", False)
+
+_spotify_module = None
+if SPOTIFY_ENABLED:
+    try:
+        import spotify_import as _spotify_module
+        missing_deps = _spotify_module.check_dependencies()
+        if missing_deps:
+            logger.warning(
+                "SPOTIFY_ENABLED=true but required packages are missing. "
+                f"Run: pip install {' '.join(missing_deps)}"
+            )
+            _spotify_module = None
+        else:
+            logger.info("Spotify import module loaded.")
+    except ImportError as _e:
+        logger.warning(f"SPOTIFY_ENABLED=true but spotify_import.py not found: {_e}")
 ALLOW_ADMIN_ROLE_NAME = env_flag("ALLOW_ADMIN_ROLE_NAME", False)
 MAX_PLAYLIST_TRACKS = env_int("MAX_PLAYLIST_TRACKS", 100)
 MAX_URLS_PER_MESSAGE = env_int("MAX_URLS_PER_MESSAGE", 10)
@@ -1602,6 +1619,9 @@ class Client(discord.Client):
         self.deletion_tasks = {}              # map video_id -> asyncio.Future
         # Played tracks tracking
         self.played_tracks = set()           # set of video IDs that have been played (for history status)
+        # Spotify import review state
+        self.pending_spotify_imports = {}    # import_id -> spotify_import.PendingImport
+        self.spotify_review_message_ids = {} # message_id -> import_id
 
     async def setup_hook(self):
         # Sync application commands to the specified guild
@@ -3721,109 +3741,6 @@ def favorites_status_message(user) -> str:
         f"- cache tracks per user: `{policy.get('per_user_tracks', FAVORITES_CACHE_DEFAULT_TRACKS_PER_USER)}`",
         f"- permissions: {groups}",
     ])
-
-def playlist_track_identity(track: dict) -> Optional[str]:
-    video_id = str(track.get("id") or "").strip()
-    if video_id:
-        return f"id:{video_id}"
-    url = str(track.get("webpage_url") or "").strip()
-    if not url:
-        return None
-    parsed_id = parse_youtube_video_id(url)
-    if parsed_id:
-        return f"id:{parsed_id}"
-    return f"url:{url.lower()}"
-
-def playlist_existing_track_identities(playlist: dict) -> set:
-    identities = set()
-    for track in playlist.get("tracks", []):
-        identity = playlist_track_identity(track)
-        if identity:
-            identities.add(identity)
-    return identities
-
-def playlist_name_error(name: str, user=None) -> Optional[str]:
-    safe_name = normalize_playlist_name(name)
-    if not safe_name:
-        return "I need a playlist name. Try `/playlist new` for guided setup."
-    if len(safe_name) > PLAYLIST_NAME_MAX_LENGTH:
-        return f"Playlist names must be {PLAYLIST_NAME_MAX_LENGTH} characters or shorter."
-    if resolve_playlist_reference(safe_name, user, require_visible=False):
-        return "A playlist with that name already exists. Choose another name or remove the old playlist first."
-    return None
-
-def extract_youtube_urls(text: str) -> list:
-    urls = []
-    for match in re.findall(r"https?://[^\s<>()]+", str(text or "")):
-        candidate = match.rstrip(".,);]>")
-        try:
-            validate_media_query(candidate)
-        except ValueError:
-            continue
-        if (parse_youtube_video_id(candidate) or parse_youtube_playlist_id(candidate)) and candidate not in urls:
-            urls.append(candidate)
-    return urls
-
-def playlist_session_key(user, channel) -> tuple:
-    guild = getattr(channel, "guild", None)
-    guild_id = getattr(guild, "id", 0) or 0
-    return (guild_id, getattr(channel, "id", 0), user_id_value(user))
-
-def expire_playlist_creation_sessions():
-    now = time.time()
-    expired = [
-        key for key, session in client.playlist_creation_sessions.items()
-        if now - session.updated_at > PLAYLIST_CREATION_TIMEOUT_SECONDS
-    ]
-    for key in expired:
-        client.playlist_creation_sessions.pop(key, None)
-        task = client.playlist_creation_timeout_tasks.pop(key, None)
-        if task:
-            task.cancel()
-
-def queue_tracks_for_playlist_import(user) -> list:
-    tracks = []
-    for track in queue:
-        if track.get("webpage_url") or track.get("id"):
-            tracks.append(playlist_track_from_track(track, user))
-    return tracks
-
-def queue_tracks_missing_from_playlist(playlist: dict, user) -> tuple:
-    existing = playlist_existing_track_identities(playlist)
-    additions = []
-    skipped_duplicates = 0
-    skipped_missing = 0
-    for track in queue:
-        if not (track.get("webpage_url") or track.get("id")):
-            skipped_missing += 1
-            continue
-        candidate = playlist_track_from_track(track, user)
-        identity = playlist_track_identity(candidate)
-        if not identity:
-            skipped_missing += 1
-            continue
-        if identity in existing:
-            skipped_duplicates += 1
-            continue
-        existing.add(identity)
-        additions.append(candidate)
-    return additions, skipped_duplicates, skipped_missing
-
-def save_new_playlist(name: str, owner, tracks: Optional[list] = None, visibility: str = "private") -> dict:
-    playlist = make_playlist_metadata(name, owner, visibility)
-    playlist["tracks"] = tracks or []
-    save_playlist(playlist)
-    append_playlist_blackbox_event("created", playlist, owner)
-    logger.info(f"Playlist created: {playlist['name']} ({playlist['id']}) by {user_display(owner)}")
-    return playlist
-
-def playlist_created_message(playlist: dict) -> str:
-    name = discord.utils.escape_markdown(str(playlist.get("name", "playlist")))
-    count = len(playlist.get("tracks", []))
-    return (
-        f"Created playlist **{name}** with {count} track(s). "
-        f"Play it with `/playlist play {playlist.get('name')}`."
-    )
 
 def playlist_to_queue_tracks(playlist: dict, *, block_id: Optional[str] = None) -> list:
     tracks = playlist.get("tracks", [])
@@ -6917,6 +6834,8 @@ async def on_reaction_add(reaction, user):
         return
     if await handle_voice_vote_reaction(reaction, user):
         return
+    if await handle_spotify_review_reaction(reaction, user):
+        return
     # Music control reactions on the "Now Playing" message
     if client.current_track_message and reaction.message.id == client.current_track_message.id:
         if not can_control_voice(user):
@@ -6968,6 +6887,181 @@ async def save_all_channel_messages(channel):
     messages = [message.content async for message in channel.history(limit=None)]
     quotes.saveQuotes(messages)
     return len(messages)
+
+# ---------------------------------------------------------------------------
+# Spotify import reaction handler
+# ---------------------------------------------------------------------------
+
+async def _spotify_save_playlist(pending, ctx_user_id: int, ctx_user_name: str) -> Optional[dict]:
+    """Create a bot playlist from all accepted tracks in a PendingImport."""
+    entries = []
+    for pt in pending.accepted_tracks:
+        entry = _spotify_module.make_playlist_entry(pt, user_id=ctx_user_id, user_name=ctx_user_name)
+        if entry:
+            entries.append(entry)
+    if not entries:
+        return None
+    playlist = save_new_playlist(pending.playlist_name, None, entries, "private")
+    playlist["owner_user_id"] = ctx_user_id
+    playlist["owner_discord_name"] = ctx_user_name
+    save_playlist(playlist)
+    pending.playlist_id = playlist["id"]
+    return playlist
+
+
+async def handle_spotify_review_reaction(reaction, user) -> bool:
+    """
+    Handle reactions on Spotify import summary/review messages.
+    Returns True if the reaction was consumed.
+    """
+    if _spotify_module is None:
+        return False
+    msg_id = reaction.message.id
+    import_id = client.spotify_review_message_ids.get(msg_id)
+    if not import_id:
+        return False
+    pending = client.pending_spotify_imports.get(import_id)
+    if not pending:
+        client.spotify_review_message_ids.pop(msg_id, None)
+        return False
+    if pending.requested_by_user_id and user_id_value(user) != pending.requested_by_user_id:
+        return True   # consume silently — only the requester controls this
+    if pending.is_expired():
+        client.pending_spotify_imports.pop(import_id, None)
+        client.spotify_review_message_ids.pop(msg_id, None)
+        try:
+            await reaction.message.edit(content=f"⏱️ Import `{import_id}` expired. Run `/spotify import` again.")
+        except Exception:
+            pass
+        return True
+
+    pending.touch()
+    emoji = str(reaction.emoji)
+    uid = user_id_value(user)
+    uname = user_display(user)
+
+    # --- Summary phase reactions ---
+    if emoji == _spotify_module.REVIEW_EMOJI_ACCEPT_ALL:
+        # Accept all pending tracks and save
+        for pt in pending.pending_tracks:
+            pt.status = "accepted"
+        playlist = await _spotify_save_playlist(pending, uid, uname)
+        client.pending_spotify_imports.pop(import_id, None)
+        client.spotify_review_message_ids.pop(msg_id, None)
+        if playlist:
+            n = len(pending.accepted_tracks)
+            await reaction.message.edit(
+                content=(
+                    f"✅ Saved **{discord.utils.escape_markdown(playlist['name'])}** "
+                    f"with **{n}** track(s) (`{playlist['id']}`).\n"
+                    f"Play it with `/playlist play {discord.utils.escape_markdown(playlist['name'])}`."
+                )
+            )
+            try:
+                await reaction.message.clear_reactions()
+            except Exception:
+                pass
+        else:
+            await reaction.message.edit(content="❌ No tracks to save.")
+        return True
+
+    if emoji == _spotify_module.REVIEW_EMOJI_SKIP_UNCERTAIN:
+        # Keep only auto-matched tracks
+        for pt in pending.pending_tracks:
+            pt.status = "rejected"
+        playlist = await _spotify_save_playlist(pending, uid, uname)
+        client.pending_spotify_imports.pop(import_id, None)
+        client.spotify_review_message_ids.pop(msg_id, None)
+        if playlist:
+            n = len(pending.auto_tracks)
+            await reaction.message.edit(
+                content=(
+                    f"✅ Saved **{discord.utils.escape_markdown(playlist['name'])}** "
+                    f"with **{n}** auto-matched track(s) (`{playlist['id']}`).\n"
+                    f"Play it with `/playlist play {discord.utils.escape_markdown(playlist['name'])}`."
+                )
+            )
+            try:
+                await reaction.message.clear_reactions()
+            except Exception:
+                pass
+        else:
+            await reaction.message.edit(content="❌ No tracks to save.")
+        return True
+
+    if emoji == _spotify_module.REVIEW_EMOJI_STEP_REVIEW:
+        # Switch to per-track review
+        if not pending.pending_tracks:
+            return True
+        pending.review_index = 0
+        new_content = _spotify_module.format_track_review_message(pending)
+        try:
+            await reaction.message.clear_reactions()
+            await reaction.message.edit(content=new_content)
+            for e in _spotify_module.REVIEW_TRACK_EMOJIS:
+                await reaction.message.add_reaction(e)
+        except Exception as exc:
+            logger.warning(f"Spotify review switch failed: {exc}")
+        return True
+
+    # --- Per-track review reactions ---
+    uncertain = pending.pending_tracks
+
+    if emoji == _spotify_module.REVIEW_EMOJI_ACCEPT:
+        if pending.review_index < len(uncertain):
+            pt = uncertain[pending.review_index]
+            pt.status = "accepted"
+            pending.review_index += 1
+        new_content = _spotify_module.format_track_review_message(pending)
+        await _spotify_update_review_message(reaction.message, new_content, pending)
+        return True
+
+    if emoji == _spotify_module.REVIEW_EMOJI_SKIP:
+        if pending.review_index < len(uncertain):
+            uncertain[pending.review_index].status = "rejected"
+            pending.review_index += 1
+        new_content = _spotify_module.format_track_review_message(pending)
+        await _spotify_update_review_message(reaction.message, new_content, pending)
+        return True
+
+    if emoji == _spotify_module.REVIEW_EMOJI_ALT:
+        if pending.review_index < len(uncertain):
+            uncertain[pending.review_index].advance_alternative()
+        new_content = _spotify_module.format_track_review_message(pending)
+        try:
+            await reaction.message.edit(content=new_content)
+        except Exception:
+            pass
+        return True
+
+    if emoji == _spotify_module.REVIEW_EMOJI_SKIP_ALL:
+        # Accept all remaining uncertain tracks as-is
+        for pt in uncertain[pending.review_index:]:
+            pt.status = "accepted"
+        pending.review_index = len(uncertain)
+        new_content = _spotify_module.format_track_review_message(pending)
+        await _spotify_update_review_message(reaction.message, new_content, pending)
+        return True
+
+    return False
+
+
+async def _spotify_update_review_message(message, new_content: str, pending):
+    """Edit the review message; when review is done, switch to save/cancel reactions."""
+    try:
+        await message.edit(content=new_content)
+    except Exception as exc:
+        logger.warning(f"Failed to edit spotify review message: {exc}")
+        return
+    if pending.review_index >= len(pending.pending_tracks):
+        # Review finished — switch to save/cancel prompt
+        try:
+            await message.clear_reactions()
+            await message.add_reaction(_spotify_module.REVIEW_EMOJI_ACCEPT_ALL)
+            await message.add_reaction(_spotify_module.REVIEW_EMOJI_SKIP_UNCERTAIN)
+        except Exception:
+            pass
+
 
 # Slash commands
 
@@ -7865,19 +7959,26 @@ async def playlist_play(ctx, playlist: str):
 
 @app_commands.describe(
     playlist="Playlist name, id, or playlist:name",
-    source="Add the current song, a queued song, or a YouTube URL",
-    queue_position="Queue position when source is queue",
-    url="YouTube URL when source is url",
+    source="current (default), queue, or url — auto-detected from url/queue_position if omitted",
+    queue_position="Queue position (auto-selects 'queue' source when provided)",
+    url="YouTube URL to add (auto-selects 'url' source when provided)",
 )
 @app_commands.choices(source=[
     app_commands.Choice(name="current", value="current"),
     app_commands.Choice(name="queue", value="queue"),
     app_commands.Choice(name="url", value="url"),
 ])
-@playlist_group.command(name="add", description="Add current, queued, or URL song to a playlist.")
-async def playlist_add(ctx, playlist: str, source: str, queue_position: Optional[int] = None, url: Optional[str] = None):
+@playlist_group.command(name="add", description="Add a song to a playlist. Defaults to currently playing.")
+async def playlist_add(ctx, playlist: str, source: Optional[str] = None, queue_position: Optional[int] = None, url: Optional[str] = None):
     record_command(ctx)
     await ctx.response.defer(ephemeral=True)
+    if source is None:
+        if url is not None:
+            source = "url"
+        elif queue_position is not None:
+            source = "queue"
+        else:
+            source = "current"
     target = resolve_playlist_reference(playlist, ctx.user)
     if not target:
         await ctx.followup.send("Playlist not found or not visible to you. Try `/playlist list`.", ephemeral=True)
@@ -9144,6 +9245,127 @@ client.tree.add_command(playlist_group)
 client.tree.add_command(favorites_group)
 client.tree.add_command(usergroup_group)
 client.tree.add_command(config_group)
+
+# ---------------------------------------------------------------------------
+# /spotify commands (only registered when SPOTIFY_ENABLED=true)
+# ---------------------------------------------------------------------------
+
+if _spotify_module is not None:
+    spotify_group = app_commands.Group(name="spotify", description="import Spotify playlists into bot playlists")
+
+    @app_commands.describe(
+        url="Spotify playlist URL or URI",
+        name="Name for the new bot playlist (defaults to the Spotify playlist name)",
+        auto="Skip review and auto-import all matched tracks immediately",
+    )
+    @spotify_group.command(name="import", description="Import a Spotify playlist into a bot playlist.")
+    async def spotify_import_cmd(ctx, url: str, name: Optional[str] = None, auto: Optional[bool] = False):
+        record_command(ctx)
+        if not _spotify_module.extract_spotify_playlist_id(url):
+            await ctx.response.send_message(
+                "That doesn't look like a Spotify playlist URL. "
+                "Use a link like `https://open.spotify.com/playlist/...`",
+                ephemeral=True,
+            )
+            return
+        await ctx.response.defer()
+        progress_msg = await ctx.followup.send("🔍 Reading Spotify playlist…", wait=True)
+        _last_edit = [time.time()]
+
+        async def _progress(done: int, total: int, label: str):
+            now = time.time()
+            if now - _last_edit[0] < 1.5 and done < total - 1:
+                return   # throttle edits to ~1 per 1.5 s to avoid rate-limit
+            _last_edit[0] = now
+            pct = int(100 * done / total) if total else 0
+            filled = pct // 5
+            bar = "█" * filled + "░" * (20 - filled)
+            try:
+                await progress_msg.edit(
+                    content=f"🎵 Matching tracks… [{bar}] {done}/{total}\n_{discord.utils.escape_markdown(label)}_"
+                )
+            except Exception:
+                pass
+
+        try:
+            pending = await _spotify_module.process_spotify_playlist(
+                url,
+                name_override=name,
+                requested_by_user_id=user_id_value(ctx.user),
+                progress_callback=_progress,
+            )
+        except ValueError as exc:
+            await progress_msg.edit(content=f"❌ {discord.utils.escape_markdown(str(exc))}")
+            return
+        except Exception as exc:
+            logger.error(f"Spotify import failed: {exc}", exc_info=True)
+            await progress_msg.edit(content="❌ Failed to read the Spotify playlist. Check output.log.")
+            return
+
+        if not pending.tracks:
+            await progress_msg.edit(content="❌ The Spotify playlist appears to be empty.")
+            return
+
+        uid = user_id_value(ctx.user)
+        uname = user_display(ctx.user)
+
+        # auto mode or zero uncertain tracks: save immediately
+        if auto or not pending.pending_tracks:
+            playlist = await _spotify_save_playlist(pending, uid, uname)
+            n = len(pending.accepted_tracks)
+            n_skipped = len(pending.no_match_tracks)
+            skip_note = f" ({n_skipped} tracks had no match and used search fallback)" if n_skipped else ""
+            if playlist:
+                await progress_msg.edit(
+                    content=(
+                        f"✅ Imported **{discord.utils.escape_markdown(playlist['name'])}** — "
+                        f"**{n}** track(s){skip_note} (`{playlist['id']}`).\n"
+                        f"Play it with `/playlist play {discord.utils.escape_markdown(playlist['name'])}`."
+                    )
+                )
+            else:
+                await progress_msg.edit(content="❌ Nothing to save.")
+            return
+
+        # Show review summary with reaction controls
+        summary = _spotify_module.format_summary_message(pending)
+        try:
+            await progress_msg.edit(content=summary)
+            for emoji in _spotify_module.REVIEW_SUMMARY_EMOJIS:
+                await progress_msg.add_reaction(emoji)
+        except Exception as exc:
+            logger.warning(f"Failed to set up spotify review message: {exc}")
+            await progress_msg.edit(content=summary)
+
+        client.pending_spotify_imports[pending.import_id] = pending
+        client.spotify_review_message_ids[progress_msg.id] = pending.import_id
+        logger.info(
+            f"Spotify import {pending.import_id!r} queued for review by "
+            f"{user_display(ctx.user)} ({uid}): "
+            f"{len(pending.auto_tracks)} auto, {len(pending.pending_tracks)} pending."
+        )
+
+    @spotify_group.command(name="status", description="List your pending Spotify imports.")
+    async def spotify_status_cmd(ctx):
+        record_command(ctx)
+        uid = user_id_value(ctx.user)
+        mine = [
+            p for p in client.pending_spotify_imports.values()
+            if p.requested_by_user_id == uid and not p.is_expired()
+        ]
+        if not mine:
+            await ctx.response.send_message("You have no pending Spotify imports.", ephemeral=True)
+            return
+        lines = ["**Pending Spotify imports:**"]
+        for p in mine:
+            age = int(time.time() - p.created_at)
+            lines.append(
+                f"- `{p.import_id}` — *{discord.utils.escape_markdown(p.playlist_name)}* · "
+                f"{len(p.auto_tracks)} auto, {len(p.pending_tracks)} pending · {age}s ago"
+            )
+        await ctx.response.send_message("\n".join(lines), ephemeral=True)
+
+    client.tree.add_command(spotify_group)
 
 @client.tree.error
 async def on_app_command_error(ctx, error):

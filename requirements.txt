@@ -14,3 +14,8 @@ yarl==1.20.1
 yt-dlp==2026.3.17
 yt-dlp-ejs==0.8.0
 PyNaCl>=1.5.0,<1.6
+
+# Optional: Spotify playlist import (SPOTIFY_ENABLED=true in .env)
+# spotipy>=2.24.0,<3.0
+# ytmusicapi>=1.8.0,<2.0
+# rapidfuzz>=3.0.0,<4.0
