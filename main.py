@@ -113,6 +113,7 @@ PLAYLIST_PREDOWNLOAD_ENABLED = (
 YTDLP_NO_CHECK_CERTIFICATE = env_flag("YTDLP_NO_CHECK_CERTIFICATE", False)
 SPOTIFY_ENABLED = env_flag("SPOTIFY_ENABLED", False)
 WEBUI_ENABLED = env_flag("WEBUI_ENABLED", False)
+TV_ENABLED = env_flag("TV_ENABLED", False)
 
 _webui_module = None
 if WEBUI_ENABLED:
@@ -145,6 +146,23 @@ if SPOTIFY_ENABLED:
             logger.info("Spotify import module loaded.")
     except ImportError as _e:
         logger.warning(f"SPOTIFY_ENABLED=true but spotify_import.py not found: {_e}")
+
+_tv_module = None
+if TV_ENABLED:
+    try:
+        import tv_stream as _tv_module
+        missing_tv = _tv_module.check_dependencies()
+        if missing_tv:
+            logger.warning(
+                "TV_ENABLED=true but required packages are missing. "
+                f"Run: pip install {' '.join(missing_tv)}"
+            )
+            _tv_module = None
+        else:
+            logger.info("TV streaming module loaded.")
+    except ImportError as _e:
+        logger.warning(f"TV_ENABLED=true but tv_stream.py not found: {_e}")
+
 ALLOW_ADMIN_ROLE_NAME = env_flag("ALLOW_ADMIN_ROLE_NAME", False)
 MAX_PLAYLIST_TRACKS = env_int("MAX_PLAYLIST_TRACKS", 100)
 MAX_URLS_PER_MESSAGE = env_int("MAX_URLS_PER_MESSAGE", 10)
@@ -472,6 +490,10 @@ ADMIN_ROLE_NAME = get_env_value("ADMIN_ROLE_NAME", "admin_role_name", default="B
 ADMIN_USER_ID   = get_env_value("ADMIN_USER_ID", "admin_user_id", required=False)
 ADMIN_USER_ID   = coerce_int(ADMIN_USER_ID, "ADMIN_USER_ID") if ADMIN_USER_ID else None
 ADMIN_USERNAME  = get_env_value("ADMIN_USERNAME", "admin_username", required=False)
+
+TV_STREAM_URL = get_env_value("TV_STREAM_URL", required=False)
+TV_MAX_RESTARTS = env_int("TV_MAX_RESTARTS", 3, 1)
+TV_RESTART_WINDOW_SECONDS = env_int("TV_RESTART_WINDOW_SECONDS", 60, 10)
 
 USER_RESTRICTION_GROUPS = {
     "nodownload",
@@ -1224,6 +1246,7 @@ def config_panel_message() -> str:
         f"🌐 force global playlist cache: `{bool_status(client.force_global_playlist_cache_mode)}`",
         f"📦 playlist cache default: `{client.playlist_cache_default_mode}`",
         f"🏃 playspeed for everyone: `{bool_status(client.playspeed_allow_all)}`",
+        f"🏃 alone speed reset: `1x after {alone_speed_reset_delay_seconds()}s alone`",
         f"⏱️ nowplaying cooldown: `{client.nowplaying_cooldown_seconds}s`",
         f"📊 public `/status play`: `{bool_status(client.status_play_public)}`",
         f"🗳️ voice votes: `{bool_status(client.voice_votes_enabled)}`",
@@ -1258,6 +1281,7 @@ async def apply_config_reaction(emoji: str, actor=None) -> str:
         if not client.auto_leave_enabled:
             cancel_auto_leave_task("config panel")
         else:
+            voice = active_voice_client()
             voice = client.current_voice_channel
             schedule_auto_leave_if_needed(getattr(voice, "channel", None))
         append_runtime_audit_event("config-toggle", actor=actor, details={"setting": "auto_leave_enabled", "enabled": client.auto_leave_enabled})
@@ -1638,6 +1662,12 @@ class Client(discord.Client):
         # Spotify import review state
         self.pending_spotify_imports = {}    # import_id -> spotify_import.PendingImport
         self.spotify_review_message_ids = {} # message_id -> import_id
+        # TV streaming state
+        self.tv_mode_active = False
+        self.tv_stream_url = None
+        self.tv_notify_channel = None
+        self.tv_restart_count = 0
+        self.tv_restart_window_start = None
 
     async def setup_hook(self):
         # Sync application commands to the specified guild
@@ -2390,6 +2420,8 @@ async def finish_voice_vote(vote: VoiceVote, status: str):
             logger.warning(f"Failed to finish voice vote message: {exc}")
 
 async def perform_skip_action() -> str:
+    if client.tv_mode_active:
+        return "TV is playing. Use `/tv stop` first."
     voice = active_voice_client()
     if voice and voice.is_connected() and (voice.is_playing() or voice.is_paused()):
         voice.stop()
@@ -2399,6 +2431,8 @@ async def perform_skip_action() -> str:
     return "No track is currently playing."
 
 async def perform_previous_action() -> str:
+    if client.tv_mode_active:
+        return "TV is playing. Use `/tv stop` first."
     if not client.last_track_info:
         return "No previous track to play."
     queue.insert(0, client.last_track_info)
@@ -2409,6 +2443,7 @@ async def perform_previous_action() -> str:
     return "Queued the previous track to replay next."
 
 async def perform_stop_action() -> str:
+    client.tv_mode_active = False
     voice = active_voice_client()
     if voice:
         cancel_auto_leave_task("stop command")
@@ -2422,6 +2457,7 @@ async def perform_stop_action() -> str:
         queue.clear()
         await voice.disconnect()
         client.current_voice_channel = None
+        await clear_playback_tracking("stop command")
         client.currently_playing = False
         client.current_track_started_at = None
         reset_session_volume("voice disconnect")
@@ -2429,6 +2465,50 @@ async def perform_stop_action() -> str:
         return "Vittuun täältä keilahallista"
     logger.info("Stop requested while bot was not in a voice channel.")
     return "Not currently in a voice channel."
+
+def _tv_after_callback(error, channel):
+    """After-callback for the TV stream FFmpeg process."""
+    if not client.tv_mode_active:
+        return  # tv was stopped intentionally before this fired
+    if error:
+        logger.error(f"TV stream error: {error}")
+        asyncio.run_coroutine_threadsafe(_tv_restart(channel), client.loop)
+
+async def _tv_restart(channel):
+    """Restart the TV stream after an error, up to TV_MAX_RESTARTS times per window."""
+    now = time.time()
+    if client.tv_restart_window_start is None or now - client.tv_restart_window_start > TV_RESTART_WINDOW_SECONDS:
+        client.tv_restart_count = 0
+        client.tv_restart_window_start = now
+    client.tv_restart_count += 1
+    if client.tv_restart_count > TV_MAX_RESTARTS:
+        client.tv_mode_active = False
+        client.tv_stream_url = None
+        await channel.send(
+            f"TV stream lost connection after {TV_MAX_RESTARTS} reconnect attempt(s). "
+            "Use `/tv start` to retry."
+        )
+        return
+    logger.info(f"Restarting TV stream (attempt {client.tv_restart_count}/{TV_MAX_RESTARTS})")
+    await asyncio.sleep(2)
+    await _start_tv_stream(channel, client.tv_stream_url)
+
+async def _start_tv_stream(channel, url):
+    """Connect FFmpeg to the TV stream URL and hand it to the voice client."""
+    voice = active_voice_client()
+    if not voice or not voice.is_connected():
+        logger.error("TV stream start failed: not connected to voice channel.")
+        client.tv_mode_active = False
+        return
+    before_opts = _tv_module.build_ffmpeg_before_options()
+    source = discord.FFmpegPCMAudio(url, before_options=before_opts, options="-vn")
+    player = discord.PCMVolumeTransformer(source, volume=client.volume)
+    voice.play(player, after=lambda e: _tv_after_callback(e, channel))
+    client.tv_mode_active = True
+    client.tv_stream_url = url
+    client.tv_notify_channel = channel
+    client.currently_playing = True
+    logger.info(f"TV stream started: {url}")
 
 async def perform_volume_action(level: int) -> str:
     set_client_volume_level(level)
@@ -3017,6 +3097,7 @@ async def perform_auto_leave_if_still_alone(voice_channel):
             if voice.is_playing() or voice.is_paused():
                 voice.stop()
             queue.clear()
+            await clear_playback_tracking("auto-leave")
             client.currently_playing = False
             client.current_track_id = None
             client.current_track_info = None
@@ -4705,6 +4786,166 @@ async def handle_help_reaction(reaction, user) -> bool:
         logger.warning(f"Failed to update help message: {exc}")
     return True
 
+def expanded_help_message() -> str:
+    return expanded_help_pages()[0]
+
+def expanded_help_pages() -> list:
+    pages = [
+        "\n".join([
+            "**help - playback**",
+            "",
+            "`/join` - join your voice channel.",
+            "`/play` - play now or queue YouTube, search, `playlist:name`, or favorites.",
+            "`/playtop` - place a request next.",
+            "`/enqueue` / `/q` - append to the queue.",
+            "`/queue` / `/queuelist` - show upcoming songs.",
+            "`/queuefirst` / `/qfirst` - move a queued item or playlist block next.",
+            "",
+            "**now playing**",
+            "`/nowplaying` - repost controls without the URL.",
+            "`/now` / `/nytsoi` - compact current-song view.",
+            "`/getqueue` - session request history.",
+            f"`/volume` - set volume up to {SAFE_VOLUME_MAX_LEVEL}% for normal users.",
+            "`/skip` `/pause` `/resume` `/stop` - voice controls.",
+            f"Reactions: {FAVORITE_REACTION} favorite, ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat, {QUEUE_REACTION} queue.",
+        ]),
+        "\n".join([
+            "**help - playlists and favorites**",
+            "",
+            "`/playlist list` - browse saved playlists.",
+            "`/playlist new` - guided creation.",
+            "`/playlist new <name> current` - import the upcoming queue.",
+            "`/playlist show` / `/playlist edit` - inspect playlist details.",
+            "`/playlist play` - play or queue a saved playlist.",
+            "`/playlist add` - add current, queued, or URL media.",
+            "`/playlist fill current` - bulk-add queued songs not already present.",
+            "`/playlist remove` / `/playlist delete` - delete with rescue window.",
+            "`/playlist rescue` - restore a recently deleted playlist.",
+            "`/playlist removesong` / `/playlist move` / `/playlist rename` / `/playlist lock` - edit tools.",
+            "`/playlist cachemode` / `/playlist cacheglobal` - admin cache policy.",
+            "`/favorites play` / `/favorites list` - use starred songs.",
+            "`/favorites privacy` / `/favorites status` - manage favorites visibility.",
+        ]),
+        "\n".join([
+            "**help - admin and utilities**",
+            "",
+            "`/config show` - reaction-toggle runtime settings.",
+            "`/status` / `/status play` - runtime and playback diagnostics.",
+            "`/userstats` - admin diagnostics for one user.",
+            "`/usergroup` / `/permissions` - restriction groups.",
+            "`/cachequeue` / `/cachestatus` / `/purgecache` / `/purgequeue` - cache tools.",
+            "`/clear_queue` / `/restorequeue` - queue cleanup and recovery.",
+            "`/autoleave` / `/setdeletetime` - leave and cleanup timers.",
+            "`/volume_session` / `/volume_default` / `/volume_force` - admin volume controls.",
+            "`/togglelog` / `/toggledownload` / `/disablelinks` / `/reboot` - runtime controls.",
+            "`/playspeed` / `/playspeedaccess` / `/nowplayingcooldown` - hidden/admin tuning.",
+            "`/backup_teekkari_quotes` / `/random_quote` - quote tools.",
+            "`/whatsnew` - recent bot changes.",
+            "",
+            "Use `/help topic:all` for every slash command.",
+            "Use `/help command:play` or `/help command:playlist new` for details.",
+        ]),
+    ]
+    return [trim_discord_message(page) for page in pages]
+
+def command_description(command) -> str:
+    return str(getattr(command, "description", "") or "no description").strip()
+
+def all_command_entries() -> list:
+    entries = []
+    for command in client.tree.get_commands():
+        children = list(getattr(command, "commands", []) or [])
+        entries.append(f"`/{command.name}` - {command_description(command)}")
+        for child in children:
+            entries.append(f"`/{command.name} {child.name}` - {command_description(child)}")
+    return entries
+
+def paginate_help_entries(title: str, intro: str, entries: list) -> list:
+    pages = []
+    header = [f"**{title}**", intro, ""]
+    current = list(header)
+    for entry in entries:
+        candidate = "\n".join([*current, entry])
+        if len(candidate) > DISCORD_MESSAGE_SAFE_LIMIT - 120 and len(current) > len(header):
+            pages.append("\n".join(current))
+            current = list(header)
+        current.append(entry)
+    if len(current) > len(header):
+        pages.append("\n".join(current))
+    return [trim_discord_message(page) for page in pages] or ["**all commands**\nNo commands are registered."]
+
+def all_help_pages() -> list:
+    return paginate_help_entries(
+        "all commands",
+        "Every registered slash command and subcommand. Use `/help command:<name>` for details.",
+        all_command_entries(),
+    )
+
+def trim_discord_message(content: str) -> str:
+    if len(content) <= DISCORD_MESSAGE_SAFE_LIMIT:
+        return content
+    suffix = "\n\n_This help page was shortened to fit Discord._"
+    return content[:DISCORD_MESSAGE_SAFE_LIMIT - len(suffix)].rstrip() + suffix
+
+def help_message_content(*, expanded: bool, page: int = 0) -> str:
+    if not expanded:
+        return compact_help_message()
+    pages = client.help_pages or expanded_help_pages()
+    page = max(0, min(page, len(pages) - 1))
+    footer = f"\n\n_page {page + 1}/{len(pages)} - react {HELP_EXPAND_REACTION} to close, ◀️/▶️ to change page_"
+    content = pages[page] + footer
+    return trim_discord_message(content)
+
+async def send_help_pages(ctx, pages: list):
+    client.help_pages = pages
+    client.help_expanded = True
+    client.help_page = 0
+    await ctx.response.send_message(help_message_content(expanded=True, page=0))
+    message = await ctx.original_response()
+    client.help_message_id = message.id
+    for emoji in (HELP_EXPAND_REACTION, *HELP_PAGE_REACTIONS):
+        try:
+            await message.add_reaction(emoji)
+        except Exception as exc:
+            logger.warning(f"Failed to add help reaction {emoji}: {exc}")
+    return message
+
+async def handle_help_reaction(reaction, user) -> bool:
+    if not client.help_message_id or reaction.message.id != client.help_message_id:
+        return False
+    emoji = str(reaction.emoji)
+    if emoji not in {HELP_EXPAND_REACTION, *HELP_PAGE_REACTIONS}:
+        return True
+    pages = client.help_pages or expanded_help_pages()
+    if emoji == HELP_EXPAND_REACTION:
+        client.help_expanded = not client.help_expanded
+        client.help_page = 0
+        client.help_pages = expanded_help_pages() if client.help_expanded else None
+    elif client.help_expanded and emoji == "◀️":
+        client.help_page = max(0, getattr(client, "help_page", 0) - 1)
+    elif client.help_expanded and emoji == "▶️":
+        client.help_page = min(len(pages) - 1, getattr(client, "help_page", 0) + 1)
+    else:
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception as exc:
+            logger.warning(f"Failed to remove inactive help reaction: {exc}")
+        return True
+    try:
+        await reaction.message.edit(content=help_message_content(
+            expanded=client.help_expanded,
+            page=getattr(client, "help_page", 0),
+        ))
+        if client.help_expanded:
+            for page_emoji in HELP_PAGE_REACTIONS:
+                await reaction.message.add_reaction(page_emoji)
+        await reaction.message.remove_reaction(reaction.emoji, user)
+        state = "expanded" if client.help_expanded else "compacted"
+        logger.info(f"{state.title()} help message {reaction.message.id} page={getattr(client, 'help_page', 0)}.")
+    except Exception as exc:
+        logger.warning(f"Failed to update help message: {exc}")
+    return True
+
 def playlist_general_help_message() -> str:
     return "\n".join([
         "**playlist help**",
@@ -5135,7 +5376,7 @@ def command_help_pages() -> dict:
             "description": "Sets the session playback speed used when the bot builds the next FFmpeg audio source.",
             "arguments": [f"speed - number from {MIN_PLAYBACK_SPEED:g} to {MAX_PLAYBACK_SPEED:g}; 1 is normal time."],
             "examples": ["/playspeed 1.25", "/playspeed 0.75"],
-            "notes": ["Hidden operational command.", "Usable by admins, users in the `playspeed` group, or everyone when admins enable playspeed allow-all.", "Already-running audio keeps its current FFmpeg source until the next track or replay."],
+            "notes": ["Hidden operational command.", "Usable by admins, users in the `playspeed` group, or everyone when admins enable playspeed allow-all.", "Already-running audio keeps its current FFmpeg source until the next track or replay.", "If the bot is alone for the configured alone delay, playback speed resets back to normal `1x`."],
             "errors": ["Permission denied.", "Speed outside allowed range."],
         },
         "playspeedaccess": {
@@ -5261,7 +5502,7 @@ def command_help_pages() -> dict:
             "description": "Controls Python log verbosity and the editable Discord `/play` download log independently.",
             "arguments": ["mode - toggle, download, debug, admin, all, normal, or off."],
             "examples": ["/togglelog download", "/togglelog debug", "/togglelog normal"],
-            "notes": ["Admin only.", "`download` keeps normal INFO logging but enables the sanitized `/play` download progress message.", "`debug` enables DEBUG logging plus the download log.", "`admin` and `all` keep the larger user-space operation trail.", "Download log messages can be collapsed with the cleanup reaction."],
+            "notes": ["Admin only.", "`download` keeps normal INFO logging but enables the sanitized `/play` download progress message.", "`debug` enables DEBUG logging plus the download log.", "`admin` and `all` keep the larger user-space operation trail, including automatic alone speed-reset notices and bot status update errors.", "Download log messages can be collapsed with the cleanup reaction."],
             "errors": ["Admin permission required."],
         },
         "toggledownload": {
@@ -5324,7 +5565,7 @@ def command_help_pages() -> dict:
             "description": "Shows runtime mode, queue/cache state, warning summary, detailed current playback diagnostics, session suggestions, or recent commands.",
             "arguments": ["view - latest, play, session, or commands."],
             "examples": ["/status", "/status play", "/status session"],
-            "notes": ["Admin only except `/status play` when public access is enabled in `/config show`.", "Session audit lives in memory and resets when the bot restarts.", "Playback diagnostics show any known bitrate, BPM, codec, duration, cache, speed, and voice state fields; unavailable metadata is shown as unknown."],
+            "notes": ["Admin only except `/status play` when public access is enabled in `/config show`.", "Session audit lives in memory and resets when the bot restarts.", "Playback diagnostics show any known bitrate, BPM, codec, duration, cache, speed, bot status, and voice state fields; unavailable metadata is shown as unknown."],
             "errors": ["Admin permission required."],
         },
     }
@@ -5530,6 +5771,7 @@ def track_metadata_from_ytdlp(data: dict, *, filesize: Optional[int] = None) -> 
     for key in (
         "duration", "format_id", "format", "format_note", "acodec", "abr", "tbr",
         "asr", "audio_channels", "dynamic_range", "bpm", "uploader", "channel",
+        "creator", "artist", "artists", "track", "alt_title", "fulltitle",
         "is_live", "age_limit",
     ):
         value = data.get(key)
@@ -6126,7 +6368,7 @@ async def prompt_move_track_next(ctx, track: dict, playlist_name: str):
         await ctx.followup.send(f"Keeping **{title}** after the playlist.")
 
 def active_playlist_prompt_human_count() -> int:
-    voice = client.current_voice_channel
+    voice = active_voice_client()
     voice_channel = getattr(voice, "channel", None)
     return len(voice_channel_human_members(voice_channel)) if voice_channel else 0
 
@@ -7029,12 +7271,10 @@ async def play_next_channel(channel):
         except Exception as e:
             logger.error(f"Failed to play next track: {e}")
             await channel.send("Failed to play the next track.")
-            client.currently_playing = False
-            client.current_track_started_at = None
+            await clear_playback_tracking("play-next error")
+            await update_bot_presence_idle(reason="play-next error", channel=channel)
     else:
         # Queue is empty
-        client.currently_playing = False
-        client.current_track_started_at = None
         logger.info("No more songs to play. Queue is now clear.")
         await clear_playback_tracking("queue empty")
         await update_bot_presence_idle(reason="queue empty", channel=channel)
@@ -7063,8 +7303,7 @@ async def on_voice_state_update(member, before, after):
             cancel_auto_leave_task("bot disconnected")
         cancel_alone_speed_reset_task("bot disconnected")
         client.current_voice_channel = None
-        client.currently_playing = False
-        client.current_track_started_at = None
+        await clear_playback_tracking("bot disconnected")
         client.auto_leave_disconnect_in_progress = False
         reset_session_volume("bot disconnected")
         await update_bot_presence_idle(reason="bot disconnected")
@@ -7549,6 +7788,9 @@ async def play(
 ):
     """Plays a YouTube video's audio, a YouTube playlist, or a search result."""
     record_command(ctx)
+    if client.tv_mode_active:
+        await ctx.response.send_message("TV is playing. Use `/tv stop` first.", ephemeral=True)
+        return
     await ctx.response.defer()
     url, repeat_count, repeat_loop, repeat_explicit = parse_play_repeat_request(url, repeat)
     url, playback_speed, speed_explicit, speed_error = parse_play_speed_request(url, speed)
@@ -7768,6 +8010,9 @@ async def play(
 async def playtop(ctx, *, query: str):
     """Adds a song to the top of the queue (plays next)."""
     record_command(ctx)
+    if client.tv_mode_active:
+        await ctx.response.send_message("TV is playing. Use `/tv stop` first.", ephemeral=True)
+        return
     if client.currently_playing and not await require_not_restricted(ctx, "noqueueskip", "add songs to the front of the queue"):
         return
     await ctx.response.defer()
@@ -7852,6 +8097,9 @@ async def playtop(ctx, *, query: str):
 
 async def enqueue_track(ctx, query: str, command_name: str = "enqueue"):
     record_command(ctx)
+    if client.tv_mode_active:
+        await ctx.response.send_message("TV is playing. Use `/tv stop` first.", ephemeral=True)
+        return
     await ctx.response.defer()
     if not await require_queue_room(ctx):
         return
@@ -9248,6 +9496,13 @@ async def playspeed_cmd(ctx, speed: float):
     if client.current_track_info and "playback_speed" not in client.current_track_info:
         client.current_track_info["playback_speed"] = playback_speed_for_track(client.current_track_info)
     client.playback_speed = parsed
+    voice = active_voice_client(ctx.guild)
+    schedule_alone_speed_reset_if_needed(getattr(voice, "channel", None))
+    append_runtime_audit_event("playback-speed-changed", actor=ctx.user, details={
+        "speed": parsed,
+        "voice_channel_id": getattr(getattr(voice, "channel", None), "id", None),
+        "voice_channel_name": getattr(getattr(voice, "channel", None), "name", None),
+    })
     if abs(parsed - 1.0) <= 0.001:
         await ctx.response.send_message(normal_speed_message())
     else:
@@ -9473,7 +9728,7 @@ async def whatsnew(ctx):
     record_command(ctx)
     await ctx.response.send_message(recent_updates_message())
 
-@app_commands.describe(topic="Help topic, for example playlists", command="Command name, for example nytsoi, play, or playlist new")
+@app_commands.describe(topic="Help topic, for example all or playlists", command="Command name, for example nytsoi, play, playlist new, or all")
 @app_commands.choices(topic=[
     app_commands.Choice(name="all", value="all"),
     app_commands.Choice(name="playlists", value="playlists"),
@@ -9498,6 +9753,7 @@ async def help(ctx, topic: Optional[str] = None, command: Optional[str] = None):
     client.help_message_id = message.id
     client.help_expanded = False
     client.help_page = 0
+    client.help_pages = None
     try:
         await message.add_reaction(HELP_EXPAND_REACTION)
     except Exception as exc:
@@ -9525,6 +9781,210 @@ client.tree.add_command(playlist_group)
 client.tree.add_command(favorites_group)
 client.tree.add_command(usergroup_group)
 client.tree.add_command(config_group)
+
+# ---------------------------------------------------------------------------
+# /spotify commands (only registered when SPOTIFY_ENABLED=true)
+# ---------------------------------------------------------------------------
+
+if _spotify_module is not None:
+    spotify_group = app_commands.Group(name="spotify", description="import Spotify playlists into bot playlists")
+
+    @app_commands.describe(
+        url="Spotify playlist URL or URI",
+        name="Name for the new bot playlist (defaults to the Spotify playlist name)",
+        auto="Skip review and auto-import all matched tracks immediately",
+    )
+    @spotify_group.command(name="import", description="Import a Spotify playlist into a bot playlist.")
+    async def spotify_import_cmd(ctx, url: str, name: Optional[str] = None, auto: Optional[bool] = False):
+        record_command(ctx)
+        if not _spotify_module.extract_spotify_playlist_id(url):
+            await ctx.response.send_message(
+                "That doesn't look like a Spotify playlist URL. "
+                "Use a link like `https://open.spotify.com/playlist/...`",
+                ephemeral=True,
+            )
+            return
+        await ctx.response.defer()
+        progress_msg = await ctx.followup.send("🔍 Reading Spotify playlist…", wait=True)
+        _last_edit = [time.time()]
+
+        async def _progress(done: int, total: int, label: str):
+            now = time.time()
+            if now - _last_edit[0] < 1.5 and done < total - 1:
+                return   # throttle edits to ~1 per 1.5 s to avoid rate-limit
+            _last_edit[0] = now
+            pct = int(100 * done / total) if total else 0
+            filled = pct // 5
+            bar = "█" * filled + "░" * (20 - filled)
+            try:
+                await progress_msg.edit(
+                    content=f"🎵 Matching tracks… [{bar}] {done}/{total}\n_{discord.utils.escape_markdown(label)}_"
+                )
+            except Exception:
+                pass
+
+        try:
+            pending = await _spotify_module.process_spotify_playlist(
+                url,
+                name_override=name,
+                requested_by_user_id=user_id_value(ctx.user),
+                progress_callback=_progress,
+            )
+        except ValueError as exc:
+            await progress_msg.edit(content=f"❌ {discord.utils.escape_markdown(str(exc))}")
+            return
+        except Exception as exc:
+            logger.error(f"Spotify import failed: {exc}", exc_info=True)
+            await progress_msg.edit(content="❌ Failed to read the Spotify playlist. Check output.log.")
+            return
+
+        if not pending.tracks:
+            await progress_msg.edit(content="❌ The Spotify playlist appears to be empty.")
+            return
+
+        uid = user_id_value(ctx.user)
+        uname = user_display(ctx.user)
+
+        # auto mode or zero uncertain tracks: save immediately
+        if auto or not pending.pending_tracks:
+            playlist = await _spotify_save_playlist(pending, uid, uname)
+            n = len(pending.accepted_tracks)
+            n_skipped = len(pending.no_match_tracks)
+            skip_note = f" ({n_skipped} tracks had no match and used search fallback)" if n_skipped else ""
+            if playlist:
+                await progress_msg.edit(
+                    content=(
+                        f"✅ Imported **{discord.utils.escape_markdown(playlist['name'])}** — "
+                        f"**{n}** track(s){skip_note} (`{playlist['id']}`).\n"
+                        f"Play it with `/playlist play {discord.utils.escape_markdown(playlist['name'])}`."
+                    )
+                )
+            else:
+                await progress_msg.edit(content="❌ Nothing to save.")
+            return
+
+        # Show review summary with reaction controls
+        summary = _spotify_module.format_summary_message(pending)
+        try:
+            await progress_msg.edit(content=summary)
+            for emoji in _spotify_module.REVIEW_SUMMARY_EMOJIS:
+                await progress_msg.add_reaction(emoji)
+        except Exception as exc:
+            logger.warning(f"Failed to set up spotify review message: {exc}")
+            await progress_msg.edit(content=summary)
+
+        client.pending_spotify_imports[pending.import_id] = pending
+        client.spotify_review_message_ids[progress_msg.id] = pending.import_id
+        logger.info(
+            f"Spotify import {pending.import_id!r} queued for review by "
+            f"{user_display(ctx.user)} ({uid}): "
+            f"{len(pending.auto_tracks)} auto, {len(pending.pending_tracks)} pending."
+        )
+
+    @spotify_group.command(name="status", description="List your pending Spotify imports.")
+    async def spotify_status_cmd(ctx):
+        record_command(ctx)
+        uid = user_id_value(ctx.user)
+        mine = [
+            p for p in client.pending_spotify_imports.values()
+            if p.requested_by_user_id == uid and not p.is_expired()
+        ]
+        if not mine:
+            await ctx.response.send_message("You have no pending Spotify imports.", ephemeral=True)
+            return
+        lines = ["**Pending Spotify imports:**"]
+        for p in mine:
+            age = int(time.time() - p.created_at)
+            lines.append(
+                f"- `{p.import_id}` — *{discord.utils.escape_markdown(p.playlist_name)}* · "
+                f"{len(p.auto_tracks)} auto, {len(p.pending_tracks)} pending · {age}s ago"
+            )
+        await ctx.response.send_message("\n".join(lines), ephemeral=True)
+
+    client.tree.add_command(spotify_group)
+
+# ---------------------------------------------------------------------------
+# /tv commands (only registered when TV_ENABLED=true)
+# ---------------------------------------------------------------------------
+
+if _tv_module is not None:
+    tv_group = app_commands.Group(name="tv", description="live TV stream controls (admin only)")
+
+    @app_commands.describe(url="m3u8 stream URL (defaults to TV_STREAM_URL in .env)")
+    @tv_group.command(name="start", description="Start the live TV stream in your voice channel.")
+    async def tv_start_cmd(ctx, url: Optional[str] = None):
+        record_command(ctx)
+        if not is_user_admin(ctx.user):
+            await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+        stream_url = url or TV_STREAM_URL
+        if not stream_url:
+            await ctx.response.send_message(
+                "No stream URL configured. Set `TV_STREAM_URL` in `.env` or pass a URL as the argument.",
+                ephemeral=True,
+            )
+            return
+        if not ctx.user.voice or not ctx.user.voice.channel:
+            await ctx.response.send_message("You must be in a voice channel to start the TV stream.", ephemeral=True)
+            return
+        if client.currently_playing and not client.tv_mode_active:
+            await ctx.response.send_message(
+                "Music is currently playing. Use `/stop` to clear playback first.", ephemeral=True
+            )
+            return
+        await ctx.response.defer()
+        target_channel = ctx.user.voice.channel
+        voice = active_voice_client(ctx.guild)
+        try:
+            if voice and voice.is_connected():
+                if getattr(voice, "channel", None) != target_channel:
+                    await voice.move_to(target_channel)
+                    apply_channel_volume_default(target_channel, "tv start move")
+            else:
+                voice = await target_channel.connect()
+                client.current_voice_channel = voice
+                apply_channel_volume_default(target_channel, "tv start join")
+        except Exception as exc:
+            logger.error(f"TV start: voice join error: {exc}")
+            await ctx.followup.send("Could not join the voice channel.", ephemeral=True)
+            return
+        # Stop any existing TV stream cleanly before starting a new one
+        if client.tv_mode_active and voice.is_playing():
+            client.tv_mode_active = False
+            voice.stop()
+            await asyncio.sleep(0.1)
+        client.tv_restart_count = 0
+        client.tv_restart_window_start = None
+        await _start_tv_stream(ctx.channel, stream_url)
+        await ctx.followup.send(f"TV stream started in **{target_channel.name}**.")
+
+    @tv_group.command(name="stop", description="Stop the live TV stream and disconnect.")
+    async def tv_stop_cmd(ctx):
+        record_command(ctx)
+        if not is_user_admin(ctx.user):
+            await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+        if not client.tv_mode_active:
+            await ctx.response.send_message("No TV stream is currently active.", ephemeral=True)
+            return
+        client.tv_mode_active = False
+        client.tv_stream_url = None
+        client.tv_notify_channel = None
+        voice = active_voice_client()
+        if voice:
+            try:
+                if voice.is_playing() or voice.is_paused():
+                    voice.stop()
+            except Exception as exc:
+                logger.error(f"TV stop: voice stop error: {exc}")
+            await voice.disconnect()
+            client.current_voice_channel = None
+        await clear_playback_tracking("tv stop command")
+        reset_session_volume("tv stop")
+        await update_bot_presence_idle(reason="tv stop command")
+        await ctx.response.send_message("TV stream stopped.")
+
+    client.tree.add_command(tv_group)
 
 @client.tree.error
 async def on_app_command_error(ctx, error):

@@ -1,4 +1,3 @@
-
 ## 2026-05-07
 - Fixed false "bot is not in a voice channel" / "not currently in a voice channel" decisions caused by stale `client.current_voice_channel` state after admin voice placement, Discord voice moves, or reconnect-like state drift. Voice-sensitive commands now reconcile the tracked client with `guild.voice_client` before checking channel membership, votes, pause/resume, volume, playback recovery, and queued playback.
 - Fixed a related stale now-playing edge case where old playback control reactions and `current_track_info` could survive after stop, queue end, auto-leave, or an unexpected voice disconnect. Finished playback now clears the tracked current song and removes now-playing controls from the old message.
@@ -12,7 +11,6 @@
 - Added sanitized `runtime-audit.json` entries for impactful runtime actions, including config toggles, cache purge/cachequeue, queue file deletion, delayed cleanup, cache hits/downloads, stream fallback, and `/play last` decisions.
 - Added automatic playback-speed normalization: when the bot is alone for the configured alone delay, speed resets to `1x`, logs to `output.log` and `runtime-audit.json`, and posts an admin operation notice when that larger logging mode is enabled.
 - Added playback-aware Discord presence: idle shows `/play (yt-link)`, active playback prefers `song - artist` from YouTube metadata, and fallback or hard-error paths are logged.
-
 - Improved yt-dlp failure handling: unavailable videos now produce a specific user message, admins get a missing `deno`/`node` hint, and search requests try bounded fallback results before failing.
 - Added `/nowplaying`, which reposts the active now-playing controls without the YouTube URL and uses an admin-configurable per-channel cooldown to prevent spam.
 - Added hidden playback speed controls: `/playspeed`, `/playspeedaccess`, the `playspeed` allow group, and `/play speed`/`--speed:<number>` for single-track requests from 0.1x to 2x.
