@@ -13,16 +13,23 @@
 /.idea
 /__pycache__
 
+#quotes not needed here
 /quotes.txt
 
+#this neither
+queue_backup.json
+
+#for dev purposes
 AGENTS.md
 
+#media
 *.webm
 *.mp4
 *.wav
 *.mp3
 *.opus
 
+#logs and other dev
 output.log
 *.log
 bugjournal.md
