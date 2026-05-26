@@ -950,7 +950,8 @@ class SetupAssistant:
         workdir = Path(workdir_text).expanduser().resolve()
         service_content = render_systemd_service(service_user, workdir)
         print()
-        print(f"  {cyan('·')}  User: {service_user}")
+        masked_user = "***" if service_user else "(empty)"
+        print(f"  {cyan('·')}  User: {masked_user}")
         print(f"  {cyan('·')}  WorkingDirectory: {workdir}")
         print()
         if self.ask_yes_no("Install and start the systemd service now?", default=False):
