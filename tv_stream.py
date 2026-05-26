@@ -36,7 +36,41 @@ TV_DEFAULT_RESTART_WINDOW_SECONDS = 60
 
 
 def check_dependencies() -> list:
-    return []  # no additional packages required
+    return []  # no additional packages required — aiohttp comes with discord.py[voice]
+
+
+async def start_webhook_server(on_url_received, secret: str, port: int):
+    """Start a tiny HTTP endpoint the Chrome extension can POST fresh URLs to.
+
+    Expects JSON body: {"url": "<m3u8 url>", "secret": "<TV_WEBHOOK_SECRET>"}
+    Returns the aiohttp AppRunner so the caller can shut it down if needed.
+    """
+    from aiohttp import web
+
+    async def handle_update(request):
+        try:
+            body = await request.json()
+        except Exception:
+            return web.Response(status=400, text="bad json")
+        if body.get("secret") != secret:
+            return web.Response(status=401, text="unauthorized")
+        url = str(body.get("url", ""))
+        if not url.startswith("https://"):
+            return web.Response(status=400, text="url must be https")
+        await on_url_received(url)
+        return web.Response(text="ok")
+
+    async def handle_status(request):
+        return web.Response(text="tv-webhook ok")
+
+    app = web.Application()
+    app.router.add_post("/tv/update", handle_update)
+    app.router.add_get("/tv/status", handle_status)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    return runner
 
 
 def build_ffmpeg_before_options() -> str:

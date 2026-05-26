@@ -494,6 +494,8 @@ ADMIN_USERNAME  = get_env_value("ADMIN_USERNAME", "admin_username", required=Fal
 TV_STREAM_URL = get_env_value("TV_STREAM_URL", required=False)
 TV_MAX_RESTARTS = env_int("TV_MAX_RESTARTS", 3, 1)
 TV_RESTART_WINDOW_SECONDS = env_int("TV_RESTART_WINDOW_SECONDS", 60, 10)
+TV_WEBHOOK_SECRET = get_env_value("TV_WEBHOOK_SECRET", required=False)
+TV_WEBHOOK_PORT = env_int("TV_WEBHOOK_PORT", 8766, 1024)
 
 USER_RESTRICTION_GROUPS = {
     "nodownload",
@@ -7293,6 +7295,26 @@ async def on_ready():
     if _webui_module is not None:
         bot_state = _webui_module.BotState(client_ref=client, queue_ref=queue)
         await _webui_module.start(playlists_dir=PLAYLISTS_DIR, bot_state=bot_state)
+
+    if _tv_module is not None and TV_WEBHOOK_SECRET:
+        async def _on_tv_webhook_url(url: str):
+            client.tv_stream_url = url
+            logger.info(f"TV stream URL updated via webhook: {url}")
+            if client.tv_mode_active:
+                voice = active_voice_client()
+                if voice and voice.is_connected():
+                    client.tv_mode_active = False
+                    if voice.is_playing() or voice.is_paused():
+                        voice.stop()
+                    await asyncio.sleep(0.2)
+                    client.tv_restart_count = 0
+                    client.tv_restart_window_start = None
+                    notify_ch = client.tv_notify_channel
+                    await _start_tv_stream(notify_ch, url)
+                    if notify_ch:
+                        await notify_ch.send("TV stream URL refreshed automatically.")
+        await _tv_module.start_webhook_server(_on_tv_webhook_url, TV_WEBHOOK_SECRET, TV_WEBHOOK_PORT)
+        logger.info(f"TV webhook server listening on port {TV_WEBHOOK_PORT}")
 
 @client.event
 async def on_voice_state_update(member, before, after):

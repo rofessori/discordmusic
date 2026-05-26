@@ -41,3 +41,6 @@ venv
 /webui/frontend/node_modules/
 /webui/frontend/dist/
 /webui/frontend/.env.local
+
+# Local-only browser extension (personal setup, not part of the project)
+/chrome-extension/
