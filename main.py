@@ -4528,6 +4528,166 @@ async def handle_help_reaction(reaction, user) -> bool:
         logger.warning(f"Failed to update help message: {exc}")
     return True
 
+def expanded_help_message() -> str:
+    return expanded_help_pages()[0]
+
+def expanded_help_pages() -> list:
+    pages = [
+        "\n".join([
+            "**help - playback**",
+            "",
+            "`/join` - join your voice channel.",
+            "`/play` - play now or queue YouTube, search, `playlist:name`, or favorites.",
+            "`/playtop` - place a request next.",
+            "`/enqueue` / `/q` - append to the queue.",
+            "`/queue` / `/queuelist` - show upcoming songs.",
+            "`/queuefirst` / `/qfirst` - move a queued item or playlist block next.",
+            "",
+            "**now playing**",
+            "`/nowplaying` - repost controls without the URL.",
+            "`/now` / `/nytsoi` - compact current-song view.",
+            "`/getqueue` - session request history.",
+            f"`/volume` - set volume up to {SAFE_VOLUME_MAX_LEVEL}% for normal users.",
+            "`/skip` `/pause` `/resume` `/stop` - voice controls.",
+            f"Reactions: {FAVORITE_REACTION} favorite, ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat, {QUEUE_REACTION} queue.",
+        ]),
+        "\n".join([
+            "**help - playlists and favorites**",
+            "",
+            "`/playlist list` - browse saved playlists.",
+            "`/playlist new` - guided creation.",
+            "`/playlist new <name> current` - import the upcoming queue.",
+            "`/playlist show` / `/playlist edit` - inspect playlist details.",
+            "`/playlist play` - play or queue a saved playlist.",
+            "`/playlist add` - add current, queued, or URL media.",
+            "`/playlist fill current` - bulk-add queued songs not already present.",
+            "`/playlist remove` / `/playlist delete` - delete with rescue window.",
+            "`/playlist rescue` - restore a recently deleted playlist.",
+            "`/playlist removesong` / `/playlist move` / `/playlist rename` / `/playlist lock` - edit tools.",
+            "`/playlist cachemode` / `/playlist cacheglobal` - admin cache policy.",
+            "`/favorites play` / `/favorites list` - use starred songs.",
+            "`/favorites privacy` / `/favorites status` - manage favorites visibility.",
+        ]),
+        "\n".join([
+            "**help - admin and utilities**",
+            "",
+            "`/config show` - reaction-toggle runtime settings.",
+            "`/status` / `/status play` - runtime and playback diagnostics.",
+            "`/userstats` - admin diagnostics for one user.",
+            "`/usergroup` / `/permissions` - restriction groups.",
+            "`/cachequeue` / `/cachestatus` / `/purgecache` / `/purgequeue` - cache tools.",
+            "`/clear_queue` / `/restorequeue` - queue cleanup and recovery.",
+            "`/autoleave` / `/setdeletetime` - leave and cleanup timers.",
+            "`/volume_session` / `/volume_default` / `/volume_force` - admin volume controls.",
+            "`/togglelog` / `/toggledownload` / `/disablelinks` / `/reboot` - runtime controls.",
+            "`/playspeed` / `/playspeedaccess` / `/nowplayingcooldown` - hidden/admin tuning.",
+            "`/backup_teekkari_quotes` / `/random_quote` - quote tools.",
+            "`/whatsnew` - recent bot changes.",
+            "",
+            "Use `/help topic:all` for every slash command.",
+            "Use `/help command:play` or `/help command:playlist new` for details.",
+        ]),
+    ]
+    return [trim_discord_message(page) for page in pages]
+
+def command_description(command) -> str:
+    return str(getattr(command, "description", "") or "no description").strip()
+
+def all_command_entries() -> list:
+    entries = []
+    for command in client.tree.get_commands():
+        children = list(getattr(command, "commands", []) or [])
+        entries.append(f"`/{command.name}` - {command_description(command)}")
+        for child in children:
+            entries.append(f"`/{command.name} {child.name}` - {command_description(child)}")
+    return entries
+
+def paginate_help_entries(title: str, intro: str, entries: list) -> list:
+    pages = []
+    header = [f"**{title}**", intro, ""]
+    current = list(header)
+    for entry in entries:
+        candidate = "\n".join([*current, entry])
+        if len(candidate) > DISCORD_MESSAGE_SAFE_LIMIT - 120 and len(current) > len(header):
+            pages.append("\n".join(current))
+            current = list(header)
+        current.append(entry)
+    if len(current) > len(header):
+        pages.append("\n".join(current))
+    return [trim_discord_message(page) for page in pages] or ["**all commands**\nNo commands are registered."]
+
+def all_help_pages() -> list:
+    return paginate_help_entries(
+        "all commands",
+        "Every registered slash command and subcommand. Use `/help command:<name>` for details.",
+        all_command_entries(),
+    )
+
+def trim_discord_message(content: str) -> str:
+    if len(content) <= DISCORD_MESSAGE_SAFE_LIMIT:
+        return content
+    suffix = "\n\n_This help page was shortened to fit Discord._"
+    return content[:DISCORD_MESSAGE_SAFE_LIMIT - len(suffix)].rstrip() + suffix
+
+def help_message_content(*, expanded: bool, page: int = 0) -> str:
+    if not expanded:
+        return compact_help_message()
+    pages = client.help_pages or expanded_help_pages()
+    page = max(0, min(page, len(pages) - 1))
+    footer = f"\n\n_page {page + 1}/{len(pages)} - react {HELP_EXPAND_REACTION} to close, ◀️/▶️ to change page_"
+    content = pages[page] + footer
+    return trim_discord_message(content)
+
+async def send_help_pages(ctx, pages: list):
+    client.help_pages = pages
+    client.help_expanded = True
+    client.help_page = 0
+    await ctx.response.send_message(help_message_content(expanded=True, page=0))
+    message = await ctx.original_response()
+    client.help_message_id = message.id
+    for emoji in (HELP_EXPAND_REACTION, *HELP_PAGE_REACTIONS):
+        try:
+            await message.add_reaction(emoji)
+        except Exception as exc:
+            logger.warning(f"Failed to add help reaction {emoji}: {exc}")
+    return message
+
+async def handle_help_reaction(reaction, user) -> bool:
+    if not client.help_message_id or reaction.message.id != client.help_message_id:
+        return False
+    emoji = str(reaction.emoji)
+    if emoji not in {HELP_EXPAND_REACTION, *HELP_PAGE_REACTIONS}:
+        return True
+    pages = client.help_pages or expanded_help_pages()
+    if emoji == HELP_EXPAND_REACTION:
+        client.help_expanded = not client.help_expanded
+        client.help_page = 0
+        client.help_pages = expanded_help_pages() if client.help_expanded else None
+    elif client.help_expanded and emoji == "◀️":
+        client.help_page = max(0, getattr(client, "help_page", 0) - 1)
+    elif client.help_expanded and emoji == "▶️":
+        client.help_page = min(len(pages) - 1, getattr(client, "help_page", 0) + 1)
+    else:
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception as exc:
+            logger.warning(f"Failed to remove inactive help reaction: {exc}")
+        return True
+    try:
+        await reaction.message.edit(content=help_message_content(
+            expanded=client.help_expanded,
+            page=getattr(client, "help_page", 0),
+        ))
+        if client.help_expanded:
+            for page_emoji in HELP_PAGE_REACTIONS:
+                await reaction.message.add_reaction(page_emoji)
+        await reaction.message.remove_reaction(reaction.emoji, user)
+        state = "expanded" if client.help_expanded else "compacted"
+        logger.info(f"{state.title()} help message {reaction.message.id} page={getattr(client, 'help_page', 0)}.")
+    except Exception as exc:
+        logger.warning(f"Failed to update help message: {exc}")
+    return True
+
 def playlist_general_help_message() -> str:
     return "\n".join([
         "**playlist help**",
@@ -6873,6 +7033,9 @@ async def on_ready():
         logger.info(f"Synced {len(synced)} command(s)")
     except Exception as e:
         logger.error(f"Sync error: {e}")
+    if _webui_module is not None:
+        bot_state = _webui_module.BotState(client_ref=client, queue_ref=queue)
+        await _webui_module.start(playlists_dir=PLAYLISTS_DIR, bot_state=bot_state)
 
 @client.event
 async def on_voice_state_update(member, before, after):

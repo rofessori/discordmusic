@@ -1,0 +1,1095 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Music Bot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.3/Sortable.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:           #0b0b0e;
+      --panel:        #111116;
+      --surface:      #18181f;
+      --raised:       #1e1e28;
+      --border:       #252532;
+      --border-h:     #38384e;
+      --accent:       #7c5cfc;
+      --accent-dim:   rgba(124, 92, 252, 0.12);
+      --accent-glow:  rgba(124, 92, 252, 0.35);
+      --text:         #e4e4f0;
+      --text-dim:     #aaaac0;
+      --muted:        #50506a;
+      --success:      #4ade80;
+      --danger:       #ff4d6d;
+      --warn:         #fbbf24;
+      --font-display: 'Syne', sans-serif;
+      --font-body:    'DM Sans', sans-serif;
+      --font-mono:    'JetBrains Mono', monospace;
+      --radius:       8px;
+      --radius-lg:    14px;
+    }
+
+    html, body, #root { height: 100%; }
+
+    body {
+      font-family: var(--font-body);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* subtle noise grain */
+    body::after {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 9998;
+      opacity: 0.025;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='300'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='300' height='300' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-repeat: repeat;
+    }
+
+    /* ---- Layout ---- */
+    .layout { display: flex; flex-direction: column; height: 100%; }
+
+    /* ---- Topbar ---- */
+    .topbar {
+      display: flex; align-items: center; gap: 14px;
+      padding: 0 20px; height: 52px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      position: relative;
+    }
+    .topbar::after {
+      content: '';
+      position: absolute;
+      bottom: -1px; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent 0%, var(--accent-glow) 40%, var(--accent-glow) 60%, transparent 100%);
+    }
+
+    .topbar-logo {
+      font-family: var(--font-display);
+      font-weight: 800;
+      font-size: 14px;
+      letter-spacing: 0.1em;
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      flex-shrink: 0;
+      user-select: none;
+    }
+    .logo-mark {
+      width: 28px; height: 28px;
+      border-radius: 8px;
+      background: var(--accent-dim);
+      border: 1px solid rgba(124, 92, 252, 0.3);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      color: var(--accent);
+    }
+
+    .topbar-now {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      padding: 0 8px;
+    }
+    .eq-bars {
+      display: flex;
+      align-items: flex-end;
+      gap: 2px;
+      height: 14px;
+      flex-shrink: 0;
+    }
+    .eq-bar {
+      width: 3px;
+      background: var(--accent);
+      border-radius: 2px;
+    }
+    .eq-bar:nth-child(1) { animation: eq1 0.9s ease-in-out infinite; }
+    .eq-bar:nth-child(2) { animation: eq2 0.65s ease-in-out infinite; }
+    .eq-bar:nth-child(3) { animation: eq3 1.05s ease-in-out infinite; }
+    .eq-bar:nth-child(4) { animation: eq1 0.75s ease-in-out infinite reverse; }
+    @keyframes eq1 { 0%,100% { height: 3px; } 50% { height: 12px; } }
+    @keyframes eq2 { 0%,100% { height: 7px; } 50% { height: 5px; } }
+    @keyframes eq3 { 0%,100% { height: 10px; } 50% { height: 3px; } }
+
+    .np-title {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .np-idle {
+      font-size: 12px;
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    .topbar-logout {
+      padding: 5px 12px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--muted);
+      font-family: var(--font-body);
+      font-size: 12px;
+      cursor: pointer;
+      transition: all .15s;
+      flex-shrink: 0;
+    }
+    .topbar-logout:hover {
+      border-color: var(--border-h);
+      color: var(--text);
+      background: var(--surface);
+    }
+
+    /* ---- Body ---- */
+    .body { display: flex; flex: 1; overflow: hidden; }
+
+    /* ---- Sidebar ---- */
+    .sidebar {
+      width: 228px; flex-shrink: 0;
+      background: var(--panel); border-right: 1px solid var(--border);
+      display: flex; flex-direction: column; overflow-y: auto;
+      padding: 10px 8px 16px;
+    }
+
+    .sidebar-section {
+      padding: 10px 10px 5px;
+      font-family: var(--font-display);
+      font-size: 9.5px;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .sidebar-divider {
+      height: 1px;
+      background: var(--border);
+      margin: 10px 6px;
+    }
+
+    .sidebar-item {
+      display: flex; align-items: center;
+      padding: 8px 10px; gap: 9px; cursor: pointer;
+      border-radius: var(--radius);
+      transition: background .12s;
+      position: relative;
+      overflow: hidden;
+    }
+    .sidebar-item:hover { background: var(--surface); }
+    .sidebar-item.active { background: var(--accent-dim); }
+    .sidebar-item.active::before {
+      content: '';
+      position: absolute;
+      left: 0; top: 20%; bottom: 20%;
+      width: 2px;
+      background: var(--accent);
+      border-radius: 0 2px 2px 0;
+      box-shadow: 0 0 8px var(--accent-glow);
+    }
+
+    .sidebar-icon {
+      font-size: 12px; flex-shrink: 0; width: 16px;
+      text-align: center; color: var(--muted);
+      transition: color .12s;
+    }
+    .sidebar-item.active .sidebar-icon,
+    .sidebar-item:hover .sidebar-icon { color: var(--text); }
+
+    .sidebar-name {
+      flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-size: 13px;
+      font-weight: 400;
+      color: var(--text-dim);
+      transition: color .12s;
+    }
+    .sidebar-item.active .sidebar-name,
+    .sidebar-item:hover .sidebar-name { color: var(--text); }
+
+    .sidebar-count {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--muted);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 1px 6px;
+      border-radius: 4px;
+      flex-shrink: 0;
+    }
+    .sidebar-item.active .sidebar-count {
+      background: rgba(124, 92, 252, 0.1);
+      border-color: rgba(124, 92, 252, 0.2);
+      color: var(--accent);
+    }
+
+    .sidebar-empty {
+      padding: 10px 12px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.7;
+    }
+    .sidebar-empty code {
+      font-family: var(--font-mono);
+      font-size: 10.5px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 1px 5px;
+      border-radius: 3px;
+      color: var(--accent);
+    }
+
+    /* ---- Main ---- */
+    .main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+
+    /* ---- Editor header ---- */
+    .editor-header {
+      display: flex; align-items: center; gap: 10px;
+      padding: 13px 18px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      background: var(--panel);
+    }
+    .editor-title {
+      font-family: var(--font-display);
+      font-size: 15px;
+      font-weight: 700;
+      flex: 1;
+      letter-spacing: 0.01em;
+    }
+    .pill {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 3px 8px;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted);
+      flex-shrink: 0;
+      font-weight: 500;
+    }
+    .pill.pub {
+      background: rgba(74, 222, 128, 0.07);
+      color: var(--success);
+      border-color: rgba(74, 222, 128, 0.18);
+    }
+
+    /* ---- Buttons ---- */
+    button {
+      border: none; border-radius: var(--radius); cursor: pointer;
+      font-family: var(--font-body); font-size: 13px; font-weight: 500;
+      transition: all .15s;
+    }
+    button:disabled { opacity: .35; cursor: not-allowed; }
+
+    .btn {
+      padding: 7px 14px;
+      background: var(--surface);
+      color: var(--text-dim);
+      border: 1px solid var(--border);
+    }
+    .btn:hover:not(:disabled) {
+      background: var(--raised);
+      color: var(--text);
+      border-color: var(--border-h);
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+      border: 1px solid var(--accent);
+      box-shadow: 0 2px 12px rgba(124, 92, 252, 0.22);
+    }
+    .btn-primary:hover:not(:disabled) {
+      background: #6b4ee8;
+      box-shadow: 0 4px 20px rgba(124, 92, 252, 0.4);
+    }
+    .btn-sm { padding: 5px 11px; font-size: 12px; }
+
+    .btn-icon {
+      padding: 4px 7px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+    }
+    .btn-icon:hover:not(:disabled) {
+      color: var(--danger);
+      background: rgba(255, 77, 109, 0.08);
+      border-color: rgba(255, 77, 109, 0.18);
+    }
+
+    /* ---- Track list ---- */
+    .track-scroll { flex: 1; overflow-y: auto; padding: 6px 0; }
+    .track-list { list-style: none; padding: 4px 10px; display: flex; flex-direction: column; gap: 1px; }
+
+    .track-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 10px;
+      border-radius: var(--radius);
+      border: 1px solid transparent;
+      transition: background .1s, border-color .1s;
+    }
+    .track-item:hover { background: var(--surface); border-color: var(--border); }
+    .track-item.sortable-ghost { opacity: .25; background: var(--surface); }
+    .track-item.sortable-drag {
+      background: var(--raised);
+      border-color: var(--accent);
+      box-shadow: 0 8px 28px rgba(0,0,0,.55), 0 0 0 1px var(--accent);
+    }
+
+    .drag-handle {
+      cursor: grab;
+      color: var(--border);
+      flex-shrink: 0;
+      user-select: none;
+      display: flex; flex-direction: column; gap: 3px;
+      padding: 3px;
+      border-radius: 4px;
+      transition: color .1s, background .1s;
+    }
+    .drag-handle-row { display: flex; gap: 3px; }
+    .drag-handle-dot { width: 2px; height: 2px; border-radius: 50%; background: currentColor; }
+    .track-item:hover .drag-handle { color: var(--muted); }
+    .drag-handle:active { cursor: grabbing; }
+
+    .track-num {
+      font-family: var(--font-mono);
+      color: var(--muted);
+      font-size: 11px;
+      width: 26px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+    .track-title {
+      flex: 1;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-size: 13px; font-weight: 500;
+    }
+    .track-id {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--muted);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      flex-shrink: 0;
+      max-width: 130px;
+    }
+    .track-pending {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--warn);
+      background: rgba(251, 191, 36, 0.08);
+      border: 1px solid rgba(251, 191, 36, 0.2);
+      padding: 1px 6px;
+      border-radius: 4px;
+      flex-shrink: 0;
+    }
+
+    /* ---- Empty state ---- */
+    .empty {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%;
+      gap: 10px;
+      color: var(--muted);
+      text-align: center;
+      padding: 40px;
+    }
+    .empty-icon { font-size: 26px; opacity: 0.35; }
+    .empty-text { font-size: 13px; }
+
+    /* ---- Add bar ---- */
+    .add-bar {
+      display: flex; gap: 8px;
+      padding: 12px 16px;
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+      background: var(--panel);
+    }
+    .add-input {
+      flex: 1; padding: 8px 13px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: var(--font-body);
+      font-size: 13px;
+      outline: none;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .add-input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+    }
+    .add-input::placeholder { color: var(--muted); }
+
+    /* ---- Unsaved bar ---- */
+    .unsaved-bar {
+      display: flex; align-items: center; gap: 10px;
+      padding: 9px 16px;
+      background: rgba(251, 191, 36, 0.05);
+      border-top: 1px solid rgba(251, 191, 36, 0.18);
+      flex-shrink: 0;
+    }
+    .unsaved-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--warn);
+      box-shadow: 0 0 6px var(--warn);
+      animation: pulse-warn 1.8s ease-in-out infinite;
+      flex-shrink: 0;
+    }
+    @keyframes pulse-warn { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .unsaved-text { flex: 1; color: var(--warn); font-size: 12px; font-weight: 500; }
+
+    /* ---- Queue ---- */
+    .queue-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 10px;
+      border-radius: var(--radius);
+      border: 1px solid transparent;
+      transition: background .1s;
+    }
+    .queue-item:hover { background: var(--surface); border-color: var(--border); }
+    .queue-num {
+      font-family: var(--font-mono);
+      font-size: 11px; color: var(--muted);
+      width: 24px; text-align: right; flex-shrink: 0;
+    }
+    .queue-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+    .queue-id {
+      font-family: var(--font-mono);
+      font-size: 10px; color: var(--muted); flex-shrink: 0;
+      max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    /* ---- Toast ---- */
+    .toast-stack {
+      position: fixed; bottom: 20px; right: 20px;
+      display: flex; flex-direction: column; gap: 8px;
+      z-index: 9997; pointer-events: none;
+    }
+    .toast {
+      padding: 10px 14px;
+      border-radius: var(--radius);
+      font-size: 13px; font-weight: 500;
+      color: var(--text); pointer-events: auto;
+      animation: toast-in .22s cubic-bezier(0.34, 1.5, 0.64, 1);
+      max-width: 320px;
+      display: flex; align-items: center; gap: 9px;
+    }
+    .toast.ok  { background: rgba(74,222,128,.1); border: 1px solid rgba(74,222,128,.22); }
+    .toast.err { background: rgba(255,77,109,.1); border: 1px solid rgba(255,77,109,.22); }
+    .toast.info { background: var(--raised); border: 1px solid var(--border); }
+    .toast-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .toast.ok  .toast-dot { background: var(--success); }
+    .toast.err .toast-dot { background: var(--danger); }
+    .toast.info .toast-dot { background: var(--muted); }
+    @keyframes toast-in {
+      from { transform: translateX(16px) scale(0.95); opacity: 0; }
+      to   { transform: none; opacity: 1; }
+    }
+
+    /* ---- Login ---- */
+    .login-wrap {
+      display: flex; align-items: center; justify-content: center;
+      height: 100%;
+      background:
+        radial-gradient(ellipse 60% 40% at 50% -5%, rgba(124,92,252,0.1) 0%, transparent 70%),
+        var(--bg);
+    }
+    .login-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 44px 36px;
+      width: 360px;
+      display: flex; flex-direction: column; gap: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+    .login-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 10%; right: 10%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    }
+    .login-head {
+      display: flex; flex-direction: column; align-items: center; gap: 14px;
+    }
+    .login-icon {
+      width: 52px; height: 52px;
+      border-radius: 14px;
+      background: var(--accent-dim);
+      border: 1px solid rgba(124,92,252,0.25);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px;
+      color: var(--accent);
+      box-shadow: 0 0 24px rgba(124,92,252,0.12);
+    }
+    .login-title {
+      font-family: var(--font-display);
+      font-size: 22px; font-weight: 800;
+      letter-spacing: 0.03em;
+    }
+    .login-sub {
+      font-size: 13px; color: var(--muted); text-align: center; line-height: 1.6;
+    }
+    .login-sub code {
+      font-family: var(--font-mono);
+      font-size: 11px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 1px 5px; border-radius: 3px;
+      color: var(--accent);
+    }
+    .login-input {
+      width: 100%; padding: 10px 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: var(--font-mono); font-size: 13px;
+      letter-spacing: 0.05em;
+      outline: none;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    .login-input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px var(--accent-dim);
+    }
+    .login-input::placeholder {
+      font-family: var(--font-body);
+      letter-spacing: 0;
+      color: var(--muted);
+    }
+    .login-error {
+      background: rgba(255,77,109,0.07);
+      border: 1px solid rgba(255,77,109,0.2);
+      color: var(--danger);
+      font-size: 12px;
+      text-align: center;
+      padding: 8px 12px;
+      border-radius: var(--radius);
+    }
+    .login-submit {
+      width: 100%; padding: 11px;
+      background: var(--accent);
+      color: #fff;
+      font-family: var(--font-display);
+      font-size: 12px; font-weight: 700;
+      letter-spacing: 0.1em; text-transform: uppercase;
+      border: 1px solid var(--accent);
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: all .15s;
+      box-shadow: 0 2px 16px rgba(124,92,252,0.28);
+    }
+    .login-submit:hover:not(:disabled) {
+      background: #6b4ee8;
+      box-shadow: 0 4px 24px rgba(124,92,252,0.45);
+    }
+    .login-submit:disabled { opacity: .35; cursor: not-allowed; }
+
+    /* ---- Splash ---- */
+    .splash {
+      flex: 1; height: 100%;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 10px; color: var(--muted); text-align: center; padding: 40px;
+    }
+    .splash-arrow {
+      font-size: 16px; opacity: 0.3;
+      animation: nudge 2s ease-in-out infinite;
+    }
+    @keyframes nudge { 0%,100% { transform: translateX(0); } 50% { transform: translateX(-8px); } }
+    .splash-text { font-size: 13px; }
+
+    /* ---- Spinner ---- */
+    .spinner {
+      display: inline-block;
+      width: 14px; height: 14px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin .7s linear infinite;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ---- Scrollbar ---- */
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ---- API client ----
+    function makeApi(token) {
+      const h = token ? { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" } : { "Content-Type": "application/json" };
+      const req = async (method, path, body) => {
+        const r = await fetch(path, { method, headers: h, body: body ? JSON.stringify(body) : undefined });
+        if (r.status === 401 || r.status === 403) throw new Error("AUTH");
+        if (!r.ok) {
+          let msg = `HTTP ${r.status}`;
+          try { const d = await r.json(); msg = d.detail || msg; } catch {}
+          throw new Error(msg);
+        }
+        if (r.status === 204) return null;
+        return r.json();
+      };
+      return {
+        playlists:     () => req("GET",    "/api/playlists"),
+        playlist:      id => req("GET",    `/api/playlists/${id}`),
+        patchPlaylist: (id, body) => req("PATCH",  `/api/playlists/${id}`, body),
+        removeTrack:   (id, idx)  => req("DELETE", `/api/playlists/${id}/tracks/${idx}`),
+        addTrack:      (id, url)  => req("POST",   `/api/playlists/${id}/tracks`, { url }),
+        queue:         () => req("GET",    "/api/queue"),
+        nowPlaying:    () => req("GET",    "/api/now-playing"),
+      };
+    }
+
+    // ---- Toasts ----
+    function useToasts() {
+      const [toasts, setToasts] = useState([]);
+      const add = useCallback((msg, type = "info") => {
+        const id = Date.now();
+        setToasts(t => [...t, { id, msg, type }]);
+        setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3500);
+      }, []);
+      return [toasts, add];
+    }
+
+    // ---- SortableJS drag-and-drop ----
+    function useSort(listRef, items, onReorder) {
+      const sortRef = useRef(null);
+      useEffect(() => {
+        if (!listRef.current) return;
+        if (sortRef.current) sortRef.current.destroy();
+        sortRef.current = Sortable.create(listRef.current, {
+          animation: 150,
+          handle: ".drag-handle",
+          ghostClass: "sortable-ghost",
+          dragClass: "sortable-drag",
+          onEnd(evt) {
+            if (evt.oldIndex === evt.newIndex) return;
+            const next = [...items];
+            const [moved] = next.splice(evt.oldIndex, 1);
+            next.splice(evt.newIndex, 0, moved);
+            onReorder(next);
+          },
+        });
+        return () => { if (sortRef.current) { sortRef.current.destroy(); sortRef.current = null; } };
+      }, [items, onReorder]);
+    }
+
+    // ---- Login ----
+    function LoginScreen({ onLogin }) {
+      const [val, setVal] = useState("");
+      const [err, setErr] = useState("");
+      const [loading, setLoading] = useState(false);
+      const submit = async e => {
+        e.preventDefault();
+        if (!val.trim()) return;
+        setLoading(true); setErr("");
+        try {
+          await makeApi(val.trim()).playlists();
+          onLogin(val.trim());
+        } catch (ex) {
+          setErr(ex.message === "AUTH" ? "Invalid token." : `Error: ${ex.message}`);
+        } finally { setLoading(false); }
+      };
+      return (
+        <div className="login-wrap">
+          <form className="login-card" onSubmit={submit}>
+            <div className="login-head">
+              <div className="login-icon">♪</div>
+              <div className="login-title">Music Bot</div>
+              <div className="login-sub">
+                Enter your <code>WEBUI_SECRET_KEY</code><br />to access the playlist editor.
+              </div>
+            </div>
+            <input
+              className="login-input"
+              type="password"
+              placeholder="Access token"
+              value={val}
+              onChange={e => setVal(e.target.value)}
+              autoFocus
+            />
+            {err && <div className="login-error">{err}</div>}
+            <button className="login-submit" disabled={loading || !val.trim()}>
+              {loading ? <span className="spinner" /> : "Unlock"}
+            </button>
+          </form>
+        </div>
+      );
+    }
+
+    // ---- Drag handle (dot grid) ----
+    function DragHandle() {
+      return (
+        <span className="drag-handle" title="Drag to reorder">
+          {[0,1,2].map(i => (
+            <span key={i} className="drag-handle-row">
+              <span className="drag-handle-dot" />
+              <span className="drag-handle-dot" />
+            </span>
+          ))}
+        </span>
+      );
+    }
+
+    // ---- Track item ----
+    function TrackItem({ track, index, onRemove }) {
+      const id = track.id ? `youtu.be/${track.id}` : track.webpage_url;
+      return (
+        <li className="track-item">
+          <DragHandle />
+          <span className="track-num">{index + 1}</span>
+          <span className="track-title" title={track.title}>{track.title}</span>
+          {track.needs_refresh && <span className="track-pending" title="Will resolve on first play">pending</span>}
+          <span className="track-id" title={track.webpage_url}>{id}</span>
+          <button className="btn-icon" onClick={() => onRemove(index)} title="Remove">✕</button>
+        </li>
+      );
+    }
+
+    // ---- Add track bar ----
+    function AddTrackBar({ playlistId, api, onAdded, toast }) {
+      const [val, setVal] = useState("");
+      const [loading, setLoading] = useState(false);
+      const submit = async e => {
+        e.preventDefault();
+        const url = val.trim();
+        if (!url) return;
+        if (!url.includes("youtube.com") && !url.includes("youtu.be")) {
+          toast("Only YouTube URLs are supported.", "err");
+          return;
+        }
+        setLoading(true);
+        try {
+          const res = await api.addTrack(playlistId, url);
+          setVal("");
+          if (res.duplicate) {
+            toast(`Already in playlist: ${res.title}`, "info");
+          } else {
+            toast(`Added: ${res.title}`, "ok");
+            onAdded();
+          }
+        } catch (ex) {
+          toast(`Failed to add: ${ex.message}`, "err");
+        } finally { setLoading(false); }
+      };
+      return (
+        <form className="add-bar" onSubmit={submit}>
+          <input
+            className="add-input"
+            type="text"
+            placeholder="Paste a YouTube URL to add a track…"
+            value={val}
+            onChange={e => setVal(e.target.value)}
+          />
+          <button className="btn btn-primary btn-sm" disabled={loading || !val.trim()}>
+            {loading ? <span className="spinner" /> : "Add"}
+          </button>
+        </form>
+      );
+    }
+
+    // ---- Playlist editor ----
+    function PlaylistEditor({ playlistId, api, toast }) {
+      const [pl, setPl] = useState(null);
+      const [tracks, setTracks] = useState([]);
+      const [dirty, setDirty] = useState(false);
+      const [saving, setSaving] = useState(false);
+      const [loading, setLoading] = useState(true);
+      const listRef = useRef(null);
+
+      const load = useCallback(async () => {
+        setLoading(true);
+        try {
+          const data = await api.playlist(playlistId);
+          setPl(data);
+          setTracks(data.tracks || []);
+          setDirty(false);
+        } catch (ex) {
+          toast(`Failed to load playlist: ${ex.message}`, "err");
+        } finally { setLoading(false); }
+      }, [playlistId]);
+
+      useEffect(() => { load(); }, [load]);
+
+      const reorder = useCallback(next => { setTracks(next); setDirty(true); }, []);
+      useSort(listRef, tracks, reorder);
+
+      const removeTrack = idx => { setTracks(t => t.filter((_, i) => i !== idx)); setDirty(true); };
+
+      const save = async () => {
+        setSaving(true);
+        try {
+          await api.patchPlaylist(playlistId, { tracks });
+          setDirty(false);
+          toast("Playlist saved.", "ok");
+        } catch (ex) {
+          toast(`Save failed: ${ex.message}`, "err");
+        } finally { setSaving(false); }
+      };
+
+      const discard = () => { setTracks(pl?.tracks || []); setDirty(false); };
+
+      if (loading) return <div className="empty"><span className="spinner" /></div>;
+      if (!pl) return <div className="empty"><div className="empty-text">Playlist not found.</div></div>;
+
+      return (
+        <>
+          <div className="editor-header">
+            <div className="editor-title">{pl.name}</div>
+            <span className={`pill${pl.visibility === "public" ? " pub" : ""}`}>{pl.visibility}</span>
+            <span className="pill">{tracks.length} {tracks.length === 1 ? "track" : "tracks"}</span>
+          </div>
+
+          <div className="track-scroll">
+            {tracks.length === 0
+              ? <div className="empty">
+                  <div className="empty-icon">♪</div>
+                  <div className="empty-text">No tracks yet. Add one below.</div>
+                </div>
+              : <ul ref={listRef} className="track-list">
+                  {tracks.map((t, i) => (
+                    <TrackItem key={t.id || `idx-${i}`} track={t} index={i} onRemove={removeTrack} />
+                  ))}
+                </ul>
+            }
+          </div>
+
+          {dirty && (
+            <div className="unsaved-bar">
+              <span className="unsaved-dot" />
+              <span className="unsaved-text">Unsaved changes</span>
+              <button className="btn btn-sm" onClick={discard}>Discard</button>
+              <button className="btn btn-primary btn-sm" disabled={saving} onClick={save}>
+                {saving ? <><span className="spinner" /> Saving…</> : "Save"}
+              </button>
+            </div>
+          )}
+
+          <AddTrackBar playlistId={playlistId} api={api} onAdded={load} toast={toast} />
+        </>
+      );
+    }
+
+    // ---- Queue panel ----
+    function QueuePanel({ api, toast }) {
+      const [queue, setQueue] = useState(null);
+      const [loading, setLoading] = useState(true);
+
+      const load = async () => {
+        setLoading(true);
+        try { setQueue(await api.queue()); }
+        catch (ex) { toast(`Failed to load queue: ${ex.message}`, "err"); }
+        finally { setLoading(false); }
+      };
+
+      useEffect(() => { load(); }, []);
+
+      return (
+        <>
+          <div className="editor-header">
+            <div className="editor-title">Queue</div>
+            <span className="pill">{queue ? `${queue.length} ${queue.length === 1 ? "track" : "tracks"}` : "…"}</span>
+            <button className="btn btn-sm" onClick={load}>↻ Refresh</button>
+          </div>
+          <div className="track-scroll">
+            {loading
+              ? <div className="empty"><span className="spinner" /></div>
+              : !queue || queue.length === 0
+                ? <div className="empty">
+                    <div className="empty-icon">♫</div>
+                    <div className="empty-text">Queue is empty.</div>
+                  </div>
+                : <ul className="track-list">
+                    {queue.map((t, i) => (
+                      <li key={t.id || i} className="queue-item">
+                        <span className="queue-num">{i + 1}</span>
+                        <span className="queue-title" title={t.title}>{t.title}</span>
+                        <span className="queue-id">{t.id ? `youtu.be/${t.id}` : t.url}</span>
+                      </li>
+                    ))}
+                  </ul>
+            }
+          </div>
+        </>
+      );
+    }
+
+    // ---- EQ bars (now-playing indicator) ----
+    function EqBars() {
+      return (
+        <div className="eq-bars">
+          <div className="eq-bar" style={{height:'5px'}} />
+          <div className="eq-bar" style={{height:'11px'}} />
+          <div className="eq-bar" style={{height:'7px'}} />
+          <div className="eq-bar" style={{height:'13px'}} />
+        </div>
+      );
+    }
+
+    // ---- App ----
+    function App() {
+      const [token, setToken]       = useState(() => sessionStorage.getItem("mbtoken") || "");
+      const [playlists, setPlaylists] = useState([]);
+      const [selected, setSelected] = useState(null);
+      const [nowPlaying, setNowPlaying] = useState(null);
+      const [toasts, addToast]      = useToasts();
+      const api = makeApi(token);
+
+      const onLogin = t => { sessionStorage.setItem("mbtoken", t); setToken(t); };
+
+      const onAuthError = () => {
+        sessionStorage.removeItem("mbtoken");
+        setToken("");
+        addToast("Session expired. Please log in again.", "err");
+      };
+
+      const safeApi = {};
+      for (const [k, fn] of Object.entries(api)) {
+        safeApi[k] = async (...args) => {
+          try { return await fn(...args); }
+          catch (ex) { if (ex.message === "AUTH") onAuthError(); throw ex; }
+        };
+      }
+
+      const loadPlaylists = useCallback(async () => {
+        if (!token) return;
+        try {
+          const data = await safeApi.playlists();
+          setPlaylists(data.filter(p => p.type !== "favorites"));
+        } catch {}
+      }, [token]);
+
+      useEffect(() => { loadPlaylists(); }, [loadPlaylists]);
+
+      useEffect(() => {
+        if (!token) return;
+        const poll = async () => { try { setNowPlaying(await safeApi.nowPlaying()); } catch {} };
+        poll();
+        const id = setInterval(poll, 10000);
+        return () => clearInterval(id);
+      }, [token]);
+
+      if (!token) return <LoginScreen onLogin={onLogin} />;
+
+      return (
+        <div className="layout">
+
+          <div className="topbar">
+            <div className="topbar-logo">
+              <div className="logo-mark">♪</div>
+              MUSIC BOT
+            </div>
+            <div className="topbar-now">
+              {nowPlaying
+                ? <><EqBars /><span className="np-title">{nowPlaying.title}</span></>
+                : <span className="np-idle">Nothing playing</span>
+              }
+            </div>
+            <button className="topbar-logout"
+              onClick={() => { sessionStorage.removeItem("mbtoken"); setToken(""); }}>
+              Logout
+            </button>
+          </div>
+
+          <div className="body">
+            <div className="sidebar">
+              <div className="sidebar-section">Playlists</div>
+              {playlists.map(p => (
+                <div
+                  key={p.id}
+                  className={`sidebar-item${selected === p.id ? " active" : ""}`}
+                  onClick={() => setSelected(p.id)}
+                >
+                  <span className="sidebar-icon">{p.visibility === "public" ? "◉" : "◎"}</span>
+                  <span className="sidebar-name" title={p.name}>{p.name}</span>
+                  <span className="sidebar-count">{p.track_count}</span>
+                </div>
+              ))}
+              {playlists.length === 0 && (
+                <div className="sidebar-empty">
+                  No playlists yet.<br />
+                  Use <code>/playlist new</code> in Discord.
+                </div>
+              )}
+              <div className="sidebar-divider" />
+              <div className="sidebar-section">Bot</div>
+              <div
+                className={`sidebar-item${selected === "queue" ? " active" : ""}`}
+                onClick={() => setSelected("queue")}
+              >
+                <span className="sidebar-icon">▷</span>
+                <span className="sidebar-name">Queue</span>
+              </div>
+            </div>
+
+            <div className="main">
+              {selected === null && (
+                <div className="splash">
+                  <span className="splash-arrow">←</span>
+                  <span className="splash-text">Select a playlist to edit it.</span>
+                </div>
+              )}
+              {selected === "queue" && <QueuePanel api={safeApi} toast={addToast} />}
+              {selected && selected !== "queue" && (
+                <PlaylistEditor
+                  key={selected}
+                  playlistId={selected}
+                  api={safeApi}
+                  toast={addToast}
+                />
+              )}
+            </div>
+          </div>
+
+          <div className="toast-stack">
+            {toasts.map(t => (
+              <div key={t.id} className={`toast ${t.type}`}>
+                <span className="toast-dot" />
+                {t.msg}
+              </div>
+            ))}
+          </div>
+
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>

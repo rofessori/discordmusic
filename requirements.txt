@@ -19,3 +19,7 @@ PyNaCl>=1.5.0,<1.6
 # spotipy>=2.24.0,<3.0
 # ytmusicapi>=1.8.0,<2.0
 # rapidfuzz>=3.0.0,<4.0
+
+# Optional: Web UI (WEBUI_ENABLED=true in .env)
+# uvicorn>=0.30.0,<1.0
+# fastapi>=0.111.0,<1.0

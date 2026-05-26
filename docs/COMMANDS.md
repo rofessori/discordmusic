@@ -74,9 +74,10 @@ Favorites are special per-user playlists under `playlists/favorites-<user-id>/me
 | `/playlist show <name>` | show readable playlist details without requiring edit permission. |
 | `/playlist play <name>` | start a playlist now, or queue it if something is already playing. |
 | `/playlist edit <name> [flags]` | show editable playlist details and song pages. admins editing someone else's playlist are asked to confirm unless `-force` is supplied. |
-| `/playlist add <playlist> current` | add the currently playing song to a playlist you can edit. |
-| `/playlist add <playlist> queue <position>` | add a queued song by queue number to a playlist you can edit. |
-| `/playlist add <playlist> url <url>` | add a youtube video or playlist url directly to a playlist you can edit. |
+| `/playlist add <playlist>` | add the currently playing song to a playlist you can edit. `source` is auto-detected: omit it when adding the current track, supply `url` and a youtube url to add a specific video or playlist, or supply `queue` and a position number to add a queued song. |
+| `/playlist add <playlist> current` | explicit form: add the currently playing song. |
+| `/playlist add <playlist> queue <position>` | explicit form: add a queued song by queue number. |
+| `/playlist add <playlist> url <url>` | explicit form: add a youtube video or playlist url. |
 | `/playlist fill current <playlist>` | add queued songs that are not already in the playlist. |
 | `/playlist addmod <playlist> <user>` | add a manager to a playlist you own. |
 | `/playlist remove <playlist> [flags]` | remove a whole playlist after confirmation. it can be rescued for 600 seconds. admins can use `-now`; `-now -force` skips confirmation. |
@@ -140,6 +141,17 @@ the bot's Discord presence is also playback-aware: idle shows `/play (yt-link)`,
 | --- | --- |
 | `/backup_teekkari_quotes` | scan the configured quotes channel and back up all messages. |
 | `/random_quote` | return a random saved quote. |
+
+## spotify
+
+requires `SPOTIFY_ENABLED=true` in `.env` and the optional spotify dependencies installed. users in `noplaylistcreate` cannot use these commands.
+
+| command | purpose |
+| --- | --- |
+| `/spotify import <url> [name] [auto]` | import a spotify playlist into a new bot playlist. `url` is the spotify playlist url, uri, or bare id. `name` overrides the playlist name; if omitted the spotify playlist name is used. `auto:true` skips manual review and imports all tracks with confidence above the auto threshold. the bot posts a summary message with reaction controls to accept, skip uncertain matches, or step through each one manually. |
+| `/spotify status` | show the status of your active spotify import if one is in progress, including how many tracks are pending, accepted, or skipped and how long until it expires. |
+
+spotify imports match tracks to youtube using a confidence score built from title similarity (40%), artist similarity (30%), duration match (20%), and youtube result type (10%). tracks above 0.82 confidence are accepted automatically; tracks between 0.50 and 0.82 go to manual review; tracks below 0.30 are skipped. the import session expires after 10 minutes. during manual review, react `👍` to accept, `👎` to skip, `🔄` to try the next youtube result, or `⏭️` to skip the remaining uncertain tracks and finish.
 
 ## help
 

@@ -152,6 +152,54 @@ when YouTube search selects an unavailable first result, the bot tries a bounded
 
 restores are time-limited to avoid bringing back stale queues long after the listening session has moved on.
 
+## spotify import
+
+activate by setting `SPOTIFY_ENABLED=true` in `.env` and installing the optional dependencies (`spotipy`, `ytmusicapi`, `rapidfuzz`; uncomment the lines in `requirements.txt`). you also need a spotify developer app for the client credentials flow: `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env`. users in `noplaylistcreate` cannot use import commands.
+
+`/spotify import <url>` takes a spotify playlist url, uri (`spotify:playlist:...`), or bare id. it reads the spotify playlist through the web api, then searches youtube music for each track. each match gets a confidence score from four components: title similarity (40%), artist similarity (30%), duration match (20%), and youtube result type — official audio, music video, or user upload (10%). scores are computed with fuzzy string matching after normalizing text to remove accents, featured-artist annotations, official/lyrics suffixes, and extra whitespace.
+
+tracks above 0.82 confidence are accepted automatically. tracks between 0.50 and 0.82 go to manual review. tracks below 0.30 are dropped. if `auto:true` is passed, only the auto-threshold applies and no review message is posted.
+
+after processing, the bot posts a summary message showing how many tracks auto-accepted, how many need review, and how many were dropped. reactions on that message drive the import:
+
+- `✅` — accept all auto-accepted tracks and save the playlist immediately, skipping uncertain ones.
+- `🚫` — accept auto-accepted tracks and discard the uncertain ones.
+- `🔍` — step through each uncertain track one by one.
+
+during per-track review:
+
+- `👍` — accept this match.
+- `👎` — skip this track.
+- `🔄` — try the next youtube result for this track.
+- `⏭️` — skip all remaining uncertain tracks and finish.
+
+only the user who ran `/spotify import` can interact with the review. the session expires after 10 minutes. the resulting playlist is saved like any other bot playlist and can be edited with `/playlist edit`.
+
+## web ui
+
+activate by setting `WEBUI_ENABLED=true` and `WEBUI_SECRET_KEY=<strong-random-key>` in `.env`, then install the optional web ui dependencies (`uvicorn`, `fastapi`; uncomment the lines in `requirements.txt`). the server starts inside the bot's asyncio event loop — no separate process needed.
+
+by default it binds to `127.0.0.1:8765` and is only reachable from the local machine. override the bind address with `WEBUI_BIND_HOST` and the port with `WEBUI_PORT` in `.env`.
+
+**networking options:**
+
+- **quick public access**: `cloudflared tunnel --url http://127.0.0.1:8765` gives a public https url with no config. cloudflare access can add a login page on top of it.
+- **homelab reverse proxy**: set `WEBUI_BIND_HOST` to your internal ip, point your ingress controller or reverse proxy at that host and port. the server passes `proxy_headers=True` so x-forwarded-for and x-forwarded-proto are respected.
+
+**auth**: the login screen asks for the `WEBUI_SECRET_KEY` value. the token is stored in sessionStorage (cleared when the browser tab closes, not persisted to disk). api requests use a bearer token header validated with constant-time comparison. nothing sensitive is in the committed code.
+
+**what it does:**
+
+- browse your playlists in a sidebar.
+- open any playlist and reorder tracks by dragging.
+- remove individual tracks.
+- add tracks by pasting a youtube url — the title is fetched via youtube oembed, no api key needed. duplicates are detected before saving.
+- save or discard unsaved changes.
+- read-only view of the current bot queue with a manual refresh button.
+- now-playing in the top bar, polling every 10 seconds.
+
+**what it does not do** (by design): create, delete, or rename playlists (use discord commands for that), edit favorites, or reorder the live queue. queue reordering would require ipc back into the bot and is not implemented.
+
 ## quotes
 
 the bot can watch a configured quotes channel, back up its messages to `quotes.txt`, and return a random saved quote. quote persistence is isolated in `quotes.py`.
