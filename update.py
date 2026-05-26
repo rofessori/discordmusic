@@ -15,6 +15,7 @@ Stdlib-only. Works before the venv exists.
 """
 
 import os
+import re
 import subprocess
 import sys
 import shutil
@@ -27,6 +28,11 @@ REQUIREMENTS = os.path.join(SCRIPT_DIR, "requirements.txt")
 
 CHECK_ONLY = "--check" in sys.argv
 
+# Keys whose values must not be written back to .env by this tool.
+# They are written once during initial setup and should be managed manually
+# (or via a secrets manager) thereafter.
+_SENSITIVE_KEYS = {"TV_WEBHOOK_SECRET", "WEBUI_SECRET_KEY", "SPOTIFY_CLIENT_SECRET"}
+
 # ── ANSI colours ──────────────────────────────────────────────────────────────
 
 GREEN  = "\033[92m"
@@ -37,10 +43,19 @@ DIM    = "\033[2m"
 RESET  = "\033[0m"
 BOLD   = "\033[1m"
 
+def _sanitize(msg: str) -> str:
+    text = str(msg)
+    text = re.sub(
+        r'(?i)\b([A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASS|API_KEY|KEY|WEBHOOK)[A-Z0-9_]*)\s*=\s*(\S+)',
+        r'\1=<redacted>',
+        text,
+    )
+    return text
+
 def ok(msg):   print(f"  {GREEN}✓{RESET}  {msg}")
 def warn(msg): print(f"  {YELLOW}⚠{RESET}  {msg}")
 def err(msg):  print(f"  {RED}✗{RESET}  {msg}")
-def info(msg): print(f"  {CYAN}·{RESET}  {msg}")
+def info(msg): print(f"  {CYAN}·{RESET}  {_sanitize(msg)}")
 
 def section(title):
     print(f"\n{BOLD}{title}{RESET}")
@@ -86,14 +101,14 @@ def write_env(env: dict):
             continue
         if "=" in stripped:
             k = stripped.partition("=")[0].strip()
-            if k in env:
+            if k in env and k not in _SENSITIVE_KEYS:
                 out.append(f'{k}={env[k]}\n')
                 written.add(k)
             else:
                 out.append(line)
 
     for k, v in env.items():
-        if k not in written:
+        if k not in written and k not in _SENSITIVE_KEYS:
             out.append(f'{k}={v}\n')
 
     with open(ENV_FILE, "w") as f:
@@ -291,8 +306,8 @@ def phase_tv(env: dict) -> dict:
         env["TV_STREAM_URL"] = new_url
 
     if confirm("Update TV_WEBHOOK_SECRET?"):
-        new_secret = prompt("New webhook secret (leave blank to clear)", webhook_secret)
-        env["TV_WEBHOOK_SECRET"] = new_secret
+        warn("TV_WEBHOOK_SECRET is a sensitive key and is not written by this tool.")
+        info("Edit .env directly, or re-run setup_assistant.py to set it securely.")
 
     return env
 
