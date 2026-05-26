@@ -142,6 +142,24 @@ the bot's Discord presence is also playback-aware: idle shows `/play (yt-link)`,
 | `/backup_teekkari_quotes` | scan the configured quotes channel and back up all messages. |
 | `/random_quote` | return a random saved quote. |
 
+## web ui
+
+requires `WEBUI_ENABLED=true`, `WEBUI_SECRET_KEY=<key>`, and `WEBUI_PUBLIC_URL=<url>` in `.env`.
+
+| command | purpose |
+| --- | --- |
+| `/webui` | get a private, ephemeral link to the playlist and queue editor. the link is visible only to you in Discord. it expires after 2 minutes of inactivity. use `/webui` again to get a fresh link at any time. |
+
+## tv
+
+requires `TV_ENABLED=true` in `.env`. admin-only.
+
+| command | purpose |
+| --- | --- |
+| `/tv start [url]` | start a live stream in your voice channel. supports HLS (`.m3u8`), generic HTTP audio/video streams, RTMP, and YouTube livestreams. defaults to `TV_STREAM_URL` in `.env` if no url is given. |
+| `/tv stop` | stop the live stream and disconnect from voice. |
+| `/tv update <url>` | swap in a new stream URL while the stream is live — no reconnect needed. useful for refreshing an expired tvkaista auth token. |
+
 ## spotify
 
 requires `SPOTIFY_ENABLED=true` in `.env` and the optional spotify dependencies installed. users in `noplaylistcreate` cannot use these commands.

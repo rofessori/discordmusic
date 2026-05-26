@@ -1,10 +1,25 @@
 """
 FastAPI server for the music bot web UI.
 
-All state is accessed through the BotState object injected via configure().
-Playlist data is read/written from the same JSON files the bot uses.
+Auth model:
+    Every request must present a Bearer token in the Authorization header.
+    Tokens are one of:
+      - A per-user session token created by the /webui Discord command.
+        These are scoped: the user can only see/edit their own playlists.
+      - The WEBUI_SECRET_KEY value (admin override).
+        These see and can edit everything, like the original shared-key mode.
+
+    Per-user sessions are bound to the IP of the first request that uses them.
+    Requests from a different IP after binding return 403 ip_mismatch.
+    Sessions expire after INACTIVITY_TTL seconds of no requests.
+
+Playlist scoping:
+    Regular users see: playlists they own, playlists they manage, public playlists.
+    Regular users can edit: playlists they own or manage (unless locked — then owner only).
+    Admin sessions see and can edit everything.
 """
 
+import hmac
 import json
 import logging
 import os
@@ -12,27 +27,27 @@ import re
 import tempfile
 import time
 from typing import Optional
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Module-level state (set once by configure())
+# Module-level state — set once by configure()
 # ---------------------------------------------------------------------------
 
 _playlists_dir: str = ""
 _bot_state = None        # webui.BotState instance
 _secret_key: str = ""
+_sessions = None         # webui.sessions.SessionStore instance (or None)
 
 # ---------------------------------------------------------------------------
-# Lazy FastAPI app (imported only when needed)
+# Lazy FastAPI app
 # ---------------------------------------------------------------------------
 
 try:
     from fastapi import FastAPI, HTTPException, Depends, Header, Request
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, JSONResponse
-    from fastapi.staticfiles import StaticFiles
     import aiohttp
 
     app = FastAPI(title="Music Bot", docs_url=None, redoc_url=None, openapi_url=None)
@@ -47,21 +62,73 @@ try:
     _STATIC_DIR = os.path.join(os.path.dirname(__file__), "frontend")
 
     # -----------------------------------------------------------------------
-    # Auth
+    # Session context object (returned from the auth dependency)
     # -----------------------------------------------------------------------
 
-    async def _require_auth(authorization: Optional[str] = Header(None)):
-        if not _secret_key:
-            return  # no key configured — warn was already logged at startup
-        if not authorization or not authorization.lower().startswith("bearer "):
-            raise HTTPException(status_code=401, detail="Authorization required")
-        token = authorization.split(" ", 1)[1].strip()
-        # Constant-time comparison to resist timing attacks
-        import hmac
-        if not hmac.compare_digest(token, _secret_key):
-            raise HTTPException(status_code=403, detail="Invalid token")
+    class _SessionContext:
+        __slots__ = ("discord_user_id", "is_admin", "token")
 
-    _auth = Depends(_require_auth)
+        def __init__(self, discord_user_id: int, is_admin: bool, token: str = ""):
+            self.discord_user_id = discord_user_id
+            self.is_admin = is_admin
+            self.token = token
+
+    # -----------------------------------------------------------------------
+    # Auth dependency
+    # -----------------------------------------------------------------------
+
+    def _get_client_ip(request: Request) -> str:
+        if request.client and request.client.host:
+            return request.client.host
+        return "unknown"
+
+    async def _require_session(
+        request: Request,
+        authorization: Optional[str] = Header(None),
+    ) -> _SessionContext:
+        """
+        Validate the Bearer token and return a _SessionContext.
+
+        Tries per-user session first, then falls back to the legacy
+        WEBUI_SECRET_KEY for admin access.
+
+        Error responses:
+            401  – token missing, unknown, or session expired/inactive
+            403  – valid session but request came from a different IP
+        """
+        token: str = ""
+        if authorization and authorization.lower().startswith("bearer "):
+            token = authorization.split(" ", 1)[1].strip()
+
+        if not token:
+            raise HTTPException(status_code=401, detail="Authorization required")
+
+        # ---- Try per-user session ----
+        if _sessions is not None:
+            session = _sessions.get(token)
+            if session is not None:
+                client_ip = _get_client_ip(request)
+                if session.bound_ip is None:
+                    session.bound_ip = client_ip
+                elif session.bound_ip != client_ip:
+                    raise HTTPException(status_code=403, detail="ip_mismatch")
+                _sessions.touch(session)
+                return _SessionContext(
+                    discord_user_id=session.discord_user_id,
+                    is_admin=session.is_admin,
+                    token=token,
+                )
+            # Token string existed in our store but the session is now dead.
+            if token in _sessions._sessions:
+                raise HTTPException(status_code=401, detail="inactive")
+
+        # ---- Legacy admin bypass via WEBUI_SECRET_KEY ----
+        if _secret_key and hmac.compare_digest(token, _secret_key):
+            return _SessionContext(discord_user_id=0, is_admin=True, token=token)
+
+        raise HTTPException(status_code=401, detail="Authorization required")
+
+    _auth = Depends(_require_session)
 
     # -----------------------------------------------------------------------
     # YouTube URL helpers
@@ -127,7 +194,7 @@ try:
             raise
 
     def _find_playlist_by_id(playlist_id: str):
-        """Returns (path, playlist_dict) or (None, None)."""
+        """Returns (path, playlist_dict) or (None, None). Validates id format."""
         if not re.match(r"^[A-Za-z0-9_=-]{4,32}$", str(playlist_id or "")):
             return None, None
         for path in _playlist_metadata_files():
@@ -147,6 +214,7 @@ try:
             "type":        pl.get("type", "playlist"),
             "track_count": len(pl.get("tracks", [])),
             "owner":       pl.get("owner_discord_name"),
+            "owner_id":    pl.get("owner_user_id"),
             "locked":      bool(pl.get("locked")),
         }
 
@@ -157,23 +225,62 @@ try:
         if vid and not url.startswith("http"):
             url = _canonical_youtube_url(vid)
         return {
-            "id":          vid,
-            "title":       str(t.get("title") or url or "Unknown"),
-            "webpage_url": url,
+            "id":            vid,
+            "title":         str(t.get("title") or url or "Unknown"),
+            "webpage_url":   url,
             "needs_refresh": bool(t.get("needs_refresh")),
         }
+
+    # -----------------------------------------------------------------------
+    # Scoping helpers
+    # -----------------------------------------------------------------------
+
+    def _can_view(pl: dict, ctx: _SessionContext) -> bool:
+        if ctx.is_admin:
+            return True
+        if pl.get("visibility") == "public":
+            return True
+        uid = ctx.discord_user_id
+        if uid and uid == pl.get("owner_user_id"):
+            return True
+        if uid and str(uid) in [str(x) for x in pl.get("manager_user_ids", [])]:
+            return True
+        return False
+
+    def _can_edit(pl: dict, ctx: _SessionContext) -> bool:
+        if ctx.is_admin:
+            return True
+        uid = ctx.discord_user_id
+        if not uid:
+            return False
+        is_owner = (uid == pl.get("owner_user_id"))
+        is_manager = str(uid) in [str(x) for x in pl.get("manager_user_ids", [])]
+        if not (is_owner or is_manager):
+            return False
+        if pl.get("locked") and not is_owner:
+            return False
+        return True
 
     # -----------------------------------------------------------------------
     # API routes
     # -----------------------------------------------------------------------
 
-    @app.get("/api/playlists", dependencies=[_auth])
-    async def list_playlists():
+    @app.get("/api/ping")
+    async def ping(ctx: _SessionContext = _auth):
+        """Lightweight endpoint to keep the session alive."""
+        return {"ok": True}
+
+    @app.get("/api/playlists")
+    async def list_playlists(ctx: _SessionContext = _auth):
         result = []
         for path in _playlist_metadata_files():
             try:
                 pl = _load_playlist(path)
                 if pl.get("deleted"):
+                    continue
+                if pl.get("type") == "favorites":
+                    continue
+                if not _can_view(pl, ctx):
                     continue
                 result.append(_playlist_summary(pl))
             except Exception:
@@ -181,28 +288,32 @@ try:
         result.sort(key=lambda p: str(p.get("name") or "").lower())
         return result
 
-    @app.get("/api/playlists/{playlist_id}", dependencies=[_auth])
-    async def get_playlist(playlist_id: str):
-        _, pl = _find_playlist_by_id(playlist_id)
-        if pl is None:
+    @app.get("/api/playlists/{playlist_id}")
+    async def get_playlist(playlist_id: str, ctx: _SessionContext = _auth):
+        path, pl = _find_playlist_by_id(playlist_id)
+        if pl is None or not _can_view(pl, ctx):
             raise HTTPException(status_code=404, detail="Playlist not found")
         return {
             **_playlist_summary(pl),
-            "tracks": [_sanitize_track(t) for t in pl.get("tracks", [])],
+            "can_edit": _can_edit(pl, ctx),
+            "tracks":   [_sanitize_track(t) for t in pl.get("tracks", [])],
         }
 
-    @app.patch("/api/playlists/{playlist_id}", dependencies=[_auth])
-    async def patch_playlist(playlist_id: str, request: Request):
+    @app.patch("/api/playlists/{playlist_id}")
+    async def patch_playlist(
+        playlist_id: str, request: Request, ctx: _SessionContext = _auth
+    ):
         body = await request.json()
         path, pl = _find_playlist_by_id(playlist_id)
-        if pl is None:
+        if pl is None or not _can_view(pl, ctx):
             raise HTTPException(status_code=404, detail="Playlist not found")
+        if not _can_edit(pl, ctx):
+            raise HTTPException(status_code=403, detail="You do not have permission to edit this playlist")
 
         if "tracks" in body:
             incoming = body["tracks"]
             if not isinstance(incoming, list):
                 raise HTTPException(status_code=422, detail="tracks must be a list")
-            # Validate each track entry
             valid = []
             for t in incoming:
                 if not isinstance(t, dict):
@@ -212,14 +323,14 @@ try:
                 if not vid and not url:
                     continue
                 valid.append({
-                    "id":           vid,
-                    "title":        str(t.get("title") or url or "Unknown")[:500],
-                    "webpage_url":  url,
+                    "id":            vid,
+                    "title":         str(t.get("title") or url or "Unknown")[:500],
+                    "webpage_url":   url,
                     "needs_refresh": bool(t.get("needs_refresh", True)),
-                    "cache_key":    None,
-                    "cache_path":   None,
-                    "cache_mode":   "streaming",
-                    "ext":          None,
+                    "cache_key":     None,
+                    "cache_path":    None,
+                    "cache_mode":    "streaming",
+                    "ext":           None,
                 })
             pl["tracks"] = valid
             pl["updated_at"] = time.time()
@@ -227,11 +338,16 @@ try:
 
         return {"ok": True, "track_count": len(pl.get("tracks", []))}
 
-    @app.delete("/api/playlists/{playlist_id}/tracks/{index}", dependencies=[_auth])
-    async def remove_track(playlist_id: str, index: int):
+    @app.delete("/api/playlists/{playlist_id}/tracks/{index}")
+    async def remove_track(
+        playlist_id: str, index: int, ctx: _SessionContext = _auth
+    ):
         path, pl = _find_playlist_by_id(playlist_id)
-        if pl is None:
+        if pl is None or not _can_view(pl, ctx):
             raise HTTPException(status_code=404, detail="Playlist not found")
+        if not _can_edit(pl, ctx):
+            raise HTTPException(status_code=403, detail="You do not have permission to edit this playlist")
+
         tracks = pl.get("tracks", [])
         if index < 0 or index >= len(tracks):
             raise HTTPException(status_code=404, detail="Track index out of range")
@@ -241,17 +357,20 @@ try:
         _save_playlist_atomic(path, pl)
         return {"ok": True, "track_count": len(tracks)}
 
-    @app.post("/api/playlists/{playlist_id}/tracks", dependencies=[_auth])
-    async def add_track(playlist_id: str, request: Request):
+    @app.post("/api/playlists/{playlist_id}/tracks")
+    async def add_track(
+        playlist_id: str, request: Request, ctx: _SessionContext = _auth
+    ):
         body = await request.json()
         path, pl = _find_playlist_by_id(playlist_id)
-        if pl is None:
+        if pl is None or not _can_view(pl, ctx):
             raise HTTPException(status_code=404, detail="Playlist not found")
+        if not _can_edit(pl, ctx):
+            raise HTTPException(status_code=403, detail="You do not have permission to edit this playlist")
 
         url = str(body.get("url") or "").strip()
         if not url:
             raise HTTPException(status_code=422, detail="url is required")
-
         if not _is_youtube_url(url):
             raise HTTPException(status_code=422, detail="Only YouTube URLs are accepted")
 
@@ -260,14 +379,9 @@ try:
             raise HTTPException(status_code=422, detail="Could not extract a YouTube video ID from that URL")
 
         canonical = _canonical_youtube_url(video_id)
-
-        # Try to get the title via YouTube oEmbed (no API key needed)
-        title = await _fetch_youtube_title(canonical)
-        if not title:
-            title = f"youtu.be/{video_id}"
+        title = await _fetch_youtube_title(canonical) or f"youtu.be/{video_id}"
 
         tracks = pl.setdefault("tracks", [])
-        # Check for duplicate
         for t in tracks:
             if str(t.get("id") or "") == video_id:
                 return JSONResponse(
@@ -276,22 +390,22 @@ try:
                 )
 
         tracks.append({
-            "id":           video_id,
-            "title":        title,
-            "webpage_url":  canonical,
+            "id":            video_id,
+            "title":         title,
+            "webpage_url":   canonical,
             "needs_refresh": False,
-            "added_at":     time.time(),
-            "cache_key":    None,
-            "cache_path":   None,
-            "cache_mode":   "streaming",
-            "ext":          None,
+            "added_at":      time.time(),
+            "cache_key":     None,
+            "cache_path":    None,
+            "cache_mode":    "streaming",
+            "ext":           None,
         })
         pl["updated_at"] = time.time()
         _save_playlist_atomic(path, pl)
         return {"ok": True, "title": title, "id": video_id}
 
-    @app.get("/api/queue", dependencies=[_auth])
-    async def get_queue():
+    @app.get("/api/queue")
+    async def get_queue(ctx: _SessionContext = _auth):
         if _bot_state is None:
             return []
         return [
@@ -303,8 +417,8 @@ try:
             for t in (_bot_state.queue or [])
         ]
 
-    @app.get("/api/now-playing", dependencies=[_auth])
-    async def get_now_playing():
+    @app.get("/api/now-playing")
+    async def get_now_playing(ctx: _SessionContext = _auth):
         if _bot_state is None:
             return None
         track = _bot_state.current_track_info
@@ -335,7 +449,7 @@ try:
         return None
 
     # -----------------------------------------------------------------------
-    # Serve frontend (must be last — catches all non-API paths)
+    # Serve frontend (must be last)
     # -----------------------------------------------------------------------
 
     @app.get("/{full_path:path}")
@@ -349,17 +463,16 @@ try:
         )
 
 except ImportError:
-    # FastAPI/uvicorn not installed — app object will not exist.
-    # The check in webui/__init__.py catches this before starting.
     pass
 
 
 # ---------------------------------------------------------------------------
-# Configure function called once at startup
+# Configure — called once at startup from webui/__init__.py start()
 # ---------------------------------------------------------------------------
 
-def configure(*, playlists_dir: str, bot_state, secret_key: str):
-    global _playlists_dir, _bot_state, _secret_key
+def configure(*, playlists_dir: str, bot_state, secret_key: str, sessions):
+    global _playlists_dir, _bot_state, _secret_key, _sessions
     _playlists_dir = playlists_dir
-    _bot_state = bot_state
-    _secret_key = secret_key
+    _bot_state     = bot_state
+    _secret_key    = secret_key
+    _sessions      = sessions
