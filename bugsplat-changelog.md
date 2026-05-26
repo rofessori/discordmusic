@@ -1,3 +1,7 @@
+## 2026-05-07
+- Fixed false "bot is not in a voice channel" / "not currently in a voice channel" decisions caused by stale `client.current_voice_channel` state after admin voice placement, Discord voice moves, or reconnect-like state drift. Voice-sensitive commands now reconcile the tracked client with `guild.voice_client` before checking channel membership, votes, pause/resume, volume, playback recovery, and queued playback.
+- Fixed a related stale now-playing edge case where old playback control reactions and `current_track_info` could survive after stop, queue end, auto-leave, or an unexpected voice disconnect. Finished playback now clears the tracked current song and removes now-playing controls from the old message.
+
 ## 2026-05-06
 - Fixed `/help` reaction expansion failing with Discord's 2000-character content limit by paging expanded help and keeping each edit below the safe limit.
 - Restyled compact and expanded `/help` into grouped sections and added paged `/help topic:all` for every registered slash command and subcommand.

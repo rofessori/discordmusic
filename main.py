@@ -1027,8 +1027,51 @@ def is_user_admin(user) -> bool:
         return True
     return False
 
+def voice_client_is_connected(voice) -> bool:
+    if voice is None:
+        return False
+    try:
+        return bool(voice.is_connected())
+    except Exception as exc:
+        logger.warning(f"Voice client connection check failed: {exc}")
+        return False
+
+
+def same_guild(left, right) -> bool:
+    if left is None or right is None:
+        return False
+    left_id = getattr(left, "id", None)
+    right_id = getattr(right, "id", None)
+    if left_id is not None and right_id is not None:
+        return left_id == right_id
+    return left == right
+
+
+def active_voice_client(guild=None):
+    """Return the live voice client and repair stale local tracking."""
+    current = getattr(client, "current_voice_channel", None)
+    guild_voice = getattr(guild, "voice_client", None) if guild is not None else None
+
+    if voice_client_is_connected(guild_voice):
+        if current is not guild_voice:
+            logger.info("Synchronized tracked voice client from guild voice state.")
+        client.current_voice_channel = guild_voice
+        return guild_voice
+
+    if voice_client_is_connected(current):
+        current_guild = getattr(current, "guild", None)
+        if guild is None or current_guild is None or same_guild(current_guild, guild):
+            return current
+
+    if current is not None:
+        logger.warning("Cleared stale tracked voice client; no connected guild voice client was available.")
+        client.current_voice_channel = None
+    return None
+
+
 def user_in_bot_voice_channel(user) -> bool:
-    bot_channel = getattr(client.current_voice_channel, "channel", None)
+    voice = active_voice_client(getattr(user, "guild", None))
+    bot_channel = getattr(voice, "channel", None)
     user_channel = getattr(getattr(user, "voice", None), "channel", None)
     return bool(
         bot_channel
@@ -1039,7 +1082,7 @@ def user_in_bot_voice_channel(user) -> bool:
 def can_control_voice(user) -> bool:
     if is_user_admin(user):
         return True
-    if client.current_voice_channel is None:
+    if active_voice_client(getattr(user, "guild", None)) is None:
         return True
     return user_in_bot_voice_channel(user)
 
@@ -1182,7 +1225,7 @@ async def apply_config_reaction(emoji: str, actor=None) -> str:
         if not client.auto_leave_enabled:
             cancel_auto_leave_task("config panel")
         else:
-            voice = client.current_voice_channel
+            voice = active_voice_client()
             schedule_auto_leave_if_needed(getattr(voice, "channel", None))
         append_runtime_audit_event("config-toggle", actor=actor, details={"setting": "auto_leave_enabled", "enabled": client.auto_leave_enabled})
         return f"auto-leave is now `{bool_status(client.auto_leave_enabled)}`."
@@ -1643,7 +1686,7 @@ def metadata_value(track: dict, *keys, default="unknown"):
 
 def build_playback_status() -> str:
     track = client.current_track_info or {}
-    voice = client.current_voice_channel
+    voice = active_voice_client()
     voice_channel = getattr(voice, "channel", None)
     cached_file = cached_file_for_track(track) if track else None
     duration = track.get("duration") or 0
@@ -1722,8 +1765,9 @@ def debug_playback_content(report: DebugPlaybackMessage, *, collapsed: bool = Fa
             f"- track: **{discord.utils.escape_markdown(report.title or 'unknown')}** "
             f"(`{discord.utils.escape_markdown(report.video_id or '-')}`)"
         )
-    if client.current_voice_channel and getattr(client.current_voice_channel, "channel", None):
-        channel_name = getattr(client.current_voice_channel.channel, "name", "voice")
+    voice = active_voice_client()
+    if voice and getattr(voice, "channel", None):
+        channel_name = getattr(voice.channel, "name", "voice")
         lines.append(f"- voice: `{discord.utils.escape_markdown(str(channel_name))}`")
     if report.cache_state:
         lines.append(f"- cache: `{discord.utils.escape_markdown(report.cache_state)}`")
@@ -2133,7 +2177,7 @@ def set_client_volume_level(level: int, *, allow_unsafe: bool = False):
         logger.warning(f"Clamping requested volume {level}% to safe limit {SAFE_VOLUME_MAX_LEVEL}%.")
         level = SAFE_VOLUME_MAX_LEVEL
     client.volume = level / 100.0
-    voice = client.current_voice_channel
+    voice = active_voice_client()
     if voice and getattr(voice, "source", None):
         try:
             voice.source.volume = client.volume
@@ -2229,7 +2273,7 @@ async def connect_or_move_to_voice_channel(ctx, voice_channel, *, reason: str):
     if voice_channel is None:
         await safe_interaction_send(ctx, "Voice channel not found.", ephemeral=True)
         return False
-    voice = client.current_voice_channel or getattr(ctx.guild, "voice_client", None)
+    voice = active_voice_client(ctx.guild)
     try:
         if voice and voice.is_connected():
             if getattr(voice, "channel", None) == voice_channel:
@@ -2270,7 +2314,7 @@ def active_voice_vote_for_message(message_id: int):
     return None
 
 def voice_vote_prompt_content(vote: VoiceVote, *, status: str = "open") -> str:
-    channel = getattr(client.current_voice_channel, "channel", None)
+    channel = getattr(active_voice_client(), "channel", None)
     quorum = voice_vote_quorum(channel) if channel and voice_channel_id(channel) == vote.voice_channel_id else 1
     status_line = {
         "open": "React 👍 to approve or 👎 to reject.",
@@ -2310,7 +2354,7 @@ async def finish_voice_vote(vote: VoiceVote, status: str):
             logger.warning(f"Failed to finish voice vote message: {exc}")
 
 async def perform_skip_action() -> str:
-    voice = client.current_voice_channel
+    voice = active_voice_client()
     if voice and voice.is_connected() and (voice.is_playing() or voice.is_paused()):
         voice.stop()
         logger.info("Track skipped.")
@@ -2322,14 +2366,14 @@ async def perform_previous_action() -> str:
     if not client.last_track_info:
         return "No previous track to play."
     queue.insert(0, client.last_track_info)
-    voice = client.current_voice_channel
+    voice = active_voice_client()
     if voice and voice.is_connected() and (voice.is_playing() or voice.is_paused()):
         voice.stop()
     logger.info("Previous track requested.")
     return "Queued the previous track to replay next."
 
 async def perform_stop_action() -> str:
-    voice = client.current_voice_channel
+    voice = active_voice_client()
     if voice:
         cancel_auto_leave_task("stop command")
         cancel_alone_speed_reset_task("stop command")
@@ -2342,8 +2386,7 @@ async def perform_stop_action() -> str:
         queue.clear()
         await voice.disconnect()
         client.current_voice_channel = None
-        client.currently_playing = False
-        client.current_track_started_at = None
+        await clear_playback_tracking("stop command")
         reset_session_volume("voice disconnect")
         await update_bot_presence_idle(reason="stop command")
         return "Vittuun täältä keilahallista"
@@ -2464,7 +2507,7 @@ def sync_repeat_for_started_track(track: dict):
         client.repeat_track_id = None
 
 async def apply_voice_vote(vote: VoiceVote):
-    voice = client.current_voice_channel
+    voice = active_voice_client(getattr(getattr(vote, "message", None), "guild", None))
     channel = getattr(voice, "channel", None)
     if not voice or not voice.is_connected() or voice_channel_id(channel) != vote.voice_channel_id:
         await finish_voice_vote(vote, "cancelled")
@@ -2489,7 +2532,7 @@ async def apply_voice_vote(vote: VoiceVote):
         await vote.message.channel.send(result)
 
 async def maybe_apply_voice_vote(vote: VoiceVote):
-    voice = client.current_voice_channel
+    voice = active_voice_client(getattr(getattr(vote, "message", None), "guild", None))
     channel = getattr(voice, "channel", None)
     quorum = voice_vote_quorum(channel)
     if len(vote.votes) >= quorum:
@@ -2522,7 +2565,8 @@ async def request_voice_vote(user, text_channel, action: str, title: str, *, val
         else:
             await text_channel.send(message)
         return False
-    voice = client.current_voice_channel
+    guild = getattr(user, "guild", None) or getattr(text_channel, "guild", None)
+    voice = active_voice_client(guild)
     voice_channel = getattr(voice, "channel", None)
     if voice is None or not voice.is_connected() or voice_channel is None:
         if ctx:
@@ -2874,7 +2918,7 @@ async def restore_last_session(ctx) -> bool:
     if not tracks:
         await ctx.followup.send("The saved last session has no playable tracks.")
         return False
-    voice = client.current_voice_channel or ctx.guild.voice_client
+    voice = active_voice_client(ctx.guild)
     if voice is None or not voice.is_connected():
         try:
             voice = await ctx.user.voice.channel.connect()
@@ -2921,7 +2965,7 @@ async def perform_auto_leave_if_still_alone(voice_channel):
             return
         if asyncio.current_task() is not client.auto_leave_task:
             return
-        voice = client.current_voice_channel
+        voice = active_voice_client(getattr(voice_channel, "guild", None))
         if voice is None or not voice.is_connected() or getattr(voice, "channel", None) != voice_channel:
             return
         if not bot_is_alone_in_voice(voice_channel):
@@ -2936,12 +2980,7 @@ async def perform_auto_leave_if_still_alone(voice_channel):
             if voice.is_playing() or voice.is_paused():
                 voice.stop()
             queue.clear()
-            client.currently_playing = False
-            client.current_track_id = None
-            client.current_track_info = None
-            client.current_track_started_at = None
-            client.current_track_message_show_queue = False
-            client.current_track_message_show_url = True
+            await clear_playback_tracking("auto-leave")
             await voice.disconnect()
             reset_session_volume("auto-leave")
             await update_bot_presence_idle(reason="auto-leave", channel=notify_channel)
@@ -2968,7 +3007,7 @@ async def perform_alone_speed_reset_if_still_alone(voice_channel):
         await asyncio.sleep(alone_speed_reset_delay_seconds())
         if asyncio.current_task() is not client.alone_speed_reset_task:
             return
-        voice = client.current_voice_channel
+        voice = active_voice_client(getattr(voice_channel, "guild", None))
         if voice is None or not voice.is_connected() or getattr(voice, "channel", None) != voice_channel:
             return
         if not bot_is_alone_in_voice(voice_channel):
@@ -4070,6 +4109,22 @@ async def remove_control_reactions(message):
                 logger.info(f"Removed bot's stale now-playing control reaction {emoji} from message {message.id}.")
             except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
                 logger.warning(f"Failed to remove stale control reaction {emoji}: {exc}")
+
+async def clear_playback_tracking(reason: str, *, remove_controls: bool = True):
+    old_message = client.current_track_message
+    client.currently_playing = False
+    client.current_track_id = None
+    client.current_track_info = None
+    client.current_track_started_at = None
+    client.current_track_message = None
+    client.current_track_message_show_queue = False
+    client.current_track_message_show_url = True
+    client.current_track_favorite_notice = ""
+    client.repeat_current_track = False
+    client.repeat_track_id = None
+    if remove_controls:
+        await remove_control_reactions(old_message)
+    logger.info(f"Cleared playback tracking state: {reason}.")
 
 async def add_control_reactions(message):
     existing = {
@@ -5763,7 +5818,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
         raise
 
 async def ensure_voice_for_playback(ctx):
-    voice = client.current_voice_channel or ctx.guild.voice_client
+    voice = active_voice_client(ctx.guild)
     if voice is None or not voice.is_connected():
         if ctx.user.voice and ctx.user.voice.channel:
             try:
@@ -5872,7 +5927,7 @@ async def prompt_move_track_next(ctx, track: dict, playlist_name: str):
         await ctx.followup.send(f"Keeping **{title}** after the playlist.")
 
 def active_playlist_prompt_human_count() -> int:
-    voice = client.current_voice_channel
+    voice = active_voice_client()
     voice_channel = getattr(voice, "channel", None)
     return len(voice_channel_human_members(voice_channel)) if voice_channel else 0
 
@@ -6757,7 +6812,10 @@ async def play_next_channel(channel):
             guild = channel.guild
             client.current_track_id = track['id']
             # Start playback and provide callback
-            guild.voice_client.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, channel))
+            voice = active_voice_client(guild)
+            if voice is None:
+                raise RuntimeError("No active voice client for queued playback.")
+            voice.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, channel))
             client.currently_playing = True
             # Update current and last track info
             client.last_track_info = client.current_track_info
@@ -6772,14 +6830,12 @@ async def play_next_channel(channel):
         except Exception as e:
             logger.error(f"Failed to play next track: {e}")
             await channel.send("Failed to play the next track.")
-            client.currently_playing = False
-            client.current_track_started_at = None
+            await clear_playback_tracking("play-next error")
             await update_bot_presence_idle(reason="play-next error", channel=channel)
     else:
         # Queue is empty
-        client.currently_playing = False
-        client.current_track_started_at = None
         logger.info("No more songs to play. Queue is now clear.")
+        await clear_playback_tracking("queue empty")
         await update_bot_presence_idle(reason="queue empty", channel=channel)
         await channel.send("No more songs in queue.")
 
@@ -6803,13 +6859,18 @@ async def on_voice_state_update(member, before, after):
             cancel_auto_leave_task("bot disconnected")
         cancel_alone_speed_reset_task("bot disconnected")
         client.current_voice_channel = None
-        client.currently_playing = False
-        client.current_track_started_at = None
+        await clear_playback_tracking("bot disconnected")
         client.auto_leave_disconnect_in_progress = False
         reset_session_volume("bot disconnected")
         await update_bot_presence_idle(reason="bot disconnected")
         return
-    voice = client.current_voice_channel
+    if bot_id and member.id == bot_id and after.channel is not None:
+        voice = active_voice_client(getattr(after.channel, "guild", None))
+        if voice:
+            apply_channel_volume_default(after.channel, "bot voice state update")
+            logger.info(f"Synchronized bot voice channel to {getattr(after.channel, 'name', after.channel)} from voice state update.")
+    else:
+        voice = active_voice_client(getattr(getattr(after, "channel", None), "guild", None))
     voice_channel = getattr(voice, "channel", None)
     if voice and voice.is_connected() and voice_channel:
         if bot_is_alone_in_voice(voice_channel):
@@ -6882,12 +6943,13 @@ async def on_reaction_add(reaction, user):
                 await reaction.message.channel.send(result)
         elif emoji == "⏸️":
             # Pause or resume
-            if client.current_voice_channel:
-                if client.current_voice_channel.is_playing():
-                    client.current_voice_channel.pause()
+            voice = active_voice_client(getattr(reaction.message, "guild", None))
+            if voice:
+                if voice.is_playing():
+                    voice.pause()
                     logger.info("Audio paused via reaction.")
-                elif client.current_voice_channel.is_paused():
-                    client.current_voice_channel.resume()
+                elif voice.is_paused():
+                    voice.resume()
                     logger.info("Audio resumed via reaction.")
         elif emoji == "◀️":
             await request_voice_vote(user, reaction.message.channel, "previous", "replay the previous track")
@@ -6919,17 +6981,29 @@ async def join(ctx):
     """Joins the voice channel that the user is currently in."""
     record_command(ctx)
     if ctx.user.voice:
+        voice = active_voice_client(ctx.guild)
+        target_channel = ctx.user.voice.channel
         try:
-            client.current_voice_channel = await ctx.user.voice.channel.connect()
-            apply_channel_volume_default(ctx.user.voice.channel, "join command")
+            if voice and voice.is_connected():
+                if getattr(voice, "channel", None) == target_channel:
+                    await ctx.response.send_message(f"Already in voice channel {target_channel.name}")
+                    return
+                if not is_user_admin(ctx.user):
+                    await ctx.response.send_message("The bot is already in another voice channel.", ephemeral=True)
+                    return
+                await voice.move_to(target_channel)
+                client.current_voice_channel = voice
+            else:
+                client.current_voice_channel = await target_channel.connect()
+            apply_channel_volume_default(target_channel, "join command")
             cancel_auto_leave_task("joined voice")
             cancel_alone_speed_reset_task("joined voice")
             # Reset session history when joining a new voice channel
             client.song_history = []
-            await ctx.response.send_message(f"Joined voice channel {ctx.user.voice.channel.name}")
+            await ctx.response.send_message(f"Joined voice channel {target_channel.name}")
         except Exception as e:
             logger.error(f"Join error: {e}")
-            await ctx.response.send_message(f"Unable to join voice channel {ctx.user.voice.channel.name}")
+            await ctx.response.send_message(f"Unable to join voice channel {target_channel.name}")
     else:
         await ctx.response.send_message("You must be in a voice channel to use this command")
 
@@ -7143,7 +7217,7 @@ async def play(
         debug_report = await create_debug_playback_message(ctx, "play", force=bool(show_download_log))
         await append_debug_playback_event(debug_report, "checking voice connection", stage="voice-check", force=True)
         # Ensure we're connected to a voice channel before creating the player
-        voice = client.current_voice_channel or ctx.guild.voice_client
+        voice = active_voice_client(ctx.guild)
         if voice is None or not voice.is_connected():
             if ctx.user.voice and ctx.user.voice.channel:
                 try:
@@ -7317,7 +7391,7 @@ async def playtop(ctx, *, query: str):
     await ctx.response.defer()
     if not client.currently_playing:
         # Nothing playing, so this will play immediately (similar to /play when queue empty)
-        voice = client.current_voice_channel or ctx.guild.voice_client
+        voice = active_voice_client(ctx.guild)
         if voice is None or not voice.is_connected():
             if ctx.user.voice and ctx.user.voice.channel:
                 try:
@@ -8487,7 +8561,7 @@ async def autoleave(ctx, enabled: bool, delay_seconds: Optional[int] = None):
         })
         logger.info(f"Auto-leave disabled by {user_display(ctx.user)} ({getattr(ctx.user, 'id', 0)}).")
         return
-    voice = client.current_voice_channel or ctx.guild.voice_client
+    voice = active_voice_client(ctx.guild)
     if voice and voice.is_connected():
         client.current_voice_channel = voice
         schedule_auto_leave_if_needed(getattr(voice, "channel", None))
@@ -8530,7 +8604,7 @@ async def volume_session(ctx, level: int):
     if error:
         await ctx.response.send_message(error, ephemeral=True)
         return
-    voice = client.current_voice_channel or ctx.guild.voice_client
+    voice = active_voice_client(ctx.guild)
     if not voice or not voice.is_connected():
         await ctx.response.send_message("Connect the bot to voice before setting a session volume.", ephemeral=True)
         return
@@ -8554,7 +8628,7 @@ async def volume_force(ctx, level: int, save_default: Optional[bool] = False):
     if error:
         await ctx.response.send_message(error, ephemeral=True)
         return
-    voice = client.current_voice_channel or ctx.guild.voice_client
+    voice = active_voice_client(ctx.guild)
     voice_channel = getattr(voice, "channel", None) or getattr(getattr(ctx.user, "voice", None), "channel", None)
     if not voice or not voice.is_connected():
         await ctx.response.send_message("Connect the bot to voice before forcing volume.", ephemeral=True)
@@ -8597,7 +8671,7 @@ async def volume_default(ctx, level: int):
     if error:
         await ctx.response.send_message(error, ephemeral=True)
         return
-    voice = client.current_voice_channel or ctx.guild.voice_client
+    voice = active_voice_client(ctx.guild)
     voice_channel = getattr(voice, "channel", None) or getattr(getattr(ctx.user, "voice", None), "channel", None)
     key = channel_volume_key(voice_channel)
     if not key:
@@ -8628,16 +8702,17 @@ async def pause(ctx):
     record_command(ctx)
     if not await require_voice_control(ctx, "pause playback"):
         return
-    if client.current_voice_channel is None:
+    voice = active_voice_client(ctx.guild)
+    if voice is None:
         logger.info("Pause command issued, but bot is not in a voice channel.")
         await ctx.response.send_message("Not currently in a voice channel")
     elif not client.currently_playing:
         await ctx.response.send_message("No audio is playing to pause")
-    elif client.current_voice_channel.is_paused():
+    elif voice.is_paused():
         logger.info("Pause command issued, but audio is already paused.")
         await ctx.response.send_message("Audio is already paused")
     else:
-        client.current_voice_channel.pause()
+        voice.pause()
         logger.info("Audio paused via /pause command.")
         await ctx.response.send_message("Audio paused")
 
@@ -8647,13 +8722,14 @@ async def resume(ctx):
     record_command(ctx)
     if not await require_voice_control(ctx, "resume playback"):
         return
-    if client.current_voice_channel is None:
+    voice = active_voice_client(ctx.guild)
+    if voice is None:
         logger.info("Resume command issued, but bot is not in a voice channel.")
         await ctx.response.send_message("Not currently in a voice channel")
     elif not client.currently_playing:
         await ctx.response.send_message("No audio is playing to resume")
-    elif client.current_voice_channel.is_paused():
-        client.current_voice_channel.resume()
+    elif voice.is_paused():
+        voice.resume()
         logger.info("Audio playback resumed via /resume command.")
         await ctx.response.send_message("Resuming audio")
     else:
@@ -8783,7 +8859,7 @@ async def playspeed_cmd(ctx, speed: float):
     if client.current_track_info and "playback_speed" not in client.current_track_info:
         client.current_track_info["playback_speed"] = playback_speed_for_track(client.current_track_info)
     client.playback_speed = parsed
-    voice = client.current_voice_channel
+    voice = active_voice_client(ctx.guild)
     schedule_alone_speed_reset_if_needed(getattr(voice, "channel", None))
     append_runtime_audit_event("playback-speed-changed", actor=ctx.user, details={
         "speed": parsed,
@@ -8917,8 +8993,9 @@ async def reboot(ctx):
         logger.info("Rebooting bot by admin request...")
         # Disconnect from voice and close the bot
         try:
-            if client.current_voice_channel:
-                await client.current_voice_channel.disconnect()
+            voice = active_voice_client(ctx.guild)
+            if voice:
+                await voice.disconnect()
         except Exception as e:
             logger.error(f"Error disconnecting voice client on reboot: {e}")
         await client.close()
