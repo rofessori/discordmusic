@@ -36,3 +36,8 @@ cache/
 venv
 
 .tool-versions
+
+# Web UI build artifacts (source is committed, builds are not)
+/webui/frontend/node_modules/
+/webui/frontend/dist/
+/webui/frontend/.env.local

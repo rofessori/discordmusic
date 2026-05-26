@@ -112,6 +112,23 @@ PLAYLIST_PREDOWNLOAD_ENABLED = (
 )
 YTDLP_NO_CHECK_CERTIFICATE = env_flag("YTDLP_NO_CHECK_CERTIFICATE", False)
 SPOTIFY_ENABLED = env_flag("SPOTIFY_ENABLED", False)
+WEBUI_ENABLED = env_flag("WEBUI_ENABLED", False)
+
+_webui_module = None
+if WEBUI_ENABLED:
+    try:
+        import webui as _webui_module
+        missing_webui = _webui_module.check_dependencies()
+        if missing_webui:
+            logger.warning(
+                "WEBUI_ENABLED=true but required packages are missing. "
+                f"Run: pip install {' '.join(missing_webui)}"
+            )
+            _webui_module = None
+        else:
+            logger.info("Web UI module loaded.")
+    except ImportError as _e:
+        logger.warning(f"WEBUI_ENABLED=true but webui module not found: {_e}")
 
 _spotify_module = None
 if SPOTIFY_ENABLED:
@@ -6766,6 +6783,9 @@ async def on_ready():
         logger.info(f"Synced {len(synced)} command(s)")
     except Exception as e:
         logger.error(f"Sync error: {e}")
+    if _webui_module is not None:
+        bot_state = _webui_module.BotState(client_ref=client, queue_ref=queue)
+        await _webui_module.start(playlists_dir=PLAYLISTS_DIR, bot_state=bot_state)
 
 @client.event
 async def on_voice_state_update(member, before, after):
