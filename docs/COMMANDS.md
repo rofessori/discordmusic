@@ -27,6 +27,13 @@ clean reference for the bot's slash commands and now-playing reaction controls.
 | `/getqueue` | list all songs requested in the current session and show whether they are playing, queued, played, or removed. |
 | `/whatsnew` | show the recent bot update summary from `RECENT_UPDATES.md`. |
 
+## live tv
+
+| command | purpose |
+| --- | --- |
+| `/tv start [url]` | admin only. join the user's voice channel and start streaming the configured TV stream. `url` overrides `TV_STREAM_URL` from `.env` for this session. blocks music commands while active. |
+| `/tv stop` | admin only. stop the TV stream and disconnect from the voice channel. |
+
 ## now-playing reactions
 
 | reaction | purpose |

@@ -113,6 +113,7 @@ PLAYLIST_PREDOWNLOAD_ENABLED = (
 YTDLP_NO_CHECK_CERTIFICATE = env_flag("YTDLP_NO_CHECK_CERTIFICATE", False)
 SPOTIFY_ENABLED = env_flag("SPOTIFY_ENABLED", False)
 WEBUI_ENABLED = env_flag("WEBUI_ENABLED", False)
+TV_ENABLED = env_flag("TV_ENABLED", False)
 
 _webui_module = None
 if WEBUI_ENABLED:
@@ -145,6 +146,23 @@ if SPOTIFY_ENABLED:
             logger.info("Spotify import module loaded.")
     except ImportError as _e:
         logger.warning(f"SPOTIFY_ENABLED=true but spotify_import.py not found: {_e}")
+
+_tv_module = None
+if TV_ENABLED:
+    try:
+        import tv_stream as _tv_module
+        missing_tv = _tv_module.check_dependencies()
+        if missing_tv:
+            logger.warning(
+                "TV_ENABLED=true but required packages are missing. "
+                f"Run: pip install {' '.join(missing_tv)}"
+            )
+            _tv_module = None
+        else:
+            logger.info("TV streaming module loaded.")
+    except ImportError as _e:
+        logger.warning(f"TV_ENABLED=true but tv_stream.py not found: {_e}")
+
 ALLOW_ADMIN_ROLE_NAME = env_flag("ALLOW_ADMIN_ROLE_NAME", False)
 MAX_PLAYLIST_TRACKS = env_int("MAX_PLAYLIST_TRACKS", 100)
 MAX_URLS_PER_MESSAGE = env_int("MAX_URLS_PER_MESSAGE", 10)
@@ -472,6 +490,10 @@ ADMIN_ROLE_NAME = get_env_value("ADMIN_ROLE_NAME", "admin_role_name", default="B
 ADMIN_USER_ID   = get_env_value("ADMIN_USER_ID", "admin_user_id", required=False)
 ADMIN_USER_ID   = coerce_int(ADMIN_USER_ID, "ADMIN_USER_ID") if ADMIN_USER_ID else None
 ADMIN_USERNAME  = get_env_value("ADMIN_USERNAME", "admin_username", required=False)
+
+TV_STREAM_URL = get_env_value("TV_STREAM_URL", required=False)
+TV_MAX_RESTARTS = env_int("TV_MAX_RESTARTS", 3, 1)
+TV_RESTART_WINDOW_SECONDS = env_int("TV_RESTART_WINDOW_SECONDS", 60, 10)
 
 USER_RESTRICTION_GROUPS = {
     "nodownload",
@@ -1639,6 +1661,12 @@ class Client(discord.Client):
         # Spotify import review state
         self.pending_spotify_imports = {}    # import_id -> spotify_import.PendingImport
         self.spotify_review_message_ids = {} # message_id -> import_id
+        # TV streaming state
+        self.tv_mode_active = False
+        self.tv_stream_url = None
+        self.tv_notify_channel = None
+        self.tv_restart_count = 0
+        self.tv_restart_window_start = None
 
     async def setup_hook(self):
         # Sync application commands to the specified guild
@@ -2391,6 +2419,8 @@ async def finish_voice_vote(vote: VoiceVote, status: str):
             logger.warning(f"Failed to finish voice vote message: {exc}")
 
 async def perform_skip_action() -> str:
+    if client.tv_mode_active:
+        return "TV is playing. Use `/tv stop` first."
     voice = active_voice_client()
     if voice and voice.is_connected() and (voice.is_playing() or voice.is_paused()):
         voice.stop()
@@ -2400,6 +2430,8 @@ async def perform_skip_action() -> str:
     return "No track is currently playing."
 
 async def perform_previous_action() -> str:
+    if client.tv_mode_active:
+        return "TV is playing. Use `/tv stop` first."
     if not client.last_track_info:
         return "No previous track to play."
     queue.insert(0, client.last_track_info)
@@ -2410,6 +2442,7 @@ async def perform_previous_action() -> str:
     return "Queued the previous track to replay next."
 
 async def perform_stop_action() -> str:
+    client.tv_mode_active = False
     voice = active_voice_client()
     if voice:
         cancel_auto_leave_task("stop command")
@@ -2429,6 +2462,50 @@ async def perform_stop_action() -> str:
         return "Vittuun täältä keilahallista"
     logger.info("Stop requested while bot was not in a voice channel.")
     return "Not currently in a voice channel."
+
+def _tv_after_callback(error, channel):
+    """After-callback for the TV stream FFmpeg process."""
+    if not client.tv_mode_active:
+        return  # tv was stopped intentionally before this fired
+    if error:
+        logger.error(f"TV stream error: {error}")
+        asyncio.run_coroutine_threadsafe(_tv_restart(channel), client.loop)
+
+async def _tv_restart(channel):
+    """Restart the TV stream after an error, up to TV_MAX_RESTARTS times per window."""
+    now = time.time()
+    if client.tv_restart_window_start is None or now - client.tv_restart_window_start > TV_RESTART_WINDOW_SECONDS:
+        client.tv_restart_count = 0
+        client.tv_restart_window_start = now
+    client.tv_restart_count += 1
+    if client.tv_restart_count > TV_MAX_RESTARTS:
+        client.tv_mode_active = False
+        client.tv_stream_url = None
+        await channel.send(
+            f"TV stream lost connection after {TV_MAX_RESTARTS} reconnect attempt(s). "
+            "Use `/tv start` to retry."
+        )
+        return
+    logger.info(f"Restarting TV stream (attempt {client.tv_restart_count}/{TV_MAX_RESTARTS})")
+    await asyncio.sleep(2)
+    await _start_tv_stream(channel, client.tv_stream_url)
+
+async def _start_tv_stream(channel, url):
+    """Connect FFmpeg to the TV stream URL and hand it to the voice client."""
+    voice = active_voice_client()
+    if not voice or not voice.is_connected():
+        logger.error("TV stream start failed: not connected to voice channel.")
+        client.tv_mode_active = False
+        return
+    before_opts = _tv_module.build_ffmpeg_before_options()
+    source = discord.FFmpegPCMAudio(url, before_options=before_opts, options="-vn")
+    player = discord.PCMVolumeTransformer(source, volume=client.volume)
+    voice.play(player, after=lambda e: _tv_after_callback(e, channel))
+    client.tv_mode_active = True
+    client.tv_stream_url = url
+    client.tv_notify_channel = channel
+    client.currently_playing = True
+    logger.info(f"TV stream started: {url}")
 
 async def perform_volume_action(level: int) -> str:
     set_client_volume_level(level)
@@ -7281,6 +7358,9 @@ async def play(
 ):
     """Plays a YouTube video's audio, a YouTube playlist, or a search result."""
     record_command(ctx)
+    if client.tv_mode_active:
+        await ctx.response.send_message("TV is playing. Use `/tv stop` first.", ephemeral=True)
+        return
     await ctx.response.defer()
     url, repeat_count, repeat_loop, repeat_explicit = parse_play_repeat_request(url, repeat)
     url, playback_speed, speed_explicit, speed_error = parse_play_speed_request(url, speed)
@@ -7500,6 +7580,9 @@ async def play(
 async def playtop(ctx, *, query: str):
     """Adds a song to the top of the queue (plays next)."""
     record_command(ctx)
+    if client.tv_mode_active:
+        await ctx.response.send_message("TV is playing. Use `/tv stop` first.", ephemeral=True)
+        return
     if client.currently_playing and not await require_not_restricted(ctx, "noqueueskip", "add songs to the front of the queue"):
         return
     await ctx.response.defer()
@@ -7584,6 +7667,9 @@ async def playtop(ctx, *, query: str):
 
 async def enqueue_track(ctx, query: str, command_name: str = "enqueue"):
     record_command(ctx)
+    if client.tv_mode_active:
+        await ctx.response.send_message("TV is playing. Use `/tv stop` first.", ephemeral=True)
+        return
     await ctx.response.defer()
     if not await require_queue_room(ctx):
         return
@@ -9386,6 +9472,89 @@ if _spotify_module is not None:
         await ctx.response.send_message("\n".join(lines), ephemeral=True)
 
     client.tree.add_command(spotify_group)
+
+# ---------------------------------------------------------------------------
+# /tv commands (only registered when TV_ENABLED=true)
+# ---------------------------------------------------------------------------
+
+if _tv_module is not None:
+    tv_group = app_commands.Group(name="tv", description="live TV stream controls (admin only)")
+
+    @app_commands.describe(url="m3u8 stream URL (defaults to TV_STREAM_URL in .env)")
+    @tv_group.command(name="start", description="Start the live TV stream in your voice channel.")
+    async def tv_start_cmd(ctx, url: Optional[str] = None):
+        record_command(ctx)
+        if not is_user_admin(ctx.user):
+            await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+        stream_url = url or TV_STREAM_URL
+        if not stream_url:
+            await ctx.response.send_message(
+                "No stream URL configured. Set `TV_STREAM_URL` in `.env` or pass a URL as the argument.",
+                ephemeral=True,
+            )
+            return
+        if not ctx.user.voice or not ctx.user.voice.channel:
+            await ctx.response.send_message("You must be in a voice channel to start the TV stream.", ephemeral=True)
+            return
+        if client.currently_playing and not client.tv_mode_active:
+            await ctx.response.send_message(
+                "Music is currently playing. Use `/stop` to clear playback first.", ephemeral=True
+            )
+            return
+        await ctx.response.defer()
+        target_channel = ctx.user.voice.channel
+        voice = active_voice_client(ctx.guild)
+        try:
+            if voice and voice.is_connected():
+                if getattr(voice, "channel", None) != target_channel:
+                    await voice.move_to(target_channel)
+                    apply_channel_volume_default(target_channel, "tv start move")
+            else:
+                voice = await target_channel.connect()
+                client.current_voice_channel = voice
+                apply_channel_volume_default(target_channel, "tv start join")
+        except Exception as exc:
+            logger.error(f"TV start: voice join error: {exc}")
+            await ctx.followup.send("Could not join the voice channel.", ephemeral=True)
+            return
+        # Stop any existing TV stream cleanly before starting a new one
+        if client.tv_mode_active and voice.is_playing():
+            client.tv_mode_active = False
+            voice.stop()
+            await asyncio.sleep(0.1)
+        client.tv_restart_count = 0
+        client.tv_restart_window_start = None
+        await _start_tv_stream(ctx.channel, stream_url)
+        await ctx.followup.send(f"TV stream started in **{target_channel.name}**.")
+
+    @tv_group.command(name="stop", description="Stop the live TV stream and disconnect.")
+    async def tv_stop_cmd(ctx):
+        record_command(ctx)
+        if not is_user_admin(ctx.user):
+            await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+        if not client.tv_mode_active:
+            await ctx.response.send_message("No TV stream is currently active.", ephemeral=True)
+            return
+        client.tv_mode_active = False
+        client.tv_stream_url = None
+        client.tv_notify_channel = None
+        voice = active_voice_client()
+        if voice:
+            try:
+                if voice.is_playing() or voice.is_paused():
+                    voice.stop()
+            except Exception as exc:
+                logger.error(f"TV stop: voice stop error: {exc}")
+            await voice.disconnect()
+            client.current_voice_channel = None
+        await clear_playback_tracking("tv stop command")
+        reset_session_volume("tv stop")
+        await update_bot_presence_idle(reason="tv stop command")
+        await ctx.response.send_message("TV stream stopped.")
+
+    client.tree.add_command(tv_group)
 
 @client.tree.error
 async def on_app_command_error(ctx, error):

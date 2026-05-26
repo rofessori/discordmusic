@@ -202,6 +202,28 @@ by default it binds to `127.0.0.1:8765` and is only reachable from the local mac
 
 **what it does not do** (by design): create, delete, or rename playlists (use discord commands for that), edit favorites, or reorder the live queue. queue reordering would require ipc back into the bot and is not implemented.
 
+## live tv streaming
+
+activate by setting `TV_ENABLED=true` in `.env`. no additional packages are required.
+
+`/tv start` joins the user's current voice channel and starts playing the HLS stream configured in `TV_STREAM_URL`. the `url` argument overrides `TV_STREAM_URL` for that session, allowing one-off streams without changing `.env`. the command is admin-only because the stream URL embeds an auth token (`&o=` parameter) and should not be exposed through chat.
+
+while TV is active, `/play`, `/playtop`, `/enqueue`, `/q`, `/skip`, and `/previous` are blocked with an ephemeral "TV is playing. Use `/tv stop` first." message. `/stop` works normally and also clears TV mode.
+
+the stream is played using `discord.FFmpegPCMAudio` with `-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5` flags and the three required HTTP headers (`User-Agent`, `Referer`, `Origin`) passed via `-headers`. no cookies are needed; the `&o=` URL parameter is the entire auth mechanism.
+
+if FFmpeg exits with an error (network dropout that exhausts FFmpeg's built-in retry), the bot automatically restarts the stream. restarts are limited to `TV_MAX_RESTARTS` (default 3) within any `TV_RESTART_WINDOW_SECONDS` (default 60) sliding window. after that limit is reached, the bot posts a notification and waits for a manual `/tv start`.
+
+`/tv stop` disconnects the bot from voice and clears all TV state.
+
+**network note:** the stream hostname (e.g. `hirtto.tvkaista.net`) may only resolve on the local network. the bot host must be on the same network as the browser that generated the `&o=` auth token. the `timestamp=` parameter does not rotate — treat the whole URL as a stable string for the session.
+
+**config:**
+- `TV_ENABLED=true` — activates the module and registers `/tv` commands.
+- `TV_STREAM_URL=<m3u8_url>` — default stream URL with `&o=` auth token embedded.
+- `TV_MAX_RESTARTS=3` — maximum automatic restart attempts per window (minimum 1).
+- `TV_RESTART_WINDOW_SECONDS=60` — sliding window length for restart counting (minimum 10).
+
 ## quotes
 
 the bot can watch a configured quotes channel, back up its messages to `quotes.txt`, and return a random saved quote. quote persistence is isolated in `quotes.py`.

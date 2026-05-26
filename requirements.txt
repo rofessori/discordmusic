@@ -23,3 +23,6 @@ PyNaCl>=1.5.0,<1.6
 # Optional: Web UI (WEBUI_ENABLED=true in .env)
 # uvicorn>=0.30.0,<1.0
 # fastapi>=0.111.0,<1.0
+
+# Optional: Live TV streaming (TV_ENABLED=true in .env)
+# No additional packages required — uses only stdlib shlex and discord.FFmpegPCMAudio.
