@@ -9984,6 +9984,36 @@ if _tv_module is not None:
         await update_bot_presence_idle(reason="tv stop command")
         await ctx.response.send_message("TV stream stopped.")
 
+    @app_commands.describe(url="New m3u8 stream URL (paste fresh URL from browser when token expires)")
+    @tv_group.command(name="update", description="Swap in a new stream URL without stopping playback.")
+    async def tv_update_cmd(ctx, url: str):
+        record_command(ctx)
+        if not is_user_admin(ctx.user):
+            await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+        if not url.startswith("http"):
+            await ctx.response.send_message("URL must start with http or https.", ephemeral=True)
+            return
+        was_active = client.tv_mode_active
+        client.tv_stream_url = url
+        if was_active:
+            # Restart the stream with the new URL immediately
+            await ctx.response.defer()
+            voice = active_voice_client()
+            if voice and voice.is_connected():
+                client.tv_mode_active = False
+                if voice.is_playing() or voice.is_paused():
+                    voice.stop()
+                await asyncio.sleep(0.2)
+                client.tv_restart_count = 0
+                client.tv_restart_window_start = None
+                await _start_tv_stream(ctx.channel, url)
+                await ctx.followup.send("Stream URL updated and restarted.")
+            else:
+                await ctx.followup.send("URL saved. Use `/tv start` to begin streaming.")
+        else:
+            await ctx.response.send_message("URL saved. Use `/tv start` to begin streaming.", ephemeral=True)
+
     client.tree.add_command(tv_group)
 
 @client.tree.error
