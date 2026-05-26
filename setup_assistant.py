@@ -60,6 +60,8 @@ ENV_FIELDS = [
 ]
 SECRET_FIELDS = {"BOT_TOKEN", "WEBUI_SECRET_KEY", "TV_WEBHOOK_SECRET", "SPOTIFY_CLIENT_SECRET"}
 
+_SENSITIVE_MARKERS = {"SECRET", "TOKEN", "PASSWORD", "PASS", "API_KEY", "WEBHOOK_SECRET"}
+
 
 # ── Exceptions ─────────────────────────────────────────────────────────────────
 
@@ -203,7 +205,8 @@ def normalize_optional_snowflake(value: str) -> str:
 def mask_value(key: str, value: str) -> str:
     if not value:
         return dim("(not set)")
-    if key in SECRET_FIELDS:
+    upper = key.upper()
+    if key in SECRET_FIELDS or any(m in upper for m in _SENSITIVE_MARKERS):
         return dim("***set***")
     return value
 
@@ -568,8 +571,15 @@ class SetupAssistant:
         for line in textwrap.wrap(text, 74):
             print(f"  {dim(line)}")
 
+    def _redact_sensitive(self, text: str) -> str:
+        for key in SECRET_FIELDS:
+            val = self.values.get(key, "")
+            if val and val in text:
+                text = text.replace(val, "***")
+        return text
+
     def info(self, text: str) -> None:
-        print(f"  {cyan('·')}  {text}")
+        print(f"  {cyan('·')}  {self._redact_sensitive(text)}")
 
     def ok(self, text: str) -> None:
         print(f"  {green('✓')}  {text}")
