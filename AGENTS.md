@@ -125,7 +125,7 @@ Setup security checks:
 - Cache filenames are deterministic URL-safe base64 of the canonical YouTube watch URL. Normal cache files are `cache/<cache-key>.<ext>` and playlist long-term cache files are `cache/plst-<cache-key>.<ext>`.
 - Playlist track metadata should include `cache_key`, `cache_mode`, `cache_path`, and `ext` when available. Unsafe or missing `cache_path` values must be ignored and logged, never trusted directly from JSON.
 - Playlist cache policy is admin-controlled. The persistent global default is `bounded`, per-playlist default is `follow_global`, and admins can use `/playlist cacheglobal`, `/playlist cachemode`, `/cachestatus`, and `/purgecache`.
-- Bounded playlist caching may cache at most 15 tracks or 3 GB per playlist play operation. The hard root cache cap is 20 GB; when reached, playback should stream instead of downloading.
+- Bounded playlist caching must not block playlist playback. Queue or start the playlist first, then warm the cache in a background task for at most the first 15 tracks or 3 GB. The hard root cache cap is 20 GB; when reached, playback should stream instead of downloading.
 - Full playlist predownload remains explicit/admin-only through `/playlist predownload` and must use `cache/plst-<cache-key>.<ext>`, not playlist folders.
 
 ## 2026-05-03 Vote Controls & Playlist Current Import Notes
@@ -148,6 +148,8 @@ Setup security checks:
 - Queue entries from YouTube playlist URLs carry `needs_refresh=True` and must resolve through the normal `fetch_track()` path when they reach playback so cache, duration, filesize, and YouTube-only safety rules still apply before `ffmpeg`.
 - Keep local saved playlists and YouTube playlist URL blocks distinct: local playlists use persisted metadata under `playlists/`, while YouTube playlist URL blocks are session queue entries with `playlist_id` prefixed as `youtube:<list-id>`.
 - `/togglelog admin` and `/togglelog all` enable the larger sanitized user-space `/play` progress message. The message should be sent before voice join/extraction and then edited through voice connection, metadata, cache, download, and ffmpeg events without exposing absolute paths or secrets.
+- When the bot is alone in voice for the configured auto-leave delay, it resets playback speed back to normal `1x` even if auto-leave itself is disabled. Log this to `output.log`, append `playback-speed-alone-reset` to `runtime-audit.json`, and announce it in Discord only when admin operation messages are enabled.
+- Bot presence should stay playback-aware. Idle presence is `/play (yt-link)`. Current-track presence should prefer YouTube metadata formatted as `song - artist`, then parsed title fallback, then `PLAYING (video title)`, then `???`; hard presence update errors fall back to `/play (yt-link)`, log to `output.log`, append `bot-presence-error`, and notify only when admin operation messages are enabled.
 - The now-playing `🔂` reaction toggles repeat-one. Repeat-off is instant until two other recent repeat-off toggles for the same current song exist; after that, non-admins use the normal half-channel voice quorum, while admins bypass.
 
 ## 2026-05-05 Favorites & User Restriction Notes

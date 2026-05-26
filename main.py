@@ -76,6 +76,9 @@ MAX_PLAYBACK_SPEED = 2.0
 DEFAULT_NOWPLAYING_COOLDOWN_SECONDS = 30
 NOWPLAYING_COOLDOWN_MIN_SECONDS = 5
 NOWPLAYING_COOLDOWN_MAX_SECONDS = 300
+DEFAULT_BOT_PRESENCE = "/play (yt-link)"
+UNKNOWN_BOT_PRESENCE = "???"
+BOT_PRESENCE_MAX_LENGTH = 120
 LAST_SESSION_RECOVERY_MAX_AGE_SECONDS = 1800
 VOICE_VOTE_TIMEOUT_SECONDS = 45
 REPEAT_TOGGLE_RECENT_SECONDS = 300
@@ -108,6 +111,23 @@ PLAYLIST_PREDOWNLOAD_ENABLED = (
     env_flag("PLAYLIST_PREDOWNLOAD_ENABLED")
 )
 YTDLP_NO_CHECK_CERTIFICATE = env_flag("YTDLP_NO_CHECK_CERTIFICATE", False)
+SPOTIFY_ENABLED = env_flag("SPOTIFY_ENABLED", False)
+
+_spotify_module = None
+if SPOTIFY_ENABLED:
+    try:
+        import spotify_import as _spotify_module
+        missing_deps = _spotify_module.check_dependencies()
+        if missing_deps:
+            logger.warning(
+                "SPOTIFY_ENABLED=true but required packages are missing. "
+                f"Run: pip install {' '.join(missing_deps)}"
+            )
+            _spotify_module = None
+        else:
+            logger.info("Spotify import module loaded.")
+    except ImportError as _e:
+        logger.warning(f"SPOTIFY_ENABLED=true but spotify_import.py not found: {_e}")
 ALLOW_ADMIN_ROLE_NAME = env_flag("ALLOW_ADMIN_ROLE_NAME", False)
 MAX_PLAYLIST_TRACKS = env_int("MAX_PLAYLIST_TRACKS", 100)
 MAX_URLS_PER_MESSAGE = env_int("MAX_URLS_PER_MESSAGE", 10)
@@ -1024,8 +1044,51 @@ def is_user_admin(user) -> bool:
         return True
     return False
 
+def voice_client_is_connected(voice) -> bool:
+    if voice is None:
+        return False
+    try:
+        return bool(voice.is_connected())
+    except Exception as exc:
+        logger.warning(f"Voice client connection check failed: {exc}")
+        return False
+
+
+def same_guild(left, right) -> bool:
+    if left is None or right is None:
+        return False
+    left_id = getattr(left, "id", None)
+    right_id = getattr(right, "id", None)
+    if left_id is not None and right_id is not None:
+        return left_id == right_id
+    return left == right
+
+
+def active_voice_client(guild=None):
+    """Return the live voice client and repair stale local tracking."""
+    current = getattr(client, "current_voice_channel", None)
+    guild_voice = getattr(guild, "voice_client", None) if guild is not None else None
+
+    if voice_client_is_connected(guild_voice):
+        if current is not guild_voice:
+            logger.info("Synchronized tracked voice client from guild voice state.")
+        client.current_voice_channel = guild_voice
+        return guild_voice
+
+    if voice_client_is_connected(current):
+        current_guild = getattr(current, "guild", None)
+        if guild is None or current_guild is None or same_guild(current_guild, guild):
+            return current
+
+    if current is not None:
+        logger.warning("Cleared stale tracked voice client; no connected guild voice client was available.")
+        client.current_voice_channel = None
+    return None
+
+
 def user_in_bot_voice_channel(user) -> bool:
-    bot_channel = getattr(client.current_voice_channel, "channel", None)
+    voice = active_voice_client(getattr(user, "guild", None))
+    bot_channel = getattr(voice, "channel", None)
     user_channel = getattr(getattr(user, "voice", None), "channel", None)
     return bool(
         bot_channel
@@ -1036,7 +1099,7 @@ def user_in_bot_voice_channel(user) -> bool:
 def can_control_voice(user) -> bool:
     if is_user_admin(user):
         return True
-    if client.current_voice_channel is None:
+    if active_voice_client(getattr(user, "guild", None)) is None:
         return True
     return user_in_bot_voice_channel(user)
 
@@ -1522,6 +1585,7 @@ class Client(discord.Client):
         self.auto_leave_enabled = False
         self.auto_leave_delay_seconds = AUTO_LEAVE_DEFAULT_DELAY_SECONDS
         self.auto_leave_task = None
+        self.alone_speed_reset_task = None
         self.auto_leave_disconnect_in_progress = False
         # Queue and history tracking
         self.song_history = []                # list of all tracks requested in current session
@@ -1534,9 +1598,11 @@ class Client(discord.Client):
         self.help_message_id = None
         self.help_expanded = False
         self.help_page = 0
+        self.help_pages = None
         self.config_panel_message_id = None
         self.config_panel_user_id = None
         self.playlist_delete_tasks = {}
+        self.playlist_cache_tasks = {}
         self.playlist_creation_sessions = {}
         self.playlist_creation_timeout_tasks = {}
         self.active_voice_votes = {}
@@ -1547,10 +1613,14 @@ class Client(discord.Client):
         self.repeat_disable_history = []
         self.current_track_favorite_notice = ""
         self.current_track_started_at = None
+        self.last_presence_text = None
         # File deletion task tracking
         self.deletion_tasks = {}              # map video_id -> asyncio.Future
         # Played tracks tracking
         self.played_tracks = set()           # set of video IDs that have been played (for history status)
+        # Spotify import review state
+        self.pending_spotify_imports = {}    # import_id -> spotify_import.PendingImport
+        self.spotify_review_message_ids = {} # message_id -> import_id
 
     async def setup_hook(self):
         # Sync application commands to the specified guild
@@ -1582,9 +1652,11 @@ def build_runtime_status():
         f"- queue length: `{len(queue)}`",
         f"- song history entries: `{len(client.song_history)}`",
         f"- currently playing: **{discord.utils.escape_markdown(str(current))}**",
+        f"- bot status: `{discord.utils.escape_markdown(str(client.last_presence_text or DEFAULT_BOT_PRESENCE))}`",
         f"- boot id: `{client.boot_id}`",
         f"- volume: `{int(round(client.volume * 100))}%` (`{'session' if client.session_volume_locked else 'channel/default'}`)",
         f"- playback speed default: `{client.playback_speed:g}x` (`{'everyone' if client.playspeed_allow_all else 'admin/group'}`)",
+        f"- alone speed reset: `1x after {alone_speed_reset_delay_seconds()}s alone`",
         f"- log level: `{logging.getLevelName(logger.level)}`",
         f"- download log messages: `{'enabled' if client.download_debug_messages else 'disabled'}`",
         f"- admin operation messages: `{'enabled' if client.user_operation_debug_messages else 'disabled'}`",
@@ -1633,7 +1705,7 @@ def metadata_value(track: dict, *keys, default="unknown"):
 
 def build_playback_status() -> str:
     track = client.current_track_info or {}
-    voice = client.current_voice_channel
+    voice = active_voice_client()
     voice_channel = getattr(voice, "channel", None)
     cached_file = cached_file_for_track(track) if track else None
     duration = track.get("duration") or 0
@@ -1643,12 +1715,15 @@ def build_playback_status() -> str:
     lines = ["**playback status**"]
     if not track:
         lines.append("- state: `idle`")
+        lines.append(f"- bot status: `{discord.utils.escape_markdown(str(client.last_presence_text or DEFAULT_BOT_PRESENCE))}`")
         lines.append(f"- queue length: `{len(queue)}`")
         lines.append(f"- cache use: `{human_bytes(cache_total_bytes())} / {human_bytes(CACHE_HARD_LIMIT_BYTES)}`")
         return "\n".join(lines)
     lines.extend([
         f"- state: `{'playing' if client.currently_playing else 'not playing'}`",
+        f"- bot status: `{discord.utils.escape_markdown(str(client.last_presence_text or DEFAULT_BOT_PRESENCE))}`",
         f"- title: **{discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))}**",
+        f"- song/artist status source: `{bot_presence_for_track(track)[1]}`",
         f"- video id: `{discord.utils.escape_markdown(str(track.get('id') or '-'))}`",
     ])
     if not client.queue_links_disabled and track.get("webpage_url"):
@@ -1709,8 +1784,9 @@ def debug_playback_content(report: DebugPlaybackMessage, *, collapsed: bool = Fa
             f"- track: **{discord.utils.escape_markdown(report.title or 'unknown')}** "
             f"(`{discord.utils.escape_markdown(report.video_id or '-')}`)"
         )
-    if client.current_voice_channel and getattr(client.current_voice_channel, "channel", None):
-        channel_name = getattr(client.current_voice_channel.channel, "name", "voice")
+    voice = active_voice_client()
+    if voice and getattr(voice, "channel", None):
+        channel_name = getattr(voice.channel, "name", "voice")
         lines.append(f"- voice: `{discord.utils.escape_markdown(str(channel_name))}`")
     if report.cache_state:
         lines.append(f"- cache: `{discord.utils.escape_markdown(report.cache_state)}`")
@@ -2120,7 +2196,7 @@ def set_client_volume_level(level: int, *, allow_unsafe: bool = False):
         logger.warning(f"Clamping requested volume {level}% to safe limit {SAFE_VOLUME_MAX_LEVEL}%.")
         level = SAFE_VOLUME_MAX_LEVEL
     client.volume = level / 100.0
-    voice = client.current_voice_channel
+    voice = active_voice_client()
     if voice and getattr(voice, "source", None):
         try:
             voice.source.volume = client.volume
@@ -2142,6 +2218,60 @@ def reset_session_volume(reason: str = ""):
     set_client_volume_level(DEFAULT_VOLUME_LEVEL)
     logger.info(f"Reset session volume to {DEFAULT_VOLUME_LEVEL}%{f' after {reason}' if reason else ''}.")
 
+def playback_speed_is_normal(speed: Optional[float]) -> bool:
+    try:
+        return abs(float(speed or 1.0) - 1.0) <= 0.001
+    except (TypeError, ValueError):
+        return True
+
+def playback_speed_reset_needed() -> bool:
+    if not playback_speed_is_normal(getattr(client, "playback_speed", 1.0)):
+        return True
+    track = client.current_track_info or {}
+    if "playback_speed" in track and not playback_speed_is_normal(track.get("playback_speed")):
+        return True
+    return False
+
+def alone_speed_reset_delay_seconds() -> int:
+    return int(getattr(client, "auto_leave_delay_seconds", AUTO_LEAVE_DEFAULT_DELAY_SECONDS) or AUTO_LEAVE_DEFAULT_DELAY_SECONDS)
+
+async def reset_playback_speed_after_alone(voice_channel, *, reason: str) -> bool:
+    if not playback_speed_reset_needed():
+        return False
+    old_default = playback_speed_for_track(None)
+    old_current = playback_speed_for_track(client.current_track_info) if client.current_track_info else old_default
+    client.playback_speed = 1.0
+    if client.current_track_info and "playback_speed" in client.current_track_info:
+        client.current_track_info["playback_speed"] = 1.0
+    details = {
+        "reason": reason,
+        "voice_channel_id": getattr(voice_channel, "id", None),
+        "voice_channel_name": getattr(voice_channel, "name", None),
+        "old_default_speed": old_default,
+        "old_current_speed": old_current,
+        "new_speed": 1.0,
+        "delay_seconds": alone_speed_reset_delay_seconds(),
+        "currently_playing": bool(client.currently_playing),
+    }
+    append_runtime_audit_event("playback-speed-alone-reset", details=details)
+    logger.info(
+        "Playback speed reset to 1x after bot was alone: "
+        f"channel={getattr(voice_channel, 'name', voice_channel)} "
+        f"old_default={old_default:g}x old_current={old_current:g}x reason={reason}."
+    )
+    notify_channel = getattr(client.current_track_message, "channel", None)
+    if client.user_operation_debug_messages and notify_channel:
+        try:
+            await notify_channel.send(
+                "**admin operation**\n"
+                f"- playback speed reset: `{old_current:g}x` -> `1x`\n"
+                f"- reason: bot was alone for `{alone_speed_reset_delay_seconds()}s`\n"
+                "- note: already-running audio changes on the next track or replay."
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to send alone speed-reset operation message: {exc}")
+    return True
+
 def find_voice_channel_by_name(guild, name: str):
     lookup = str(name or "").strip().lower()
     if not guild or not lookup:
@@ -2162,7 +2292,7 @@ async def connect_or_move_to_voice_channel(ctx, voice_channel, *, reason: str):
     if voice_channel is None:
         await safe_interaction_send(ctx, "Voice channel not found.", ephemeral=True)
         return False
-    voice = client.current_voice_channel or getattr(ctx.guild, "voice_client", None)
+    voice = active_voice_client(ctx.guild)
     try:
         if voice and voice.is_connected():
             if getattr(voice, "channel", None) == voice_channel:
@@ -2179,6 +2309,7 @@ async def connect_or_move_to_voice_channel(ctx, voice_channel, *, reason: str):
             logger.info(f"Connected bot to voice channel {voice_channel.name} for {reason}.")
         apply_channel_volume_default(voice_channel, reason)
         cancel_auto_leave_task(reason)
+        cancel_alone_speed_reset_task(reason)
         await safe_interaction_send(ctx, f"Joined voice channel **{discord.utils.escape_markdown(voice_channel.name)}**.", ephemeral=True)
         return True
     except Exception as exc:
@@ -2202,7 +2333,7 @@ def active_voice_vote_for_message(message_id: int):
     return None
 
 def voice_vote_prompt_content(vote: VoiceVote, *, status: str = "open") -> str:
-    channel = getattr(client.current_voice_channel, "channel", None)
+    channel = getattr(active_voice_client(), "channel", None)
     quorum = voice_vote_quorum(channel) if channel and voice_channel_id(channel) == vote.voice_channel_id else 1
     status_line = {
         "open": "React 👍 to approve or 👎 to reject.",
@@ -2242,7 +2373,7 @@ async def finish_voice_vote(vote: VoiceVote, status: str):
             logger.warning(f"Failed to finish voice vote message: {exc}")
 
 async def perform_skip_action() -> str:
-    voice = client.current_voice_channel
+    voice = active_voice_client()
     if voice and voice.is_connected() and (voice.is_playing() or voice.is_paused()):
         voice.stop()
         logger.info("Track skipped.")
@@ -2254,16 +2385,17 @@ async def perform_previous_action() -> str:
     if not client.last_track_info:
         return "No previous track to play."
     queue.insert(0, client.last_track_info)
-    voice = client.current_voice_channel
+    voice = active_voice_client()
     if voice and voice.is_connected() and (voice.is_playing() or voice.is_paused()):
         voice.stop()
     logger.info("Previous track requested.")
     return "Queued the previous track to replay next."
 
 async def perform_stop_action() -> str:
-    voice = client.current_voice_channel
+    voice = active_voice_client()
     if voice:
         cancel_auto_leave_task("stop command")
+        cancel_alone_speed_reset_task("stop command")
         try:
             if voice.is_playing() or voice.is_paused():
                 voice.stop()
@@ -2276,6 +2408,7 @@ async def perform_stop_action() -> str:
         client.currently_playing = False
         client.current_track_started_at = None
         reset_session_volume("voice disconnect")
+        await update_bot_presence_idle(reason="stop command")
         return "Vittuun täältä keilahallista"
     logger.info("Stop requested while bot was not in a voice channel.")
     return "Not currently in a voice channel."
@@ -2394,7 +2527,7 @@ def sync_repeat_for_started_track(track: dict):
         client.repeat_track_id = None
 
 async def apply_voice_vote(vote: VoiceVote):
-    voice = client.current_voice_channel
+    voice = active_voice_client(getattr(getattr(vote, "message", None), "guild", None))
     channel = getattr(voice, "channel", None)
     if not voice or not voice.is_connected() or voice_channel_id(channel) != vote.voice_channel_id:
         await finish_voice_vote(vote, "cancelled")
@@ -2419,7 +2552,7 @@ async def apply_voice_vote(vote: VoiceVote):
         await vote.message.channel.send(result)
 
 async def maybe_apply_voice_vote(vote: VoiceVote):
-    voice = client.current_voice_channel
+    voice = active_voice_client(getattr(getattr(vote, "message", None), "guild", None))
     channel = getattr(voice, "channel", None)
     quorum = voice_vote_quorum(channel)
     if len(vote.votes) >= quorum:
@@ -2452,7 +2585,8 @@ async def request_voice_vote(user, text_channel, action: str, title: str, *, val
         else:
             await text_channel.send(message)
         return False
-    voice = client.current_voice_channel
+    guild = getattr(user, "guild", None) or getattr(text_channel, "guild", None)
+    voice = active_voice_client(guild)
     voice_channel = getattr(voice, "channel", None)
     if voice is None or not voice.is_connected() or voice_channel is None:
         if ctx:
@@ -2615,6 +2749,13 @@ def cancel_auto_leave_task(reason: str = ""):
         task.cancel()
         logger.info(f"Cancelled auto-leave task{f' ({reason})' if reason else ''}.")
     client.auto_leave_task = None
+
+def cancel_alone_speed_reset_task(reason: str = ""):
+    task = getattr(client, "alone_speed_reset_task", None)
+    if task and not task.done():
+        task.cancel()
+        logger.info(f"Cancelled alone speed-reset task{f' ({reason})' if reason else ''}.")
+    client.alone_speed_reset_task = None
 
 def current_playback_recovery_tracks() -> list:
     tracks = []
@@ -2797,13 +2938,14 @@ async def restore_last_session(ctx) -> bool:
     if not tracks:
         await ctx.followup.send("The saved last session has no playable tracks.")
         return False
-    voice = client.current_voice_channel or ctx.guild.voice_client
+    voice = active_voice_client(ctx.guild)
     if voice is None or not voice.is_connected():
         try:
             voice = await ctx.user.voice.channel.connect()
             client.current_voice_channel = voice
             apply_channel_volume_default(ctx.user.voice.channel, "play last join")
             cancel_auto_leave_task("play last joined voice")
+            cancel_alone_speed_reset_task("play last joined voice")
             client.song_history = []
             await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
         except Exception as exc:
@@ -2843,12 +2985,13 @@ async def perform_auto_leave_if_still_alone(voice_channel):
             return
         if asyncio.current_task() is not client.auto_leave_task:
             return
-        voice = client.current_voice_channel
+        voice = active_voice_client(getattr(voice_channel, "guild", None))
         if voice is None or not voice.is_connected() or getattr(voice, "channel", None) != voice_channel:
             return
         if not bot_is_alone_in_voice(voice_channel):
             return
         notify_channel = getattr(client.current_track_message, "channel", None)
+        await reset_playback_speed_after_alone(voice_channel, reason="auto-leave")
         saved_count = save_last_session_recovery(voice_channel)
         if not saved_count:
             logger.info("Auto-leave found no current song or queue to save.")
@@ -2865,6 +3008,7 @@ async def perform_auto_leave_if_still_alone(voice_channel):
             client.current_track_message_show_url = True
             await voice.disconnect()
             reset_session_volume("auto-leave")
+            await update_bot_presence_idle(reason="auto-leave", channel=notify_channel)
             if notify_channel and saved_count:
                 try:
                     await notify_channel.send(
@@ -2882,6 +3026,40 @@ async def perform_auto_leave_if_still_alone(voice_channel):
     finally:
         if asyncio.current_task() is client.auto_leave_task:
             client.auto_leave_task = None
+
+async def perform_alone_speed_reset_if_still_alone(voice_channel):
+    try:
+        await asyncio.sleep(alone_speed_reset_delay_seconds())
+        if asyncio.current_task() is not client.alone_speed_reset_task:
+            return
+        voice = active_voice_client(getattr(voice_channel, "guild", None))
+        if voice is None or not voice.is_connected() or getattr(voice, "channel", None) != voice_channel:
+            return
+        if not bot_is_alone_in_voice(voice_channel):
+            return
+        await reset_playback_speed_after_alone(voice_channel, reason="alone-timer")
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        logger.error(f"Alone speed-reset task failed: {exc}")
+    finally:
+        if asyncio.current_task() is client.alone_speed_reset_task:
+            client.alone_speed_reset_task = None
+
+def schedule_alone_speed_reset_if_needed(channel):
+    if channel is None:
+        return
+    if not bot_is_alone_in_voice(channel):
+        cancel_alone_speed_reset_task("user present")
+        return
+    if not playback_speed_reset_needed():
+        cancel_alone_speed_reset_task("speed already normal")
+        return
+    task = getattr(client, "alone_speed_reset_task", None)
+    if task and not task.done():
+        return
+    client.alone_speed_reset_task = asyncio.create_task(perform_alone_speed_reset_if_still_alone(channel))
+    logger.info(f"Scheduled playback speed reset to 1x in {alone_speed_reset_delay_seconds()}s for channel {getattr(channel, 'name', channel)}.")
 
 def schedule_auto_leave_if_needed(channel):
     if not client.auto_leave_enabled or channel is None:
@@ -3569,109 +3747,6 @@ def favorites_status_message(user) -> str:
         f"- permissions: {groups}",
     ])
 
-def playlist_track_identity(track: dict) -> Optional[str]:
-    video_id = str(track.get("id") or "").strip()
-    if video_id:
-        return f"id:{video_id}"
-    url = str(track.get("webpage_url") or "").strip()
-    if not url:
-        return None
-    parsed_id = parse_youtube_video_id(url)
-    if parsed_id:
-        return f"id:{parsed_id}"
-    return f"url:{url.lower()}"
-
-def playlist_existing_track_identities(playlist: dict) -> set:
-    identities = set()
-    for track in playlist.get("tracks", []):
-        identity = playlist_track_identity(track)
-        if identity:
-            identities.add(identity)
-    return identities
-
-def playlist_name_error(name: str, user=None) -> Optional[str]:
-    safe_name = normalize_playlist_name(name)
-    if not safe_name:
-        return "I need a playlist name. Try `/playlist new` for guided setup."
-    if len(safe_name) > PLAYLIST_NAME_MAX_LENGTH:
-        return f"Playlist names must be {PLAYLIST_NAME_MAX_LENGTH} characters or shorter."
-    if resolve_playlist_reference(safe_name, user, require_visible=False):
-        return "A playlist with that name already exists. Choose another name or remove the old playlist first."
-    return None
-
-def extract_youtube_urls(text: str) -> list:
-    urls = []
-    for match in re.findall(r"https?://[^\s<>()]+", str(text or "")):
-        candidate = match.rstrip(".,);]>")
-        try:
-            validate_media_query(candidate)
-        except ValueError:
-            continue
-        if (parse_youtube_video_id(candidate) or parse_youtube_playlist_id(candidate)) and candidate not in urls:
-            urls.append(candidate)
-    return urls
-
-def playlist_session_key(user, channel) -> tuple:
-    guild = getattr(channel, "guild", None)
-    guild_id = getattr(guild, "id", 0) or 0
-    return (guild_id, getattr(channel, "id", 0), user_id_value(user))
-
-def expire_playlist_creation_sessions():
-    now = time.time()
-    expired = [
-        key for key, session in client.playlist_creation_sessions.items()
-        if now - session.updated_at > PLAYLIST_CREATION_TIMEOUT_SECONDS
-    ]
-    for key in expired:
-        client.playlist_creation_sessions.pop(key, None)
-        task = client.playlist_creation_timeout_tasks.pop(key, None)
-        if task:
-            task.cancel()
-
-def queue_tracks_for_playlist_import(user) -> list:
-    tracks = []
-    for track in queue:
-        if track.get("webpage_url") or track.get("id"):
-            tracks.append(playlist_track_from_track(track, user))
-    return tracks
-
-def queue_tracks_missing_from_playlist(playlist: dict, user) -> tuple:
-    existing = playlist_existing_track_identities(playlist)
-    additions = []
-    skipped_duplicates = 0
-    skipped_missing = 0
-    for track in queue:
-        if not (track.get("webpage_url") or track.get("id")):
-            skipped_missing += 1
-            continue
-        candidate = playlist_track_from_track(track, user)
-        identity = playlist_track_identity(candidate)
-        if not identity:
-            skipped_missing += 1
-            continue
-        if identity in existing:
-            skipped_duplicates += 1
-            continue
-        existing.add(identity)
-        additions.append(candidate)
-    return additions, skipped_duplicates, skipped_missing
-
-def save_new_playlist(name: str, owner, tracks: Optional[list] = None, visibility: str = "private") -> dict:
-    playlist = make_playlist_metadata(name, owner, visibility)
-    playlist["tracks"] = tracks or []
-    save_playlist(playlist)
-    append_playlist_blackbox_event("created", playlist, owner)
-    logger.info(f"Playlist created: {playlist['name']} ({playlist['id']}) by {user_display(owner)}")
-    return playlist
-
-def playlist_created_message(playlist: dict) -> str:
-    name = discord.utils.escape_markdown(str(playlist.get("name", "playlist")))
-    count = len(playlist.get("tracks", []))
-    return (
-        f"Created playlist **{name}** with {count} track(s). "
-        f"Play it with `/playlist play {playlist.get('name')}`."
-    )
-
 def playlist_to_queue_tracks(playlist: dict, *, block_id: Optional[str] = None) -> list:
     tracks = playlist.get("tracks", [])
     block_id = block_id or generate_playlist_id()
@@ -3785,6 +3860,110 @@ def track_display_parts(track: dict) -> tuple:
     url = discord.utils.escape_markdown(str(url))
     return title, url
 
+def first_metadata_text(track: dict, *keys) -> str:
+    for key in keys:
+        value = track.get(key)
+        if isinstance(value, (list, tuple)):
+            parts = [str(item).strip() for item in value if str(item or "").strip()]
+            if parts:
+                return ", ".join(parts[:3])
+            continue
+        text = str(value or "").strip()
+        if text and text.lower() not in {"unknown", "unknown title", "none", "null"}:
+            return text
+    return ""
+
+def clean_presence_text(value: str) -> str:
+    text = truncate_text(sanitize_debug_text(value), BOT_PRESENCE_MAX_LENGTH)
+    return text.strip() or UNKNOWN_BOT_PRESENCE
+
+def parse_song_artist_from_title(title: str) -> tuple:
+    text = str(title or "").strip()
+    if " - " not in text:
+        return "", ""
+    artist, song = [part.strip() for part in text.split(" - ", 1)]
+    if not artist or not song:
+        return "", ""
+    return song, artist
+
+def bot_presence_for_track(track: Optional[dict]) -> tuple:
+    if track is None:
+        return DEFAULT_BOT_PRESENCE, "idle"
+    try:
+        song = first_metadata_text(track, "track", "alt_title")
+        artist = first_metadata_text(track, "artist", "artists", "creator", "uploader", "channel")
+        if song and artist:
+            return clean_presence_text(f"{song} - {artist}"), "metadata"
+
+        title = first_metadata_text(track, "title", "fulltitle")
+        parsed_song, parsed_artist = parse_song_artist_from_title(title)
+        if parsed_song and parsed_artist:
+            return clean_presence_text(f"{parsed_song} - {parsed_artist}"), "title-parse"
+        if title and artist:
+            return clean_presence_text(f"{title} - {artist}"), "metadata-title"
+        if title:
+            return clean_presence_text(f"PLAYING ({title})"), "title-fallback"
+
+        return UNKNOWN_BOT_PRESENCE, "unknown"
+    except Exception as exc:
+        logger.error(f"Failed to format bot presence for track: {exc}")
+        return DEFAULT_BOT_PRESENCE, "format-error"
+
+async def send_presence_operation_notice(channel, message: str):
+    if not client.user_operation_debug_messages or channel is None:
+        return
+    try:
+        await channel.send(message)
+    except Exception as exc:
+        logger.warning(f"Failed to send bot presence operation notice: {exc}")
+
+async def update_bot_presence(track: Optional[dict] = None, *, reason: str = "", channel=None):
+    presence_text, source = bot_presence_for_track(track if client.currently_playing else None)
+    fallback_title = track.get("title", "-") if isinstance(track, dict) else "-"
+    if source == "title-fallback":
+        logger.info(
+            "Bot presence used title fallback formatting: "
+            f"reason={reason} track={fallback_title}"
+        )
+    elif source in {"unknown", "format-error"}:
+        logger.warning(
+            "Bot presence used fallback formatting: "
+            f"source={source} reason={reason} track={fallback_title}"
+        )
+    if presence_text == client.last_presence_text:
+        logger.debug(f"Bot presence unchanged ({presence_text}) during {reason or 'unknown reason'}.")
+        return
+    try:
+        await client.change_presence(activity=discord.Game(name=presence_text))
+        client.last_presence_text = presence_text
+        logger.info(f"Bot presence updated: {presence_text} (source={source}, reason={reason or 'unspecified'}).")
+    except Exception as exc:
+        logger.error(f"Failed to update bot presence to {presence_text!r}: {exc}")
+        append_runtime_audit_event("bot-presence-error", details={
+            "requested_presence": presence_text,
+            "source": source,
+            "reason": reason,
+            "error": str(exc),
+            "track_id": track.get("id") if isinstance(track, dict) else None,
+            "title": track.get("title") if isinstance(track, dict) else None,
+        })
+        try:
+            await client.change_presence(activity=discord.Game(name=DEFAULT_BOT_PRESENCE))
+            client.last_presence_text = DEFAULT_BOT_PRESENCE
+            logger.info(f"Bot presence fell back to {DEFAULT_BOT_PRESENCE} after update error.")
+        except Exception as fallback_exc:
+            logger.error(f"Failed to apply fallback bot presence: {fallback_exc}")
+        await send_presence_operation_notice(
+            channel or getattr(getattr(client, "current_track_message", None), "channel", None),
+            "**admin operation**\n"
+            "- bot status update failed\n"
+            f"- fallback: `{DEFAULT_BOT_PRESENCE}`\n"
+            f"- reason: `{discord.utils.escape_markdown(truncate_text(str(exc), 180))}`",
+        )
+
+async def update_bot_presence_idle(*, reason: str = "", channel=None):
+    await update_bot_presence(None, reason=reason, channel=channel)
+
 def format_queue_section(*, max_chars=None, show_links=True) -> str:
     lines = ["📜 **Queue**"]
     if not queue:
@@ -3853,6 +4032,22 @@ async def remove_control_reactions(message):
             except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
                 logger.warning(f"Failed to remove stale control reaction {emoji}: {exc}")
 
+async def clear_playback_tracking(reason: str, *, remove_controls: bool = True):
+    old_message = client.current_track_message
+    client.currently_playing = False
+    client.current_track_id = None
+    client.current_track_info = None
+    client.current_track_started_at = None
+    client.current_track_message = None
+    client.current_track_message_show_queue = False
+    client.current_track_message_show_url = True
+    client.current_track_favorite_notice = ""
+    client.repeat_current_track = False
+    client.repeat_track_id = None
+    if remove_controls:
+        await remove_control_reactions(old_message)
+    logger.info(f"Cleared playback tracking state: {reason}.")
+
 async def add_control_reactions(message):
     existing = {
         str(reaction.emoji)
@@ -3889,6 +4084,7 @@ async def publish_now_playing(channel, track: dict, *, send_message=None, acknow
                 f"Edited now-playing message {old_message.id} in channel {channel.id} "
                 f"for {track.get('title', 'Unknown title')} ({track.get('id', '')})."
             )
+            await update_bot_presence(track, reason="now-playing edit", channel=channel)
             return old_message
         except (discord.Forbidden, discord.NotFound, discord.HTTPException) as exc:
             logger.warning(f"Could not edit now-playing message; sending a new one: {exc}")
@@ -3920,6 +4116,7 @@ async def publish_now_playing(channel, track: dict, *, send_message=None, acknow
         f"Sent now-playing message {new_message.id} in channel {channel.id} "
         f"for {track.get('title', 'Unknown title')} ({track.get('id', '')})."
     )
+    await update_bot_presence(track, reason="now-playing send", channel=channel)
     return new_message
 
 def nowplaying_cooldown_key(ctx) -> tuple:
@@ -4146,6 +4343,166 @@ async def handle_help_reaction(reaction, user) -> bool:
     if emoji == HELP_EXPAND_REACTION:
         client.help_expanded = not client.help_expanded
         client.help_page = 0
+    elif client.help_expanded and emoji == "◀️":
+        client.help_page = max(0, getattr(client, "help_page", 0) - 1)
+    elif client.help_expanded and emoji == "▶️":
+        client.help_page = min(len(pages) - 1, getattr(client, "help_page", 0) + 1)
+    else:
+        try:
+            await reaction.message.remove_reaction(reaction.emoji, user)
+        except Exception as exc:
+            logger.warning(f"Failed to remove inactive help reaction: {exc}")
+        return True
+    try:
+        await reaction.message.edit(content=help_message_content(
+            expanded=client.help_expanded,
+            page=getattr(client, "help_page", 0),
+        ))
+        if client.help_expanded:
+            for page_emoji in HELP_PAGE_REACTIONS:
+                await reaction.message.add_reaction(page_emoji)
+        await reaction.message.remove_reaction(reaction.emoji, user)
+        state = "expanded" if client.help_expanded else "compacted"
+        logger.info(f"{state.title()} help message {reaction.message.id} page={getattr(client, 'help_page', 0)}.")
+    except Exception as exc:
+        logger.warning(f"Failed to update help message: {exc}")
+    return True
+
+def expanded_help_message() -> str:
+    return expanded_help_pages()[0]
+
+def expanded_help_pages() -> list:
+    pages = [
+        "\n".join([
+            "**help - playback**",
+            "",
+            "`/join` - join your voice channel.",
+            "`/play` - play now or queue YouTube, search, `playlist:name`, or favorites.",
+            "`/playtop` - place a request next.",
+            "`/enqueue` / `/q` - append to the queue.",
+            "`/queue` / `/queuelist` - show upcoming songs.",
+            "`/queuefirst` / `/qfirst` - move a queued item or playlist block next.",
+            "",
+            "**now playing**",
+            "`/nowplaying` - repost controls without the URL.",
+            "`/now` / `/nytsoi` - compact current-song view.",
+            "`/getqueue` - session request history.",
+            f"`/volume` - set volume up to {SAFE_VOLUME_MAX_LEVEL}% for normal users.",
+            "`/skip` `/pause` `/resume` `/stop` - voice controls.",
+            f"Reactions: {FAVORITE_REACTION} favorite, ◀️ previous, ⏸️ pause/resume, ▶️ skip, {REPEAT_REACTION} repeat, {QUEUE_REACTION} queue.",
+        ]),
+        "\n".join([
+            "**help - playlists and favorites**",
+            "",
+            "`/playlist list` - browse saved playlists.",
+            "`/playlist new` - guided creation.",
+            "`/playlist new <name> current` - import the upcoming queue.",
+            "`/playlist show` / `/playlist edit` - inspect playlist details.",
+            "`/playlist play` - play or queue a saved playlist.",
+            "`/playlist add` - add current, queued, or URL media.",
+            "`/playlist fill current` - bulk-add queued songs not already present.",
+            "`/playlist remove` / `/playlist delete` - delete with rescue window.",
+            "`/playlist rescue` - restore a recently deleted playlist.",
+            "`/playlist removesong` / `/playlist move` / `/playlist rename` / `/playlist lock` - edit tools.",
+            "`/playlist cachemode` / `/playlist cacheglobal` - admin cache policy.",
+            "`/favorites play` / `/favorites list` - use starred songs.",
+            "`/favorites privacy` / `/favorites status` - manage favorites visibility.",
+        ]),
+        "\n".join([
+            "**help - admin and utilities**",
+            "",
+            "`/config show` - reaction-toggle runtime settings.",
+            "`/status` / `/status play` - runtime and playback diagnostics.",
+            "`/userstats` - admin diagnostics for one user.",
+            "`/usergroup` / `/permissions` - restriction groups.",
+            "`/cachequeue` / `/cachestatus` / `/purgecache` / `/purgequeue` - cache tools.",
+            "`/clear_queue` / `/restorequeue` - queue cleanup and recovery.",
+            "`/autoleave` / `/setdeletetime` - leave and cleanup timers.",
+            "`/volume_session` / `/volume_default` / `/volume_force` - admin volume controls.",
+            "`/togglelog` / `/toggledownload` / `/disablelinks` / `/reboot` - runtime controls.",
+            "`/playspeed` / `/playspeedaccess` / `/nowplayingcooldown` - hidden/admin tuning.",
+            "`/backup_teekkari_quotes` / `/random_quote` - quote tools.",
+            "`/whatsnew` - recent bot changes.",
+            "",
+            "Use `/help topic:all` for every slash command.",
+            "Use `/help command:play` or `/help command:playlist new` for details.",
+        ]),
+    ]
+    return [trim_discord_message(page) for page in pages]
+
+def command_description(command) -> str:
+    return str(getattr(command, "description", "") or "no description").strip()
+
+def all_command_entries() -> list:
+    entries = []
+    for command in client.tree.get_commands():
+        children = list(getattr(command, "commands", []) or [])
+        entries.append(f"`/{command.name}` - {command_description(command)}")
+        for child in children:
+            entries.append(f"`/{command.name} {child.name}` - {command_description(child)}")
+    return entries
+
+def paginate_help_entries(title: str, intro: str, entries: list) -> list:
+    pages = []
+    header = [f"**{title}**", intro, ""]
+    current = list(header)
+    for entry in entries:
+        candidate = "\n".join([*current, entry])
+        if len(candidate) > DISCORD_MESSAGE_SAFE_LIMIT - 120 and len(current) > len(header):
+            pages.append("\n".join(current))
+            current = list(header)
+        current.append(entry)
+    if len(current) > len(header):
+        pages.append("\n".join(current))
+    return [trim_discord_message(page) for page in pages] or ["**all commands**\nNo commands are registered."]
+
+def all_help_pages() -> list:
+    return paginate_help_entries(
+        "all commands",
+        "Every registered slash command and subcommand. Use `/help command:<name>` for details.",
+        all_command_entries(),
+    )
+
+def trim_discord_message(content: str) -> str:
+    if len(content) <= DISCORD_MESSAGE_SAFE_LIMIT:
+        return content
+    suffix = "\n\n_This help page was shortened to fit Discord._"
+    return content[:DISCORD_MESSAGE_SAFE_LIMIT - len(suffix)].rstrip() + suffix
+
+def help_message_content(*, expanded: bool, page: int = 0) -> str:
+    if not expanded:
+        return compact_help_message()
+    pages = client.help_pages or expanded_help_pages()
+    page = max(0, min(page, len(pages) - 1))
+    footer = f"\n\n_page {page + 1}/{len(pages)} - react {HELP_EXPAND_REACTION} to close, ◀️/▶️ to change page_"
+    content = pages[page] + footer
+    return trim_discord_message(content)
+
+async def send_help_pages(ctx, pages: list):
+    client.help_pages = pages
+    client.help_expanded = True
+    client.help_page = 0
+    await ctx.response.send_message(help_message_content(expanded=True, page=0))
+    message = await ctx.original_response()
+    client.help_message_id = message.id
+    for emoji in (HELP_EXPAND_REACTION, *HELP_PAGE_REACTIONS):
+        try:
+            await message.add_reaction(emoji)
+        except Exception as exc:
+            logger.warning(f"Failed to add help reaction {emoji}: {exc}")
+    return message
+
+async def handle_help_reaction(reaction, user) -> bool:
+    if not client.help_message_id or reaction.message.id != client.help_message_id:
+        return False
+    emoji = str(reaction.emoji)
+    if emoji not in {HELP_EXPAND_REACTION, *HELP_PAGE_REACTIONS}:
+        return True
+    pages = client.help_pages or expanded_help_pages()
+    if emoji == HELP_EXPAND_REACTION:
+        client.help_expanded = not client.help_expanded
+        client.help_page = 0
+        client.help_pages = expanded_help_pages() if client.help_expanded else None
     elif client.help_expanded and emoji == "◀️":
         client.help_page = max(0, getattr(client, "help_page", 0) - 1)
     elif client.help_expanded and emoji == "▶️":
@@ -4691,7 +5048,7 @@ def command_help_pages() -> dict:
             "description": "When enabled, the bot waits while alone in voice, saves the current song and queue, disconnects, and lets users restore with `/play last`.",
             "arguments": ["enabled - true or false.", "delay_seconds - optional delay before leaving."],
             "examples": ["/autoleave true 10", "/autoleave false"],
-            "notes": ["Admin only.", "The bot cancels the pending leave when a human rejoins voice."],
+            "notes": ["Admin only.", "The bot cancels the pending leave when a human rejoins voice.", "The same alone delay resets playback speed back to `1x` even when auto-leave is disabled."],
             "errors": ["Delay outside allowed range.", "Admin permission required."],
         },
         "volume_session": {
@@ -4777,11 +5134,11 @@ def command_help_pages() -> dict:
         },
         "help": {
             "purpose": "show command help",
-            "synopsis": ["/help", "/help command:<command>", "/help topic:playlist command:<subcommand>"],
-            "description": "Shows compact help, a command-specific manpage, or playlist topic help.",
-            "arguments": ["topic - optional topic such as playlist.", "command - command or playlist subcommand name."],
-            "examples": ["/help", "/help command:nytsoi", "/help topic:playlist command:new"],
-            "notes": ["Use command names without the leading slash.", "Playlist subcommands can be addressed as `playlist new` or with topic:playlist."],
+            "synopsis": ["/help", "/help topic:all", "/help command:<command>", "/help topic:playlist command:<subcommand>"],
+            "description": "Shows compact help, paged all-command help, a command-specific manpage, or playlist topic help.",
+            "arguments": ["topic - optional topic such as all or playlist.", "command - command, all, or playlist subcommand name."],
+            "examples": ["/help", "/help topic:all", "/help command:nytsoi", "/help topic:playlist command:new"],
+            "notes": ["Use command names without the leading slash.", "Playlist subcommands can be addressed as `playlist new` or with topic:playlist.", "The all-command view is paged with reaction controls."],
             "errors": ["Unknown command - check spelling or run `/help`."],
         },
         "status": {
@@ -4867,6 +5224,8 @@ def format_command_manpage(command: str) -> Optional[str]:
 def help_message_for(topic: Optional[str] = None, command: Optional[str] = None) -> Optional[str]:
     topic_key = str(topic or "").strip().lower()
     command_key = str(command or "").strip().lower()
+    if topic_key in {"all", "commands"} or command_key in {"all", "commands"}:
+        return "__HELP_ALL__"
     if command_key and not topic_key:
         if normalize_help_command(command_key) in {"playlist", "playlists"}:
             return playlist_general_help_message()
@@ -5481,7 +5840,7 @@ async def fetch_track(query: str, requested_by=None, debug_report: Optional[Debu
         raise
 
 async def ensure_voice_for_playback(ctx):
-    voice = client.current_voice_channel or ctx.guild.voice_client
+    voice = active_voice_client(ctx.guild)
     if voice is None or not voice.is_connected():
         if ctx.user.voice and ctx.user.voice.channel:
             try:
@@ -5489,6 +5848,7 @@ async def ensure_voice_for_playback(ctx):
                 client.current_voice_channel = voice
                 apply_channel_volume_default(ctx.user.voice.channel, "playback join")
                 cancel_auto_leave_task("playback joined voice")
+                cancel_alone_speed_reset_task("playback joined voice")
                 client.song_history = []
                 await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
             except Exception as e:
@@ -5737,29 +6097,72 @@ async def cache_playlist_track(track: dict, *, playlist_cache: bool, projected_l
     track["ext"] = ext
     return True, cache_file_size(file_path)
 
-async def prepare_playlist_cache_for_playback(ctx, playlist: dict, tracks: list):
+def playlist_cache_result_summary(result: dict) -> str:
+    prepared = result.get("prepared", 0)
+    downloaded = result.get("downloaded", 0)
+    reused = result.get("reused", 0)
+    failed = result.get("failed", 0)
+    parts = [f"{prepared} prepared", f"{downloaded} downloaded", f"{reused} reused"]
+    if failed:
+        parts.append(f"{failed} failed")
+    return ", ".join(parts)
+
+def playlist_cache_warm_message(playlist: dict, result: dict) -> Optional[str]:
+    if result.get("mode") == "streaming" or result.get("skipped"):
+        return None
+    if not (result.get("prepared") or result.get("downloaded") or result.get("reused") or result.get("failed")):
+        return None
+    name = discord.utils.escape_markdown(str(playlist.get("name") or "playlist"))
+    summary = playlist_cache_result_summary(result)
+    if result.get("capped"):
+        return (
+            f"Playlist cache warmup for **{name}** reached the bounded limit "
+            f"({summary}). Remaining tracks will stream when needed."
+        )
+    return f"Playlist cache warmup for **{name}** complete ({summary})."
+
+async def cache_playlist_tracks_for_playback(playlist: dict, tracks: list, *, actor=None) -> dict:
     mode = effective_playlist_cache_mode(playlist)
+    result = {
+        "playlist_id": playlist.get("id"),
+        "playlist_name": playlist.get("name"),
+        "mode": mode,
+        "total": len(tracks),
+        "considered": 0,
+        "prepared": 0,
+        "downloaded": 0,
+        "reused": 0,
+        "failed": 0,
+        "bytes": 0,
+        "capped": False,
+        "skipped": False,
+    }
     if mode == "streaming":
-        return
-    cached = 0
-    reused = 0
+        result["skipped"] = True
+        result["reason"] = "streaming"
+        return result
     downloaded_bytes = 0
-    capped = False
     track_limit = PLAYLIST_CACHE_BOUNDED_TRACK_LIMIT if mode == "bounded" else len(tracks)
     byte_limit = PLAYLIST_CACHE_BOUNDED_BYTES if mode == "bounded" else CACHE_HARD_LIMIT_BYTES
-
+    changed = False
     playlist_tracks = playlist.get("tracks", [])
+
     for index, queue_track in enumerate(tracks):
+        if mode == "bounded" and (result["considered"] >= track_limit or downloaded_bytes >= byte_limit):
+            result["capped"] = index < len(tracks)
+            break
+        result["considered"] += 1
         cache_key = cache_key_for_track(queue_track)
+        if not cache_key:
+            continue
         existing = find_existing_cache_file(cache_key, prefer_playlist=True, video_id=str(queue_track.get("id") or "").strip() or None)
         if existing:
             apply_cache_fields(queue_track, existing, cache_mode="playlist" if os.path.basename(existing).startswith("plst-") else "shortterm")
             if index < len(playlist_tracks):
                 apply_cache_fields(playlist_tracks[index], existing, cache_mode=queue_track.get("cache_mode", "shortterm"))
-            reused += 1
-            continue
-        if cached >= track_limit or downloaded_bytes >= byte_limit:
-            capped = True
+            result["reused"] += 1
+            result["prepared"] += 1
+            changed = True
             continue
         try:
             did_download, size = await cache_playlist_track(
@@ -5768,6 +6171,7 @@ async def prepare_playlist_cache_for_playback(ctx, playlist: dict, tracks: list)
                 projected_limit=max(0, byte_limit - downloaded_bytes),
             )
         except Exception as exc:
+            result["failed"] += 1
             logger.warning(f"Playlist cache download failed for {queue_track.get('id')}: {exc}")
             continue
         if did_download:
@@ -5779,22 +6183,92 @@ async def prepare_playlist_cache_for_playback(ctx, playlist: dict, tracks: list)
                     except OSError as exc:
                         logger.warning(f"Failed to remove over-limit playlist cache file {file_path}: {exc}")
                 apply_cache_fields(queue_track, None, cache_mode="streaming")
-                capped = True
-                continue
-            cached += 1
+                result["capped"] = True
+                break
+            result["downloaded"] += 1
+            result["prepared"] += 1
             downloaded_bytes += size
+            result["bytes"] += size
             if index < len(playlist_tracks):
                 apply_cache_fields(playlist_tracks[index], queue_track.get("file"), cache_mode="playlist")
-    if cached or reused:
+            changed = True
+    if changed:
         playlist["predownloaded"] = True
         playlist["predownloaded_at"] = time.time()
         save_playlist(playlist)
-    if capped:
+    return result
+
+async def prepare_playlist_cache_for_playback(ctx, playlist: dict, tracks: list):
+    result = await cache_playlist_tracks_for_playback(playlist, tracks, actor=getattr(ctx, "user", None))
+    if result.get("capped"):
         await ctx.followup.send(
             "Playlist cache limit reached: cached up to 15 tracks or 3 GB. Remaining tracks will stream when needed."
         )
-    elif cached or reused:
-        await ctx.followup.send(f"Using playlist cache for {cached + reused} track(s).")
+    elif result.get("prepared"):
+        await ctx.followup.send(f"Using playlist cache for {result.get('prepared')} track(s).")
+
+def playlist_cache_task_key(playlist: dict, channel) -> str:
+    return f"{playlist.get('id') or 'playlist'}:{getattr(channel, 'id', 'no-channel')}"
+
+def schedule_playlist_cache_warmup(ctx, playlist: dict, tracks: list, command_name: str) -> bool:
+    if not tracks or is_favorites_playlist(playlist) or user_has_group(ctx.user, "nodownload"):
+        return False
+    if effective_playlist_cache_mode(playlist) == "streaming":
+        return False
+    channel = getattr(ctx, "channel", None)
+    key = playlist_cache_task_key(playlist, channel)
+    existing_task = client.playlist_cache_tasks.get(key)
+    if existing_task and not existing_task.done():
+        append_runtime_audit_event("playlist-cache-warm-already-running", actor=ctx.user, details={
+            "playlist_id": playlist.get("id"),
+            "playlist_name": playlist.get("name"),
+            "command": command_name,
+            "tracks": len(tracks),
+        })
+        return False
+
+    actor = ctx.user
+
+    async def runner():
+        try:
+            append_runtime_audit_event("playlist-cache-warm-started", actor=actor, details={
+                "playlist_id": playlist.get("id"),
+                "playlist_name": playlist.get("name"),
+                "command": command_name,
+                "tracks": len(tracks),
+                "mode": effective_playlist_cache_mode(playlist),
+            })
+            try:
+                result = await cache_playlist_tracks_for_playback(playlist, tracks, actor=actor)
+                append_runtime_audit_event("playlist-cache-warm-finished", actor=actor, details=result)
+            except Exception as exc:
+                append_runtime_audit_event("playlist-cache-warm-failed", actor=actor, details={
+                    "playlist_id": playlist.get("id"),
+                    "playlist_name": playlist.get("name"),
+                    "command": command_name,
+                    "error": str(exc),
+                })
+                logger.warning(f"Playlist cache warmup failed for {playlist.get('name')} ({playlist.get('id')}): {exc}")
+                return
+            message = playlist_cache_warm_message(playlist, result)
+            if message and channel:
+                try:
+                    await channel.send(message)
+                except Exception as exc:
+                    append_runtime_audit_event("playlist-cache-warm-notify-failed", actor=actor, details={
+                        "playlist_id": playlist.get("id"),
+                        "playlist_name": playlist.get("name"),
+                        "command": command_name,
+                        "error": str(exc),
+                    })
+                    logger.warning(f"Playlist cache warmup notification failed for {playlist.get('name')} ({playlist.get('id')}): {exc}")
+        finally:
+            if client.playlist_cache_tasks.get(key) is task:
+                client.playlist_cache_tasks.pop(key, None)
+
+    task = asyncio.create_task(runner())
+    client.playlist_cache_tasks[key] = task
+    return True
 
 async def play_playlist_now(ctx, playlist: dict, command_name: str):
     tracks = playlist_to_queue_tracks(playlist)
@@ -5812,13 +6286,15 @@ async def play_playlist_now(ctx, playlist: dict, command_name: str):
     voice = await ensure_voice_for_playback(ctx)
     if voice is None:
         return
-    if not is_favorites_playlist(playlist) and not user_has_group(ctx.user, "nodownload"):
-        await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     if client.currently_playing:
         for track in tracks:
             queue.append(track)
             client.song_history.append(track)
-        await ctx.followup.send(f"Queued playlist **{discord.utils.escape_markdown(playlist['name'])}** ({len(tracks)} song(s)).")
+        warmup_started = schedule_playlist_cache_warmup(ctx, playlist, tracks, command_name)
+        suffix = "\nPlaylist cache warmup is running in the background." if warmup_started else ""
+        await ctx.followup.send(
+            f"Queued playlist **{discord.utils.escape_markdown(playlist['name'])}** ({len(tracks)} song(s)).{suffix}"
+        )
         logger.info(f"Queued playlist via /{command_name}: {playlist['name']} ({playlist['id']})")
         return
     first, rest = tracks[0], tracks[1:]
@@ -5826,6 +6302,7 @@ async def play_playlist_now(ctx, playlist: dict, command_name: str):
     for track in rest:
         client.song_history.append(track)
     await start_track_now(ctx, voice, first)
+    schedule_playlist_cache_warmup(ctx, playlist, tracks, command_name)
     logger.info(f"Started playlist via /{command_name}: {playlist['name']} ({playlist['id']})")
 
 def favorites_visible_to_requester(requester, playlist: dict) -> bool:
@@ -5912,12 +6389,12 @@ async def enqueue_playlist(ctx, playlist: dict, command_name: str):
     if not is_user_admin(ctx.user) and len(queue) + len(tracks) > MAX_QUEUE_LENGTH:
         await ctx.followup.send(f"Queue limit reached ({MAX_QUEUE_LENGTH} songs). Ask an admin to clear the queue.", ephemeral=True)
         return
-    if not is_favorites_playlist(playlist) and not user_has_group(ctx.user, "nodownload"):
-        await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     for track in tracks:
         queue.append(track)
         client.song_history.append(track)
-    await ctx.followup.send(f"Queued playlist **{discord.utils.escape_markdown(playlist['name'])}** ({len(tracks)} song(s)).")
+    warmup_started = schedule_playlist_cache_warmup(ctx, playlist, tracks, command_name)
+    suffix = "\nPlaylist cache warmup is running in the background." if warmup_started else ""
+    await ctx.followup.send(f"Queued playlist **{discord.utils.escape_markdown(playlist['name'])}** ({len(tracks)} song(s)).{suffix}")
     logger.info(f"Queued playlist via /{command_name}: {playlist['name']} ({playlist['id']})")
 
 def move_existing_playlist_block_to_front(playlist_id: str) -> int:
@@ -5948,12 +6425,12 @@ async def add_playlist_to_queue_front(ctx, playlist: dict):
         return
     if not ctx.response.is_done():
         await ctx.response.defer()
-    if not is_favorites_playlist(playlist) and not user_has_group(ctx.user, "nodownload"):
-        await prepare_playlist_cache_for_playback(ctx, playlist, tracks)
     queue[0:0] = tracks
     client.song_history.extend(tracks)
+    warmup_started = schedule_playlist_cache_warmup(ctx, playlist, tracks, "queuefirst")
+    suffix = "\nPlaylist cache warmup is running in the background." if warmup_started else ""
     await ctx.followup.send(
-        f"Moved playlist **{discord.utils.escape_markdown(playlist['name'])}** to play next ({len(tracks)} song(s))."
+        f"Moved playlist **{discord.utils.escape_markdown(playlist['name'])}** to play next ({len(tracks)} song(s)).{suffix}"
     )
     logger.info(f"Playlist queued at front: {playlist['name']} ({playlist['id']})")
 
@@ -6357,7 +6834,10 @@ async def play_next_channel(channel):
             guild = channel.guild
             client.current_track_id = track['id']
             # Start playback and provide callback
-            guild.voice_client.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, channel))
+            voice = active_voice_client(guild)
+            if voice is None:
+                raise RuntimeError("No active voice client for queued playback.")
+            voice.play(player, after=lambda e, vid=track['id']: after_played_track(e, vid, channel))
             client.currently_playing = True
             # Update current and last track info
             client.last_track_info = client.current_track_info
@@ -6379,11 +6859,13 @@ async def play_next_channel(channel):
         client.currently_playing = False
         client.current_track_started_at = None
         logger.info("No more songs to play. Queue is now clear.")
+        await clear_playback_tracking("queue empty")
+        await update_bot_presence_idle(reason="queue empty", channel=channel)
         await channel.send("No more songs in queue.")
 
 @client.event
 async def on_ready():
-    await client.change_presence(activity=discord.Game(name="/help for commands"))
+    await update_bot_presence_idle(reason="startup")
     logger.info(f"{client.user} on käynnistynyt.")
     logger.info(build_runtime_status())
     try:
@@ -6399,19 +6881,29 @@ async def on_voice_state_update(member, before, after):
     if bot_id and member.id == bot_id and after.channel is None:
         if not client.auto_leave_disconnect_in_progress:
             cancel_auto_leave_task("bot disconnected")
+        cancel_alone_speed_reset_task("bot disconnected")
         client.current_voice_channel = None
         client.currently_playing = False
         client.current_track_started_at = None
         client.auto_leave_disconnect_in_progress = False
         reset_session_volume("bot disconnected")
+        await update_bot_presence_idle(reason="bot disconnected")
         return
-    voice = client.current_voice_channel
+    if bot_id and member.id == bot_id and after.channel is not None:
+        voice = active_voice_client(getattr(after.channel, "guild", None))
+        if voice:
+            apply_channel_volume_default(after.channel, "bot voice state update")
+            logger.info(f"Synchronized bot voice channel to {getattr(after.channel, 'name', after.channel)} from voice state update.")
+    else:
+        voice = active_voice_client(getattr(getattr(after, "channel", None), "guild", None))
     voice_channel = getattr(voice, "channel", None)
     if voice and voice.is_connected() and voice_channel:
         if bot_is_alone_in_voice(voice_channel):
             schedule_auto_leave_if_needed(voice_channel)
+            schedule_alone_speed_reset_if_needed(voice_channel)
         else:
             cancel_auto_leave_task("voice channel occupied")
+            cancel_alone_speed_reset_task("voice channel occupied")
 
 @client.event
 async def on_message(msg):
@@ -6450,6 +6942,8 @@ async def on_reaction_add(reaction, user):
         return
     if await handle_voice_vote_reaction(reaction, user):
         return
+    if await handle_spotify_review_reaction(reaction, user):
+        return
     # Music control reactions on the "Now Playing" message
     if client.current_track_message and reaction.message.id == client.current_track_message.id:
         if not can_control_voice(user):
@@ -6476,12 +6970,13 @@ async def on_reaction_add(reaction, user):
                 await reaction.message.channel.send(result)
         elif emoji == "⏸️":
             # Pause or resume
-            if client.current_voice_channel:
-                if client.current_voice_channel.is_playing():
-                    client.current_voice_channel.pause()
+            voice = active_voice_client(getattr(reaction.message, "guild", None))
+            if voice:
+                if voice.is_playing():
+                    voice.pause()
                     logger.info("Audio paused via reaction.")
-                elif client.current_voice_channel.is_paused():
-                    client.current_voice_channel.resume()
+                elif voice.is_paused():
+                    voice.resume()
                     logger.info("Audio resumed via reaction.")
         elif emoji == "◀️":
             await request_voice_vote(user, reaction.message.channel, "previous", "replay the previous track")
@@ -6501,6 +6996,181 @@ async def save_all_channel_messages(channel):
     quotes.saveQuotes(messages)
     return len(messages)
 
+# ---------------------------------------------------------------------------
+# Spotify import reaction handler
+# ---------------------------------------------------------------------------
+
+async def _spotify_save_playlist(pending, ctx_user_id: int, ctx_user_name: str) -> Optional[dict]:
+    """Create a bot playlist from all accepted tracks in a PendingImport."""
+    entries = []
+    for pt in pending.accepted_tracks:
+        entry = _spotify_module.make_playlist_entry(pt, user_id=ctx_user_id, user_name=ctx_user_name)
+        if entry:
+            entries.append(entry)
+    if not entries:
+        return None
+    playlist = save_new_playlist(pending.playlist_name, None, entries, "private")
+    playlist["owner_user_id"] = ctx_user_id
+    playlist["owner_discord_name"] = ctx_user_name
+    save_playlist(playlist)
+    pending.playlist_id = playlist["id"]
+    return playlist
+
+
+async def handle_spotify_review_reaction(reaction, user) -> bool:
+    """
+    Handle reactions on Spotify import summary/review messages.
+    Returns True if the reaction was consumed.
+    """
+    if _spotify_module is None:
+        return False
+    msg_id = reaction.message.id
+    import_id = client.spotify_review_message_ids.get(msg_id)
+    if not import_id:
+        return False
+    pending = client.pending_spotify_imports.get(import_id)
+    if not pending:
+        client.spotify_review_message_ids.pop(msg_id, None)
+        return False
+    if pending.requested_by_user_id and user_id_value(user) != pending.requested_by_user_id:
+        return True   # consume silently — only the requester controls this
+    if pending.is_expired():
+        client.pending_spotify_imports.pop(import_id, None)
+        client.spotify_review_message_ids.pop(msg_id, None)
+        try:
+            await reaction.message.edit(content=f"⏱️ Import `{import_id}` expired. Run `/spotify import` again.")
+        except Exception:
+            pass
+        return True
+
+    pending.touch()
+    emoji = str(reaction.emoji)
+    uid = user_id_value(user)
+    uname = user_display(user)
+
+    # --- Summary phase reactions ---
+    if emoji == _spotify_module.REVIEW_EMOJI_ACCEPT_ALL:
+        # Accept all pending tracks and save
+        for pt in pending.pending_tracks:
+            pt.status = "accepted"
+        playlist = await _spotify_save_playlist(pending, uid, uname)
+        client.pending_spotify_imports.pop(import_id, None)
+        client.spotify_review_message_ids.pop(msg_id, None)
+        if playlist:
+            n = len(pending.accepted_tracks)
+            await reaction.message.edit(
+                content=(
+                    f"✅ Saved **{discord.utils.escape_markdown(playlist['name'])}** "
+                    f"with **{n}** track(s) (`{playlist['id']}`).\n"
+                    f"Play it with `/playlist play {discord.utils.escape_markdown(playlist['name'])}`."
+                )
+            )
+            try:
+                await reaction.message.clear_reactions()
+            except Exception:
+                pass
+        else:
+            await reaction.message.edit(content="❌ No tracks to save.")
+        return True
+
+    if emoji == _spotify_module.REVIEW_EMOJI_SKIP_UNCERTAIN:
+        # Keep only auto-matched tracks
+        for pt in pending.pending_tracks:
+            pt.status = "rejected"
+        playlist = await _spotify_save_playlist(pending, uid, uname)
+        client.pending_spotify_imports.pop(import_id, None)
+        client.spotify_review_message_ids.pop(msg_id, None)
+        if playlist:
+            n = len(pending.auto_tracks)
+            await reaction.message.edit(
+                content=(
+                    f"✅ Saved **{discord.utils.escape_markdown(playlist['name'])}** "
+                    f"with **{n}** auto-matched track(s) (`{playlist['id']}`).\n"
+                    f"Play it with `/playlist play {discord.utils.escape_markdown(playlist['name'])}`."
+                )
+            )
+            try:
+                await reaction.message.clear_reactions()
+            except Exception:
+                pass
+        else:
+            await reaction.message.edit(content="❌ No tracks to save.")
+        return True
+
+    if emoji == _spotify_module.REVIEW_EMOJI_STEP_REVIEW:
+        # Switch to per-track review
+        if not pending.pending_tracks:
+            return True
+        pending.review_index = 0
+        new_content = _spotify_module.format_track_review_message(pending)
+        try:
+            await reaction.message.clear_reactions()
+            await reaction.message.edit(content=new_content)
+            for e in _spotify_module.REVIEW_TRACK_EMOJIS:
+                await reaction.message.add_reaction(e)
+        except Exception as exc:
+            logger.warning(f"Spotify review switch failed: {exc}")
+        return True
+
+    # --- Per-track review reactions ---
+    uncertain = pending.pending_tracks
+
+    if emoji == _spotify_module.REVIEW_EMOJI_ACCEPT:
+        if pending.review_index < len(uncertain):
+            pt = uncertain[pending.review_index]
+            pt.status = "accepted"
+            pending.review_index += 1
+        new_content = _spotify_module.format_track_review_message(pending)
+        await _spotify_update_review_message(reaction.message, new_content, pending)
+        return True
+
+    if emoji == _spotify_module.REVIEW_EMOJI_SKIP:
+        if pending.review_index < len(uncertain):
+            uncertain[pending.review_index].status = "rejected"
+            pending.review_index += 1
+        new_content = _spotify_module.format_track_review_message(pending)
+        await _spotify_update_review_message(reaction.message, new_content, pending)
+        return True
+
+    if emoji == _spotify_module.REVIEW_EMOJI_ALT:
+        if pending.review_index < len(uncertain):
+            uncertain[pending.review_index].advance_alternative()
+        new_content = _spotify_module.format_track_review_message(pending)
+        try:
+            await reaction.message.edit(content=new_content)
+        except Exception:
+            pass
+        return True
+
+    if emoji == _spotify_module.REVIEW_EMOJI_SKIP_ALL:
+        # Accept all remaining uncertain tracks as-is
+        for pt in uncertain[pending.review_index:]:
+            pt.status = "accepted"
+        pending.review_index = len(uncertain)
+        new_content = _spotify_module.format_track_review_message(pending)
+        await _spotify_update_review_message(reaction.message, new_content, pending)
+        return True
+
+    return False
+
+
+async def _spotify_update_review_message(message, new_content: str, pending):
+    """Edit the review message; when review is done, switch to save/cancel reactions."""
+    try:
+        await message.edit(content=new_content)
+    except Exception as exc:
+        logger.warning(f"Failed to edit spotify review message: {exc}")
+        return
+    if pending.review_index >= len(pending.pending_tracks):
+        # Review finished — switch to save/cancel prompt
+        try:
+            await message.clear_reactions()
+            await message.add_reaction(_spotify_module.REVIEW_EMOJI_ACCEPT_ALL)
+            await message.add_reaction(_spotify_module.REVIEW_EMOJI_SKIP_UNCERTAIN)
+        except Exception:
+            pass
+
+
 # Slash commands
 
 playlist_group = app_commands.Group(name="playlist", description="create, browse, and edit saved playlists")
@@ -6513,16 +7183,29 @@ async def join(ctx):
     """Joins the voice channel that the user is currently in."""
     record_command(ctx)
     if ctx.user.voice:
+        voice = active_voice_client(ctx.guild)
+        target_channel = ctx.user.voice.channel
         try:
-            client.current_voice_channel = await ctx.user.voice.channel.connect()
-            apply_channel_volume_default(ctx.user.voice.channel, "join command")
+            if voice and voice.is_connected():
+                if getattr(voice, "channel", None) == target_channel:
+                    await ctx.response.send_message(f"Already in voice channel {target_channel.name}")
+                    return
+                if not is_user_admin(ctx.user):
+                    await ctx.response.send_message("The bot is already in another voice channel.", ephemeral=True)
+                    return
+                await voice.move_to(target_channel)
+                client.current_voice_channel = voice
+            else:
+                client.current_voice_channel = await target_channel.connect()
+            apply_channel_volume_default(target_channel, "join command")
             cancel_auto_leave_task("joined voice")
+            cancel_alone_speed_reset_task("joined voice")
             # Reset session history when joining a new voice channel
             client.song_history = []
-            await ctx.response.send_message(f"Joined voice channel {ctx.user.voice.channel.name}")
+            await ctx.response.send_message(f"Joined voice channel {target_channel.name}")
         except Exception as e:
             logger.error(f"Join error: {e}")
-            await ctx.response.send_message(f"Unable to join voice channel {ctx.user.voice.channel.name}")
+            await ctx.response.send_message(f"Unable to join voice channel {target_channel.name}")
     else:
         await ctx.response.send_message("You must be in a voice channel to use this command")
 
@@ -6736,7 +7419,7 @@ async def play(
         debug_report = await create_debug_playback_message(ctx, "play", force=bool(show_download_log))
         await append_debug_playback_event(debug_report, "checking voice connection", stage="voice-check", force=True)
         # Ensure we're connected to a voice channel before creating the player
-        voice = client.current_voice_channel or ctx.guild.voice_client
+        voice = active_voice_client(ctx.guild)
         if voice is None or not voice.is_connected():
             if ctx.user.voice and ctx.user.voice.channel:
                 try:
@@ -6744,6 +7427,7 @@ async def play(
                     client.current_voice_channel = voice
                     apply_channel_volume_default(ctx.user.voice.channel, "play join")
                     cancel_auto_leave_task("play joined voice")
+                    cancel_alone_speed_reset_task("play joined voice")
                     client.song_history = []  # reset history for new session
                     await append_debug_playback_event(
                         debug_report,
@@ -6909,7 +7593,7 @@ async def playtop(ctx, *, query: str):
     await ctx.response.defer()
     if not client.currently_playing:
         # Nothing playing, so this will play immediately (similar to /play when queue empty)
-        voice = client.current_voice_channel or ctx.guild.voice_client
+        voice = active_voice_client(ctx.guild)
         if voice is None or not voice.is_connected():
             if ctx.user.voice and ctx.user.voice.channel:
                 try:
@@ -6917,6 +7601,7 @@ async def playtop(ctx, *, query: str):
                     client.current_voice_channel = voice
                     apply_channel_volume_default(ctx.user.voice.channel, "playtop join")
                     cancel_auto_leave_task("playtop joined voice")
+                    cancel_alone_speed_reset_task("playtop joined voice")
                     client.song_history = []
                     await ctx.followup.send(f"Joined voice channel {ctx.user.voice.channel.name}")
                 except Exception as e:
@@ -7382,19 +8067,26 @@ async def playlist_play(ctx, playlist: str):
 
 @app_commands.describe(
     playlist="Playlist name, id, or playlist:name",
-    source="Add the current song, a queued song, or a YouTube URL",
-    queue_position="Queue position when source is queue",
-    url="YouTube URL when source is url",
+    source="current (default), queue, or url — auto-detected from url/queue_position if omitted",
+    queue_position="Queue position (auto-selects 'queue' source when provided)",
+    url="YouTube URL to add (auto-selects 'url' source when provided)",
 )
 @app_commands.choices(source=[
     app_commands.Choice(name="current", value="current"),
     app_commands.Choice(name="queue", value="queue"),
     app_commands.Choice(name="url", value="url"),
 ])
-@playlist_group.command(name="add", description="Add current, queued, or URL song to a playlist.")
-async def playlist_add(ctx, playlist: str, source: str, queue_position: Optional[int] = None, url: Optional[str] = None):
+@playlist_group.command(name="add", description="Add a song to a playlist. Defaults to currently playing.")
+async def playlist_add(ctx, playlist: str, source: Optional[str] = None, queue_position: Optional[int] = None, url: Optional[str] = None):
     record_command(ctx)
     await ctx.response.defer(ephemeral=True)
+    if source is None:
+        if url is not None:
+            source = "url"
+        elif queue_position is not None:
+            source = "queue"
+        else:
+            source = "current"
     target = resolve_playlist_reference(playlist, ctx.user)
     if not target:
         await ctx.followup.send("Playlist not found or not visible to you. Try `/playlist list`.", ephemeral=True)
@@ -8078,10 +8770,11 @@ async def autoleave(ctx, enabled: bool, delay_seconds: Optional[int] = None):
         })
         logger.info(f"Auto-leave disabled by {user_display(ctx.user)} ({getattr(ctx.user, 'id', 0)}).")
         return
-    voice = client.current_voice_channel or ctx.guild.voice_client
+    voice = active_voice_client(ctx.guild)
     if voice and voice.is_connected():
         client.current_voice_channel = voice
         schedule_auto_leave_if_needed(getattr(voice, "channel", None))
+        schedule_alone_speed_reset_if_needed(getattr(voice, "channel", None))
     await ctx.response.send_message(
         f"Auto-leave is enabled. If the bot is alone for {delay_seconds} second(s), it will save the current song and queue, then disconnect. Restore with `/play last`.",
         ephemeral=True,
@@ -8120,7 +8813,7 @@ async def volume_session(ctx, level: int):
     if error:
         await ctx.response.send_message(error, ephemeral=True)
         return
-    voice = client.current_voice_channel or ctx.guild.voice_client
+    voice = active_voice_client(ctx.guild)
     if not voice or not voice.is_connected():
         await ctx.response.send_message("Connect the bot to voice before setting a session volume.", ephemeral=True)
         return
@@ -8144,7 +8837,7 @@ async def volume_force(ctx, level: int, save_default: Optional[bool] = False):
     if error:
         await ctx.response.send_message(error, ephemeral=True)
         return
-    voice = client.current_voice_channel or ctx.guild.voice_client
+    voice = active_voice_client(ctx.guild)
     voice_channel = getattr(voice, "channel", None) or getattr(getattr(ctx.user, "voice", None), "channel", None)
     if not voice or not voice.is_connected():
         await ctx.response.send_message("Connect the bot to voice before forcing volume.", ephemeral=True)
@@ -8187,7 +8880,7 @@ async def volume_default(ctx, level: int):
     if error:
         await ctx.response.send_message(error, ephemeral=True)
         return
-    voice = client.current_voice_channel or ctx.guild.voice_client
+    voice = active_voice_client(ctx.guild)
     voice_channel = getattr(voice, "channel", None) or getattr(getattr(ctx.user, "voice", None), "channel", None)
     key = channel_volume_key(voice_channel)
     if not key:
@@ -8218,16 +8911,17 @@ async def pause(ctx):
     record_command(ctx)
     if not await require_voice_control(ctx, "pause playback"):
         return
-    if client.current_voice_channel is None:
+    voice = active_voice_client(ctx.guild)
+    if voice is None:
         logger.info("Pause command issued, but bot is not in a voice channel.")
         await ctx.response.send_message("Not currently in a voice channel")
     elif not client.currently_playing:
         await ctx.response.send_message("No audio is playing to pause")
-    elif client.current_voice_channel.is_paused():
+    elif voice.is_paused():
         logger.info("Pause command issued, but audio is already paused.")
         await ctx.response.send_message("Audio is already paused")
     else:
-        client.current_voice_channel.pause()
+        voice.pause()
         logger.info("Audio paused via /pause command.")
         await ctx.response.send_message("Audio paused")
 
@@ -8237,13 +8931,14 @@ async def resume(ctx):
     record_command(ctx)
     if not await require_voice_control(ctx, "resume playback"):
         return
-    if client.current_voice_channel is None:
+    voice = active_voice_client(ctx.guild)
+    if voice is None:
         logger.info("Resume command issued, but bot is not in a voice channel.")
         await ctx.response.send_message("Not currently in a voice channel")
     elif not client.currently_playing:
         await ctx.response.send_message("No audio is playing to resume")
-    elif client.current_voice_channel.is_paused():
-        client.current_voice_channel.resume()
+    elif voice.is_paused():
+        voice.resume()
         logger.info("Audio playback resumed via /resume command.")
         await ctx.response.send_message("Resuming audio")
     else:
@@ -8293,7 +8988,7 @@ async def togglelog(ctx, mode: Optional[str] = "toggle"):
     if client.log_verbose:
         logger.setLevel(logging.DEBUG)
         if client.user_operation_debug_messages:
-            msg = "Verbose logging enabled. Admin user-space operation messages enabled for `/play`."
+            msg = "Verbose logging enabled. Admin user-space operation messages enabled for `/play` and automatic alone speed resets."
         else:
             msg = (
                 "Verbose logging enabled."
@@ -8500,8 +9195,9 @@ async def reboot(ctx):
         logger.info("Rebooting bot by admin request...")
         # Disconnect from voice and close the bot
         try:
-            if client.current_voice_channel:
-                await client.current_voice_channel.disconnect()
+            voice = active_voice_client(ctx.guild)
+            if voice:
+                await voice.disconnect()
         except Exception as e:
             logger.error(f"Error disconnecting voice client on reboot: {e}")
         await client.close()
@@ -8599,6 +9295,7 @@ async def whatsnew(ctx):
 
 @app_commands.describe(topic="Help topic, for example playlists", command="Command name, for example nytsoi, play, or playlist new")
 @app_commands.choices(topic=[
+    app_commands.Choice(name="all", value="all"),
     app_commands.Choice(name="playlists", value="playlists"),
     app_commands.Choice(name="playlist", value="playlist"),
 ])
@@ -8607,6 +9304,9 @@ async def help(ctx, topic: Optional[str] = None, command: Optional[str] = None):
     """Displays the list of available commands and their usage."""
     record_command(ctx)
     topic_message = help_message_for(topic, command)
+    if topic_message == "__HELP_ALL__":
+        await send_help_pages(ctx, all_help_pages())
+        return
     if topic_message:
         await ctx.response.send_message(topic_message)
         return
