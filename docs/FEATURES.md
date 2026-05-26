@@ -177,28 +177,48 @@ only the user who ran `/spotify import` can interact with the review. the sessio
 
 ## web ui
 
-activate by setting `WEBUI_ENABLED=true` and `WEBUI_SECRET_KEY=<strong-random-key>` in `.env`, then install the optional web ui dependencies (`uvicorn`, `fastapi`; uncomment the lines in `requirements.txt`). the server starts inside the bot's asyncio event loop — no separate process needed.
+activate by setting `WEBUI_ENABLED=true`, `WEBUI_SECRET_KEY=<strong-random-key>`, and `WEBUI_PUBLIC_URL=<your-url>` in `.env`, then install the optional dependencies (`uvicorn`, `fastapi`; uncomment the lines in `requirements.txt`). the server starts inside the bot's asyncio event loop — no separate process needed.
 
-by default it binds to `127.0.0.1:8765` and is only reachable from the local machine. override the bind address with `WEBUI_BIND_HOST` and the port with `WEBUI_PORT` in `.env`.
+**per-user sessions:** each user runs `/webui` in Discord and receives an ephemeral link (visible only to them). the link contains a one-time session token issued by the bot. the first HTTP request from the browser binds the session to that IP address. any subsequent request from a different IP is rejected. sessions expire automatically after 2 minutes of inactivity — the browser tab's now-playing poll (every 10s) keeps the session alive as long as the tab is open. when a session expires, the browser shows a clear message telling the user to use `/webui` to get a new link.
 
-**networking options:**
+**playlist scoping:** each session is limited to what that Discord user can access. a user sees their own playlists, playlists where they are a manager, and public playlists. they can only edit playlists they own or manage. locked playlists can only be edited by the owner. admin sessions see and can edit everything.
 
-- **quick public access**: `cloudflared tunnel --url http://127.0.0.1:8765` gives a public https url with no config. cloudflare access can add a login page on top of it.
-- **homelab reverse proxy**: set `WEBUI_BIND_HOST` to your internal ip, point your ingress controller or reverse proxy at that host and port. the server passes `proxy_headers=True` so x-forwarded-for and x-forwarded-proto are respected.
+**`WEBUI_SECRET_KEY` admin bypass:** the secret key still works as a direct bearer token for admin access without going through Discord. set it to a strong random value and never share it.
 
-**auth**: the login screen asks for the `WEBUI_SECRET_KEY` value. the token is stored in sessionStorage (cleared when the browser tab closes, not persisted to disk). api requests use a bearer token header validated with constant-time comparison. nothing sensitive is in the committed code.
+**networking:**
+
+- default: `127.0.0.1:8765` — local only. set `WEBUI_BIND_HOST=0.0.0.0` for LAN/homelab.
+- for public access: `cloudflared tunnel --url http://127.0.0.1:8765` gives a public https url. set `WEBUI_PUBLIC_URL` to that url so `/webui` produces correct links.
+- for homelab reverse proxy: set `WEBUI_BIND_HOST` to your internal ip, point your ingress at that host:port, and set `WEBUI_PUBLIC_URL` to the externally reachable url. the server passes `proxy_headers=True` so `X-Forwarded-For` is respected for IP locking.
 
 **what it does:**
 
-- browse your playlists in a sidebar.
-- open any playlist and reorder tracks by dragging.
-- remove individual tracks.
-- add tracks by pasting a youtube url — the title is fetched via youtube oembed, no api key needed. duplicates are detected before saving.
-- save or discard unsaved changes.
-- read-only view of the current bot queue with a manual refresh button.
-- now-playing in the top bar, polling every 10 seconds.
+- browse playlists you can access in a sidebar (scoped to your ownership/manager permissions).
+- open any editable playlist, reorder tracks by dragging, remove tracks, add tracks by youtube url.
+- read-only view for playlists you can see but not edit.
+- read-only live queue view with manual refresh.
+- now-playing in the top bar, polled every 10 seconds.
+- session expiry and IP mismatch surface clear messages in the ui, not generic errors.
 
-**what it does not do** (by design): create, delete, or rename playlists (use discord commands for that), edit favorites, or reorder the live queue. queue reordering would require ipc back into the bot and is not implemented.
+**what it does not do** (by design): create, delete, or rename playlists; edit favorites; reorder the live queue.
+
+## live tv / stream
+
+activate by setting `TV_ENABLED=true` in `.env`. admin-only commands.
+
+streams live audio into a discord voice channel. supports four stream types detected automatically from the url:
+
+- **tvkaista HLS** (`tvkaista` in the url) — injects the full browser-fingerprint header set required by tvkaista.org. reconnect flags included.
+- **generic HLS** (`.m3u8` url) — reconnect flags, no custom headers.
+- **RTMP** (`rtmp://` url) — handed directly to FFmpeg. no reconnect flags (not valid for RTMP).
+- **YouTube livestreams** (`youtube.com`, `youtu.be`) — the bot resolves the real stream url via yt-dlp before playback. the original YouTube url is stored internally so it can be re-resolved on reconnect (YouTube stream urls expire).
+- **generic HTTP** audio/video streams — reconnect flags, no custom headers.
+
+**url refresh:** for tvkaista, when the auth token (`&o=` param) expires, use `/tv update <url>` to swap in a fresh url without stopping or disconnecting. the bot swaps the stream live. for YouTube livestreams the bot re-extracts on each reconnect automatically.
+
+**watchdog:** if the stream drops, the bot reconnects automatically up to `TV_MAX_RESTARTS` times within `TV_RESTART_WINDOW_SECONDS` seconds. configure both in `.env`.
+
+**optional chrome extension:** set `TV_WEBHOOK_SECRET` and `TV_WEBHOOK_PORT` in `.env` to start a tiny webhook server. the chrome extension can POST fresh stream urls to it directly, so you never need to type `/tv update` manually.
 
 ## quotes
 

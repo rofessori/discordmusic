@@ -113,12 +113,15 @@ PLAYLIST_PREDOWNLOAD_ENABLED = (
 YTDLP_NO_CHECK_CERTIFICATE = env_flag("YTDLP_NO_CHECK_CERTIFICATE", False)
 SPOTIFY_ENABLED = env_flag("SPOTIFY_ENABLED", False)
 WEBUI_ENABLED = env_flag("WEBUI_ENABLED", False)
+WEBUI_PUBLIC_URL = os.getenv("WEBUI_PUBLIC_URL", "").rstrip("/")
 TV_ENABLED = env_flag("TV_ENABLED", False)
 
 _webui_module = None
+_WebUISessionStore = None
 if WEBUI_ENABLED:
     try:
         import webui as _webui_module
+        from webui.sessions import SessionStore as _WebUISessionStore
         missing_webui = _webui_module.check_dependencies()
         if missing_webui:
             logger.warning(
@@ -1669,6 +1672,8 @@ class Client(discord.Client):
         self.tv_stream_url = None
         self.tv_notify_channel = None
         self.tv_restart_count = 0
+        # Web UI per-user session store (populated at on_ready if WEBUI is enabled)
+        self.webui_session_store = _WebUISessionStore() if _WebUISessionStore else None
         self.tv_restart_window_start = None
 
     async def setup_hook(self):
@@ -2497,20 +2502,36 @@ async def _tv_restart(channel):
 
 async def _start_tv_stream(channel, url):
     """Connect FFmpeg to the TV stream URL and hand it to the voice client."""
+    if not url:
+        logger.error("TV stream start failed: no URL provided.")
+        return
     voice = active_voice_client()
     if not voice or not voice.is_connected():
         logger.error("TV stream start failed: not connected to voice channel.")
         client.tv_mode_active = False
         return
-    before_opts = _tv_module.build_ffmpeg_before_options()
-    source = discord.FFmpegPCMAudio(url, before_options=before_opts, options="-vn")
+    # Resolve YouTube live URLs to a real stream URL via yt-dlp.
+    # The original URL is kept in tv_stream_url so it can be re-resolved on reconnect.
+    client.tv_stream_url = url
+    try:
+        resolved_url = await _tv_module.resolve_stream_url(url)
+    except Exception as exc:
+        logger.error(f"TV stream URL resolution failed: {exc}")
+        if channel:
+            try:
+                await channel.send(f"Could not start TV stream: {exc}")
+            except Exception:
+                pass
+        client.tv_mode_active = False
+        return
+    before_opts = _tv_module.build_ffmpeg_before_options(resolved_url)
+    source = discord.FFmpegPCMAudio(resolved_url, before_options=before_opts, options="-vn")
     player = discord.PCMVolumeTransformer(source, volume=client.volume)
     voice.play(player, after=lambda e: _tv_after_callback(e, channel))
     client.tv_mode_active = True
-    client.tv_stream_url = url
     client.tv_notify_channel = channel
     client.currently_playing = True
-    logger.info(f"TV stream started: {url}")
+    logger.info(f"TV stream started: {resolved_url} (original: {url})")
 
 async def perform_volume_action(level: int) -> str:
     set_client_volume_level(level)
@@ -7294,7 +7315,21 @@ async def on_ready():
         logger.error(f"Sync error: {e}")
     if _webui_module is not None:
         bot_state = _webui_module.BotState(client_ref=client, queue_ref=queue)
-        await _webui_module.start(playlists_dir=PLAYLISTS_DIR, bot_state=bot_state)
+        await _webui_module.start(
+            playlists_dir=PLAYLISTS_DIR,
+            bot_state=bot_state,
+            sessions=client.webui_session_store,
+        )
+
+        async def _webui_session_sweeper():
+            while True:
+                await asyncio.sleep(30)
+                if client.webui_session_store is not None:
+                    n = client.webui_session_store.sweep()
+                    if n > 0:
+                        logger.debug(f"Web UI: swept {n} expired session(s)")
+
+        asyncio.create_task(_webui_session_sweeper())
 
     if _tv_module is not None and TV_WEBHOOK_SECRET:
         async def _on_tv_webhook_url(url: str):
@@ -7618,6 +7653,51 @@ playlist_group = app_commands.Group(name="playlist", description="create, browse
 favorites_group = app_commands.Group(name="favorites", description="play and manage per-user favorites")
 usergroup_group = app_commands.Group(name="usergroup", description="admin user restriction groups")
 config_group = app_commands.Group(name="config", description="admin runtime configuration panel")
+
+@client.tree.command(name="webui")
+async def webui_command(ctx):
+    """Get a private link to the playlist editor. Only visible to you."""
+    record_command(ctx)
+
+    if _webui_module is None:
+        await ctx.response.send_message(
+            "The web UI is not enabled. "
+            "Set `WEBUI_ENABLED=true` in `.env` and install the optional packages.",
+            ephemeral=True,
+        )
+        return
+
+    if not WEBUI_PUBLIC_URL:
+        await ctx.response.send_message(
+            "The web UI is running but `WEBUI_PUBLIC_URL` is not configured. "
+            "Set it in `.env` to the URL where the web UI is reachable, then restart.",
+            ephemeral=True,
+        )
+        return
+
+    if client.webui_session_store is None:
+        await ctx.response.send_message(
+            "Session store is not available. This is a startup error — check the bot logs.",
+            ephemeral=True,
+        )
+        return
+
+    session = client.webui_session_store.create(
+        discord_user_id=ctx.user.id,
+        discord_username=str(ctx.user),
+        is_admin=is_user_admin(ctx.user),
+    )
+
+    link = f"{WEBUI_PUBLIC_URL}/?s={session.token}"
+
+    await ctx.response.send_message(
+        f"**Playlist Editor**\n"
+        f"> {link}\n\n"
+        f"This link is private to you. "
+        f"It expires after **2 minutes** of inactivity.\n"
+        f"Use `/webui` to get a fresh link anytime.",
+        ephemeral=True,
+    )
 
 @client.tree.command()
 async def join(ctx):
