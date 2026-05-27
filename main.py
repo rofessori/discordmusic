@@ -18,6 +18,7 @@ import shutil
 import sys
 import math
 import importlib.util
+import random
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -3897,9 +3898,13 @@ def favorites_status_message(user) -> str:
 def playlist_to_queue_tracks(playlist: dict, *, block_id: Optional[str] = None) -> list:
     tracks = playlist.get("tracks", [])
     block_id = block_id or generate_playlist_id()
-    total = len(tracks)
+    active_tracks = [t for t in tracks if not t.get("admin_disabled")]
+    skipped = len(tracks) - len(active_tracks)
+    if skipped:
+        logger.debug(f"[playlist_to_queue_tracks] skipped {skipped} admin-disabled track(s) in '{playlist.get('name')}'")
+    total = len(active_tracks)
     queue_tracks = []
-    for index, track in enumerate(tracks, start=1):
+    for index, track in enumerate(active_tracks, start=1):
         normalize_playlist_track_cache_fields(track)
         queue_track = {
             "id": str(track.get("id") or ""),
@@ -6748,6 +6753,10 @@ def schedule_playlist_cache_warmup(ctx, playlist: dict, tracks: list, command_na
     return True
 
 async def play_playlist_now(ctx, playlist: dict, command_name: str):
+    if playlist.get("admin_disabled") and not is_user_admin(ctx.user):
+        await ctx.followup.send("That playlist has been disabled by an admin.", ephemeral=True)
+        logger.info(f"[play_playlist_now] blocked admin-disabled playlist '{playlist.get('name')}' for user {user_display(ctx.user)}")
+        return
     tracks = playlist_to_queue_tracks(playlist)
     for track in tracks:
         track["requested_by_user_id"] = user_id_value(ctx.user)
@@ -8548,6 +8557,7 @@ async def playlist_list(ctx):
     record_command(ctx)
     pages = playlist_list_pages_for(ctx.user)
     await send_paged_playlist_message(ctx, pages)
+    await _maybe_advertise_webui(ctx)
 
 @app_commands.describe(name="Playlist name", visibility="private, public, current, currentqueue, or jono")
 @app_commands.choices(visibility=[
@@ -8630,6 +8640,7 @@ async def playlist_play(ctx, playlist: str):
         await ctx.followup.send("Playlist not found or not visible to you. Try `/playlist list`.", ephemeral=True)
         return
     await play_playlist_now(ctx, target, "playlist play")
+    await _maybe_advertise_webui(ctx)
 
 @app_commands.describe(
     playlist="Playlist name, id, or playlist:name",
@@ -9851,6 +9862,26 @@ async def backup_teekkari_quotes(ctx):
     await safe_interaction_send(ctx, f"Quotes backup completed ({count} messages scanned).")
     logger.info("Teekkari quotes backed up by command.")
 
+_WEBUI_AD_MESSAGES = [
+    "Did you know? Use `/webui` to get a personal link to the playlist editor and player controls!",
+    "Tip: `/webui` opens a browser panel where you can manage playlists, see the queue, and star favorites.",
+    "Try `/webui` for a web interface with playlist editing, queue view, and daily quote game!",
+    "Manage your playlists from any browser — use `/webui` to get your personal link.",
+]
+
+async def _maybe_advertise_webui(ctx, *, chance: float = 0.22):
+    """Send a WebUI tip as a follow-up ~22% of the time when WebUI is accessible."""
+    if not WEBUI_ENABLED or not WEBUI_PUBLIC_URL:
+        return
+    if random.random() > chance:
+        return
+    msg = random.choice(_WEBUI_AD_MESSAGES)
+    try:
+        await ctx.followup.send(msg, ephemeral=True)
+    except Exception:
+        pass
+
+
 # Random quote command
 @client.tree.command()
 async def random_quote(ctx):
@@ -9859,6 +9890,7 @@ async def random_quote(ctx):
     message = quotes.getRandomQuote()
     await ctx.response.send_message(message)
     logger.info("User requested random teekkari quote.")
+    await _maybe_advertise_webui(ctx)
 
 @client.tree.command(name="whatsnew")
 async def whatsnew(ctx):

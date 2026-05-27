@@ -231,15 +231,17 @@ try:
 
     def _playlist_summary(pl: dict, *, ctx: "_SessionContext | None" = None) -> dict:
         s = {
-            "id":          pl.get("id"),
-            "name":        pl.get("name"),
-            "visibility":  pl.get("visibility"),
-            "type":        pl.get("type", "playlist"),
-            "track_count": len(pl.get("tracks", [])),
-            "owner":       pl.get("owner_discord_name"),
-            "owner_id":    pl.get("owner_user_id"),
-            "locked":      bool(pl.get("locked")),
-            "cache_mode":  pl.get("cache_mode", "streaming"),
+            "id":             pl.get("id"),
+            "name":           pl.get("name"),
+            "visibility":     pl.get("visibility"),
+            "type":           pl.get("type", "playlist"),
+            "track_count":    len(pl.get("tracks", [])),
+            "owner":          pl.get("owner_discord_name"),
+            "owner_id":       pl.get("owner_user_id"),
+            "locked":         bool(pl.get("locked")),
+            "cache_mode":     pl.get("cache_mode", "streaming"),
+            "admin_disabled": bool(pl.get("admin_disabled")),
+            "manager_user_ids": list(pl.get("manager_user_ids", [])),
         }
         if ctx is not None:
             s["can_edit"] = _can_edit(pl, ctx)
@@ -251,10 +253,11 @@ try:
         if vid and not url.startswith("http"):
             url = _canonical_youtube_url(vid)
         return {
-            "id":            vid,
-            "title":         str(t.get("title") or url or "Unknown"),
-            "webpage_url":   url,
-            "needs_refresh": bool(t.get("needs_refresh")),
+            "id":             vid,
+            "title":          str(t.get("title") or url or "Unknown"),
+            "webpage_url":    url,
+            "needs_refresh":  bool(t.get("needs_refresh")),
+            "admin_disabled": bool(t.get("admin_disabled")),
         }
 
     # -----------------------------------------------------------------------
@@ -276,6 +279,8 @@ try:
     def _can_edit(pl: dict, ctx: _SessionContext) -> bool:
         if ctx.is_admin:
             return True
+        if pl.get("admin_disabled"):
+            return False
         uid = ctx.discord_user_id
         if not uid:
             return False
@@ -665,6 +670,162 @@ try:
         pl["updated_at"] = time.time()
         _save_playlist_atomic(path, pl)
         return {"ok": True, "title": title, "id": video_id}
+
+    # -----------------------------------------------------------------------
+    # Routes — playlist managers (owner or admin only)
+    # -----------------------------------------------------------------------
+
+    @app.get("/api/playlists/{playlist_id}/managers")
+    async def get_managers(playlist_id: str, ctx: _SessionContext = _auth):
+        path, pl = _find_playlist_by_id(playlist_id)
+        if pl is None or not _can_view(pl, ctx):
+            raise HTTPException(status_code=404, detail="Playlist not found")
+        uid = ctx.discord_user_id
+        is_owner = ctx.is_admin or (uid and uid == pl.get("owner_user_id"))
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Only the owner can manage moderators")
+        return {"manager_user_ids": list(pl.get("manager_user_ids", []))}
+
+    @app.post("/api/playlists/{playlist_id}/managers")
+    async def add_manager(playlist_id: str, request: Request, ctx: _SessionContext = _auth):
+        path, pl = _find_playlist_by_id(playlist_id)
+        if pl is None or not _can_view(pl, ctx):
+            raise HTTPException(status_code=404, detail="Playlist not found")
+        uid = ctx.discord_user_id
+        is_owner = ctx.is_admin or (uid and uid == pl.get("owner_user_id"))
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Only the owner can add moderators")
+        body = await request.json()
+        new_uid = body.get("user_id")
+        if not new_uid:
+            raise HTTPException(status_code=422, detail="user_id is required")
+        try:
+            new_uid = int(new_uid)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="user_id must be an integer")
+        if new_uid == pl.get("owner_user_id"):
+            raise HTTPException(status_code=422, detail="Owner is already the owner")
+        managers = pl.setdefault("manager_user_ids", [])
+        if str(new_uid) not in [str(x) for x in managers]:
+            managers.append(new_uid)
+            pl["updated_at"] = time.time()
+            _save_playlist_atomic(path, pl)
+            logger.info(
+                f"[playlists/managers/add] user={ctx.discord_user_id} ({ctx.discord_username}) "
+                f"added manager {new_uid} to playlist {playlist_id}"
+            )
+        return {"ok": True, "manager_user_ids": list(pl.get("manager_user_ids", []))}
+
+    @app.delete("/api/playlists/{playlist_id}/managers/{manager_user_id}")
+    async def remove_manager(playlist_id: str, manager_user_id: int, ctx: _SessionContext = _auth):
+        path, pl = _find_playlist_by_id(playlist_id)
+        if pl is None or not _can_view(pl, ctx):
+            raise HTTPException(status_code=404, detail="Playlist not found")
+        uid = ctx.discord_user_id
+        is_owner = ctx.is_admin or (uid and uid == pl.get("owner_user_id"))
+        if not is_owner:
+            raise HTTPException(status_code=403, detail="Only the owner can remove moderators")
+        managers = pl.get("manager_user_ids", [])
+        new_managers = [x for x in managers if str(x) != str(manager_user_id)]
+        pl["manager_user_ids"] = new_managers
+        pl["updated_at"] = time.time()
+        _save_playlist_atomic(path, pl)
+        logger.info(
+            f"[playlists/managers/remove] user={ctx.discord_user_id} ({ctx.discord_username}) "
+            f"removed manager {manager_user_id} from playlist {playlist_id}"
+        )
+        return {"ok": True, "manager_user_ids": list(pl.get("manager_user_ids", []))}
+
+    # -----------------------------------------------------------------------
+    # Routes — admin: all playlists view + disable/enable playlists/tracks
+    # -----------------------------------------------------------------------
+
+    @app.get("/api/admin/playlists")
+    async def admin_list_playlists(ctx: _SessionContext = _admin_auth):
+        """Admin view of all playlists including disabled ones."""
+        result = []
+        for path in _playlist_metadata_files():
+            try:
+                pl = _load_playlist(path)
+                if pl.get("deleted"):
+                    continue
+                result.append(_playlist_summary(pl, ctx=ctx))
+            except Exception:
+                continue
+        result.sort(key=lambda p: str(p.get("name") or "").lower())
+        logger.debug(f"[admin/playlists] admin={ctx.discord_user_id} total={len(result)}")
+        return result
+
+    @app.get("/api/admin/playlists/{playlist_id}")
+    async def admin_get_playlist(playlist_id: str, ctx: _SessionContext = _admin_auth):
+        """Admin view of a single playlist including all track details."""
+        path, pl = _find_playlist_by_id(playlist_id)
+        if pl is None:
+            raise HTTPException(status_code=404, detail="Playlist not found")
+        return {
+            **_playlist_summary(pl, ctx=ctx),
+            "tracks": [_sanitize_track(t) for t in pl.get("tracks", [])],
+        }
+
+    @app.patch("/api/admin/playlists/{playlist_id}")
+    async def admin_patch_playlist(playlist_id: str, request: Request, ctx: _SessionContext = _admin_auth):
+        """Admin can disable/enable an entire playlist."""
+        path, pl = _find_playlist_by_id(playlist_id)
+        if pl is None:
+            raise HTTPException(status_code=404, detail="Playlist not found")
+        body = await request.json()
+        changed = False
+        if "admin_disabled" in body:
+            pl["admin_disabled"] = bool(body["admin_disabled"])
+            changed = True
+            logger.info(
+                f"[admin/playlists/patch] admin={ctx.discord_user_id} ({ctx.discord_username}) "
+                f"playlist={playlist_id} admin_disabled={pl['admin_disabled']}"
+            )
+        if changed:
+            pl["updated_at"] = time.time()
+            _save_playlist_atomic(path, pl)
+        return {"ok": True, "admin_disabled": bool(pl.get("admin_disabled"))}
+
+    @app.patch("/api/admin/playlists/{playlist_id}/tracks/{index}")
+    async def admin_patch_track(playlist_id: str, index: int, request: Request,
+                                 ctx: _SessionContext = _admin_auth):
+        """Admin can disable/enable a specific track."""
+        path, pl = _find_playlist_by_id(playlist_id)
+        if pl is None:
+            raise HTTPException(status_code=404, detail="Playlist not found")
+        tracks = pl.get("tracks", [])
+        if index < 0 or index >= len(tracks):
+            raise HTTPException(status_code=404, detail="Track index out of range")
+        body = await request.json()
+        if "admin_disabled" in body:
+            tracks[index]["admin_disabled"] = bool(body["admin_disabled"])
+            pl["updated_at"] = time.time()
+            _save_playlist_atomic(path, pl)
+            logger.info(
+                f"[admin/playlists/tracks/patch] admin={ctx.discord_user_id} ({ctx.discord_username}) "
+                f"playlist={playlist_id} index={index} admin_disabled={tracks[index]['admin_disabled']}"
+            )
+        return {"ok": True, "admin_disabled": bool(tracks[index].get("admin_disabled"))}
+
+    @app.delete("/api/admin/playlists/{playlist_id}/tracks/{index}")
+    async def admin_remove_track(playlist_id: str, index: int, ctx: _SessionContext = _admin_auth):
+        """Admin can remove any track from any playlist."""
+        path, pl = _find_playlist_by_id(playlist_id)
+        if pl is None:
+            raise HTTPException(status_code=404, detail="Playlist not found")
+        tracks = pl.get("tracks", [])
+        if index < 0 or index >= len(tracks):
+            raise HTTPException(status_code=404, detail="Track index out of range")
+        removed = tracks.pop(index)
+        pl["tracks"] = tracks
+        pl["updated_at"] = time.time()
+        _save_playlist_atomic(path, pl)
+        logger.info(
+            f"[admin/playlists/tracks/remove] admin={ctx.discord_user_id} ({ctx.discord_username}) "
+            f"playlist={playlist_id} removed index={index} title='{removed.get('title', '')[:60]}'"
+        )
+        return {"ok": True, "track_count": len(tracks)}
 
     # -----------------------------------------------------------------------
     # Routes — favorites

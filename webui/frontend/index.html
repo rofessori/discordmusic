@@ -345,6 +345,25 @@
     .user-groups { display:flex; gap:4px; flex-wrap:wrap; flex-shrink:0; max-width:220px; justify-content:flex-end; }
     .restriction-pill { font-size:10px; font-family:var(--font-m); background:rgba(255,77,109,.08); border:1px solid rgba(255,77,109,.18); color:var(--danger); padding:1px 6px; border-radius:4px; }
     .config-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px; padding:18px; }
+    .pill.disabled { background:rgba(255,77,109,.08); color:var(--danger); border-color:rgba(255,77,109,.2); }
+    .track-disabled-badge { font-family:var(--font-m); font-size:10px; background:rgba(255,77,109,.08); border:1px solid rgba(255,77,109,.18); color:var(--danger); padding:1px 6px; border-radius:4px; flex-shrink:0; }
+    .track-item.disabled-track { opacity:.5; }
+    .managers-section { padding:10px 16px 12px; border-top:1px solid var(--border); background:var(--panel); display:flex; flex-direction:column; gap:8px; }
+    .managers-section-title { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.07em; font-family:var(--font-d); font-weight:700; }
+    .manager-row { display:flex; align-items:center; gap:8px; font-size:12px; }
+    .manager-id { font-family:var(--font-m); color:var(--muted); font-size:10px; }
+    /* Admin playlists panel */
+    .admin-pl-list { flex:1; overflow-y:auto; padding:4px 0; }
+    .admin-pl-item { padding:10px 16px; border-bottom:1px solid rgba(37,37,50,.5); display:flex; align-items:center; gap:8px; cursor:pointer; transition:background .1s; }
+    .admin-pl-item:hover { background:var(--surface); }
+    .admin-pl-item.expanded { background:var(--surface); }
+    .admin-pl-name { flex:1; font-weight:500; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .admin-pl-owner { font-size:11px; color:var(--muted); flex-shrink:0; max-width:100px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .admin-pl-tracks { padding:6px 16px 12px 36px; display:flex; flex-direction:column; gap:4px; border-bottom:1px solid rgba(37,37,50,.5); }
+    .admin-track-row { display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:var(--r); border:1px solid transparent; }
+    .admin-track-row:hover { background:var(--raised); border-color:var(--border); }
+    .admin-track-title { flex:1; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .admin-track-num { font-family:var(--font-m); font-size:10px; color:var(--muted); min-width:22px; text-align:right; flex-shrink:0; }
 
     /* ── Gate screens ── */
     .gate-wrap { display:flex; align-items:center; justify-content:center; height:100%; background:radial-gradient(ellipse 60% 40% at 50% -5%,rgba(124,92,252,.1) 0%,transparent 70%),var(--bg); }
@@ -447,6 +466,16 @@ function makeApi(token) {
     adminAudit:       ()          => req("GET",    "/api/admin/audit"),
     adminUsers:       ()          => req("GET",    "/api/admin/users"),
     adminCacheClear:  ()          => req("POST",   "/api/admin/cache/clear"),
+    // Manager management
+    getManagers:      id          => req("GET",    `/api/playlists/${id}/managers`),
+    addManager:       (id, uid)   => req("POST",   `/api/playlists/${id}/managers`, { user_id: uid }),
+    removeManager:    (id, uid)   => req("DELETE", `/api/playlists/${id}/managers/${uid}`),
+    // Admin playlist control
+    adminPlaylists:   ()          => req("GET",    "/api/admin/playlists"),
+    adminGetPlaylist: id          => req("GET",    `/api/admin/playlists/${id}`),
+    adminPatchPlaylist: (id, body) => req("PATCH", `/api/admin/playlists/${id}`, body),
+    adminPatchTrack:  (id, i, b)  => req("PATCH",  `/api/admin/playlists/${id}/tracks/${i}`, b),
+    adminRemoveTrack: (id, i)     => req("DELETE", `/api/admin/playlists/${id}/tracks/${i}`),
   };
 }
 
@@ -539,11 +568,12 @@ function DragHandle() {
 function TrackItem({ track, index, onRemove, canEdit, extraActions }) {
   const id = track.id ? `youtu.be/${track.id}` : track.webpage_url;
   return (
-    <li className="track-item">
+    <li className={`track-item${track.admin_disabled ? " disabled-track" : ""}`}>
       {canEdit && <DragHandle />}
       <span className="track-num">{index + 1}</span>
       <span className="track-title" title={track.title}>{track.title}</span>
       {track.needs_refresh && <span className="track-pending" title="Will resolve on first play">pending</span>}
+      {track.admin_disabled && <span className="track-disabled-badge" title="Disabled by admin">disabled by admin</span>}
       <span className="track-id" title={track.webpage_url}>{id}</span>
       {extraActions}
       {canEdit && (
@@ -766,13 +796,16 @@ function SpotifyImportModal({ api, playlists, onClose, toast }) {
 }
 
 // ── Playlist editor ───────────────────────────────────────────────────────────
-function PlaylistEditor({ playlistId, api, toast, playlists }) {
+function PlaylistEditor({ playlistId, api, toast, playlists, me }) {
   const [pl, setPl] = useState(null);
   const [tracks, setTracks] = useState([]);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showSpotify, setShowSpotify] = useState(false);
+  const [showManagers, setShowManagers] = useState(false);
+  const [newManagerId, setNewManagerId] = useState("");
+  const [addingManager, setAddingManager] = useState(false);
   const listRef = useRef(null);
 
   const load = useCallback(async () => {
@@ -810,6 +843,28 @@ function PlaylistEditor({ playlistId, api, toast, playlists }) {
     } catch (ex) { toast(`Failed to add: ${ex.message}`, "err"); }
   };
 
+  const addManager = async e => {
+    e.preventDefault();
+    const uid = newManagerId.trim();
+    if (!uid || isNaN(Number(uid))) { toast("Enter a valid Discord user ID (numbers only).", "err"); return; }
+    setAddingManager(true);
+    try {
+      await api.addManager(playlistId, Number(uid));
+      toast("Moderator added.", "ok");
+      setNewManagerId("");
+      await load();
+    } catch (ex) { toast(`Failed: ${ex.message}`, "err"); }
+    finally { setAddingManager(false); }
+  };
+
+  const removeManager = async uid => {
+    try {
+      await api.removeManager(playlistId, uid);
+      toast("Moderator removed.", "ok");
+      await load();
+    } catch (ex) { toast(`Failed: ${ex.message}`, "err"); }
+  };
+
   if (loading) return <div className="empty"><span className="spinner" /></div>;
   if (!pl) return <div className="empty"><div className="empty-text">Playlist not found.</div></div>;
 
@@ -823,18 +878,26 @@ function PlaylistEditor({ playlistId, api, toast, playlists }) {
     "favorites": "favorites",
   }[cacheMode] || cacheMode;
   const isCached = ["keep_cached", "bounded", "favorites"].includes(cacheMode);
+  const isOwner = me?.is_admin || (me?.user_id && me.user_id === pl.owner_id);
+  const managers = pl.manager_user_ids || [];
 
   return (
     <>
       <div className="panel-header">
         <div className="panel-title">{pl.name}</div>
         <span className={`pill${pl.visibility === "public" ? " pub" : ""}`}>{pl.visibility}</span>
-        {!canEdit && <span className="pill readonly">read-only</span>}
+        {pl.admin_disabled && <span className="pill disabled" title="This playlist has been disabled by an admin">⛔ disabled</span>}
+        {!canEdit && !pl.admin_disabled && <span className="pill readonly">read-only</span>}
         {isCached
           ? <span className="pill cached" title={`Cache mode: ${cacheMode}`}>💾 {cacheLabel}</span>
           : <span className="pill" title={`Cache mode: ${cacheMode}`}>⚡ {cacheLabel}</span>
         }
         <span className="pill">{tracks.length} tracks</span>
+        {isOwner && (
+          <button className="btn btn-sm" onClick={() => setShowManagers(m => !m)} title="Manage moderators">
+            👥 {managers.length > 0 ? managers.length : ""} Mods
+          </button>
+        )}
         {canEdit && (
           <button className="btn btn-sm" onClick={() => setShowSpotify(true)} title="Import from Spotify">
             🎵 Spotify
@@ -843,18 +906,51 @@ function PlaylistEditor({ playlistId, api, toast, playlists }) {
         <button className="btn btn-sm" onClick={load}>↻</button>
       </div>
 
+      {showManagers && isOwner && (
+        <div className="managers-section">
+          <div className="managers-section-title">Moderators (can edit this playlist)</div>
+          {managers.length === 0
+            ? <div style={{fontSize:12,color:"var(--muted)"}}>No moderators yet.</div>
+            : managers.map(uid => (
+                <div key={uid} className="manager-row">
+                  <span className="manager-id">{uid}</span>
+                  <button className="btn btn-sm btn-danger" onClick={() => removeManager(uid)} title="Remove moderator">Remove</button>
+                </div>
+              ))
+          }
+          <form onSubmit={addManager} style={{display:"flex",gap:6,marginTop:4}}>
+            <input
+              className="add-input" style={{flex:1,padding:"6px 10px",fontSize:12}}
+              placeholder="Discord user ID (numbers)"
+              value={newManagerId} onChange={e => setNewManagerId(e.target.value)}
+            />
+            <button type="submit" className="btn btn-primary btn-sm" disabled={addingManager || !newManagerId.trim()}>
+              {addingManager ? <span className="spinner" /> : "Add mod"}
+            </button>
+          </form>
+          <div style={{fontSize:11,color:"var(--muted)"}}>
+            Right-click a user in Discord → Copy User ID to get their ID.
+          </div>
+        </div>
+      )}
+
       <div className="track-scroll">
-        {tracks.length === 0
+        {pl.admin_disabled
           ? <div className="empty">
-              <div className="empty-icon">♪</div>
-              <div className="empty-text">No tracks yet.{canEdit ? " Add one below." : ""}</div>
+              <div className="empty-icon">⛔</div>
+              <div className="empty-text">This playlist has been disabled by an admin.<br />Contact an admin to re-enable it.</div>
             </div>
-          : <ul ref={canEdit ? listRef : null} className="track-list">
-              {tracks.map((t, i) => (
-                <TrackItem key={t.id || `idx-${i}`} track={t} index={i}
-                  onRemove={removeTrack} canEdit={canEdit} />
-              ))}
-            </ul>
+          : tracks.length === 0
+            ? <div className="empty">
+                <div className="empty-icon">♪</div>
+                <div className="empty-text">No tracks yet.{canEdit ? " Add one below." : ""}</div>
+              </div>
+            : <ul ref={canEdit ? listRef : null} className="track-list">
+                {tracks.map((t, i) => (
+                  <TrackItem key={t.id || `idx-${i}`} track={t} index={i}
+                    onRemove={removeTrack} canEdit={canEdit} />
+                ))}
+              </ul>
         }
       </div>
 
@@ -869,7 +965,7 @@ function PlaylistEditor({ playlistId, api, toast, playlists }) {
         </div>
       )}
 
-      {canEdit && (
+      {canEdit && !pl.admin_disabled && (
         <AddTrackBar
           onAdd={addTrack} toast={toast}
           placeholder="Paste a YouTube URL to add a track…"
@@ -1512,6 +1608,165 @@ function UsersPanel({ api, toast }) {
   );
 }
 
+// ── Admin: All Playlists panel ────────────────────────────────────────────────
+function AdminPlaylistsPanel({ api, toast }) {
+  const [playlists, setPlaylists] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState(null);
+  const [expandedTracks, setExpandedTracks] = useState([]);
+  const [loadingTracks, setLoadingTracks] = useState(false);
+  const [toggling, setToggling] = useState({});
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setPlaylists(await api.adminPlaylists()); }
+    catch (ex) { toast(`Failed: ${ex.message}`, "err"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const expandPlaylist = async id => {
+    if (expanded === id) { setExpanded(null); setExpandedTracks([]); return; }
+    setExpanded(id);
+    setLoadingTracks(true);
+    try {
+      const data = await api.adminGetPlaylist(id);
+      setExpandedTracks(data.tracks || []);
+    } catch (ex) { toast(`Failed to load tracks: ${ex.message}`, "err"); }
+    finally { setLoadingTracks(false); }
+  };
+
+  const togglePlaylist = async (id, disabled) => {
+    setToggling(t => ({ ...t, [id]: true }));
+    try {
+      await api.adminPatchPlaylist(id, { admin_disabled: disabled });
+      toast(`Playlist ${disabled ? "disabled" : "re-enabled"}.`, "ok");
+      await load();
+      if (expanded === id) {
+        const data = await api.adminGetPlaylist(id);
+        setExpandedTracks(data.tracks || []);
+      }
+    } catch (ex) { toast(`Failed: ${ex.message}`, "err"); }
+    finally { setToggling(t => ({ ...t, [id]: false })); }
+  };
+
+  const toggleTrack = async (plId, idx, disabled) => {
+    const key = `${plId}-${idx}`;
+    setToggling(t => ({ ...t, [key]: true }));
+    try {
+      await api.adminPatchTrack(plId, idx, { admin_disabled: disabled });
+      toast(`Track ${disabled ? "disabled" : "re-enabled"}.`, "ok");
+      const data = await api.adminGetPlaylist(plId);
+      setExpandedTracks(data.tracks || []);
+    } catch (ex) { toast(`Failed: ${ex.message}`, "err"); }
+    finally { setToggling(t => ({ ...t, [key]: false })); }
+  };
+
+  const removeTrack = async (plId, idx, title) => {
+    if (!confirm(`Remove "${title}" from this playlist?`)) return;
+    const key = `${plId}-rm-${idx}`;
+    setToggling(t => ({ ...t, [key]: true }));
+    try {
+      await api.adminRemoveTrack(plId, idx);
+      toast("Track removed.", "ok");
+      const data = await api.adminGetPlaylist(plId);
+      setExpandedTracks(data.tracks || []);
+      await load();
+    } catch (ex) { toast(`Failed: ${ex.message}`, "err"); }
+    finally { setToggling(t => ({ ...t, [key]: false })); }
+  };
+
+  const disabled = playlists.filter(p => p.admin_disabled);
+  const active = playlists.filter(p => !p.admin_disabled);
+
+  return (
+    <>
+      <div className="panel-header">
+        <div className="panel-title">All Playlists</div>
+        <span className="pill">{playlists.length} total</span>
+        {disabled.length > 0 && <span className="pill disabled">{disabled.length} disabled</span>}
+        <button className="btn btn-sm" onClick={load}>↻</button>
+      </div>
+      {loading
+        ? <div className="empty"><span className="spinner" /></div>
+        : <div className="admin-pl-list">
+            {[...disabled, ...active].map(pl => (
+              <React.Fragment key={pl.id}>
+                <div
+                  className={`admin-pl-item${expanded === pl.id ? " expanded" : ""}`}
+                  onClick={() => expandPlaylist(pl.id)}
+                >
+                  <span style={{fontSize:12,color:pl.admin_disabled ? "var(--danger)" : "var(--muted)",flexShrink:0}}>
+                    {pl.admin_disabled ? "⛔" : pl.visibility === "public" ? "◉" : "◎"}
+                  </span>
+                  <span className="admin-pl-name" title={pl.name}>{pl.name}</span>
+                  <span className="admin-pl-owner" title={pl.owner}>{pl.owner || "—"}</span>
+                  <span style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>{pl.track_count} tracks</span>
+                  <button
+                    className={`btn btn-sm${pl.admin_disabled ? "" : " btn-danger"}`}
+                    style={{flexShrink:0,marginLeft:4}}
+                    disabled={toggling[pl.id]}
+                    onClick={e => { e.stopPropagation(); togglePlaylist(pl.id, !pl.admin_disabled); }}
+                    title={pl.admin_disabled ? "Re-enable playlist" : "Disable playlist"}
+                  >
+                    {toggling[pl.id] ? <span className="spinner" /> : pl.admin_disabled ? "Enable" : "Disable"}
+                  </button>
+                  <span style={{fontSize:11,color:"var(--muted)",flexShrink:0,marginLeft:4}}>
+                    {expanded === pl.id ? "▲" : "▼"}
+                  </span>
+                </div>
+                {expanded === pl.id && (
+                  <div className="admin-pl-tracks">
+                    {loadingTracks
+                      ? <div style={{padding:"8px 0",color:"var(--muted)",fontSize:12}}><span className="spinner" /> Loading…</div>
+                      : expandedTracks.length === 0
+                        ? <div style={{color:"var(--muted)",fontSize:12}}>No tracks.</div>
+                        : expandedTracks.map((t, i) => {
+                            const tkKey = `${pl.id}-${i}`;
+                            const rmKey = `${pl.id}-rm-${i}`;
+                            return (
+                              <div key={i} className="admin-track-row">
+                                <span className="admin-track-num">{i + 1}</span>
+                                <span className="admin-track-title" title={t.title}>
+                                  {t.title}
+                                  {t.admin_disabled && <span className="track-disabled-badge" style={{marginLeft:6}}>disabled</span>}
+                                </span>
+                                <button
+                                  className={`btn btn-sm${t.admin_disabled ? "" : " btn-danger"}`}
+                                  style={{flexShrink:0,fontSize:11,padding:"3px 8px"}}
+                                  disabled={toggling[tkKey]}
+                                  onClick={() => toggleTrack(pl.id, i, !t.admin_disabled)}
+                                  title={t.admin_disabled ? "Re-enable track" : "Disable track"}
+                                >
+                                  {toggling[tkKey] ? <span className="spinner" /> : t.admin_disabled ? "Enable" : "Disable"}
+                                </button>
+                                <button
+                                  className="btn btn-sm btn-danger"
+                                  style={{flexShrink:0,fontSize:11,padding:"3px 8px"}}
+                                  disabled={toggling[rmKey]}
+                                  onClick={() => removeTrack(pl.id, i, t.title)}
+                                  title="Remove track from playlist"
+                                >
+                                  {toggling[rmKey] ? <span className="spinner" /> : "Remove"}
+                                </button>
+                              </div>
+                            );
+                          })
+                    }
+                  </div>
+                )}
+              </React.Fragment>
+            ))}
+            {playlists.length === 0 && (
+              <div className="empty"><div className="empty-text">No playlists found.</div></div>
+            )}
+          </div>
+      }
+    </>
+  );
+}
+
 // ── EqBars ────────────────────────────────────────────────────────────────────
 function EqBars() {
   return (
@@ -1695,9 +1950,12 @@ function App() {
                 key={p.id}
                 className={`sidebar-item${selected === p.id ? " active" : ""}`}
                 onClick={() => setSelected(p.id)}
+                title={p.admin_disabled ? "Disabled by admin" : p.name}
               >
-                <span className="sidebar-icon">{p.visibility === "public" ? "◉" : "◎"}</span>
-                <span className="sidebar-name" title={p.name}>{p.name}</span>
+                <span className="sidebar-icon" style={p.admin_disabled ? {color:"var(--danger)"} : {}}>
+                  {p.admin_disabled ? "⛔" : p.visibility === "public" ? "◉" : "◎"}
+                </span>
+                <span className="sidebar-name" style={p.admin_disabled ? {color:"var(--danger)",opacity:.7} : {}} title={p.name}>{p.name}</span>
                 <span className="sidebar-count">{p.track_count}</span>
               </div>
             ))}
@@ -1766,6 +2024,13 @@ function App() {
                 <span className="sidebar-icon">👥</span>
                 <span className="sidebar-name">Users</span>
               </div>
+              <div
+                className={`sidebar-item${selected === "admin-playlists" ? " active" : ""}`}
+                onClick={() => setSelected("admin-playlists")}
+              >
+                <span className="sidebar-icon">📁</span>
+                <span className="sidebar-name">All Playlists</span>
+              </div>
             </>}
 
           </div>
@@ -1793,13 +2058,15 @@ function App() {
           {selected === "logs"     && isAdmin && <LogsPanel   api={safe} toast={addToast} />}
           {selected === "audit"    && isAdmin && <AuditPanel  api={safe} toast={addToast} />}
           {selected === "users"    && isAdmin && <UsersPanel  api={safe} toast={addToast} />}
-          {selected && !["queue","favorites","guesser","status","logs","audit","users"].includes(selected) && (
+          {selected === "admin-playlists" && isAdmin && <AdminPlaylistsPanel api={safe} toast={addToast} />}
+          {selected && !["queue","favorites","guesser","status","logs","audit","users","admin-playlists"].includes(selected) && (
             <PlaylistEditor
               key={selected}
               playlistId={selected}
               api={safe}
               toast={addToast}
               playlists={playlists}
+              me={me}
             />
           )}
         </div>
