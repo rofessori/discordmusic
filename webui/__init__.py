@@ -127,6 +127,24 @@ async def start(*, playlists_dir: str, bot_state: "BotState", sessions):
         proxy_headers=True,
         forwarded_allow_ips="*",
     )
-    server = uvicorn.Server(config)
+
+    class _EmbeddedServer(uvicorn.Server):
+        """Uvicorn server that doesn't touch signal handlers.
+
+        discord.py owns SIGINT/SIGTERM. If uvicorn overwrites them it
+        causes the web server to shut itself down on the first reload or
+        keyboard interrupt, producing an immediate 502.
+        """
+        def install_signal_handlers(self) -> None:
+            pass
+
+    server = _EmbeddedServer(config)
     logger.info(f"Web UI starting on http://{WEBUI_BIND_HOST}:{WEBUI_PORT}")
-    asyncio.create_task(server.serve())
+
+    async def _serve():
+        try:
+            await server.serve()
+        except Exception as exc:
+            logger.error(f"Web UI server stopped unexpectedly: {exc}", exc_info=True)
+
+    asyncio.create_task(_serve())
