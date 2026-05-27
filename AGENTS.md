@@ -179,6 +179,24 @@ Setup security checks:
 - yt-dlp JavaScript runtimes must only be configured when `deno` or `node` actually exists on `PATH`. If no runtime exists, keep the startup warning and user-facing admin hint, but do not force a missing runtime in `ytdl_options`.
 - Search fallback is bounded and YouTube-only: if the first yt-dlp search result is unavailable, try a few YouTube search candidates, but never allow raw non-YouTube URLs through to yt-dlp.
 
+## 2026-05-27 Stream Rover Integration
+
+A separate open-source library (`~/stream-rover/`) resolves live stream URLs from a TOML source registry. The bot's TV module uses it as a Python library — no HTTP daemon, no auth token management.
+
+**URL pattern for tvkaista (no auth token):**
+`https://live-fi.tvkaista.net/{channel}/live.m3u8?src=opengraph&timestamp=YYYY-MM-DD-HH-MM`
+
+**Available channels:** `mtv3`, `nelonen`, `sub`, `tv5`, `jim`, `yle-teema-fem`, `kutonen`, `liv`, `ava`. YLE channels not available on this server.
+
+**Stream Rover architecture:** Registry (rover.toml) → Fetcher modules (tvkaista, radio_browser) → TTL Cache → Rover class. Add a source by adding TOML lines. Phase 1 fetchers: `hls_opengraph` (tvkaista), `radio_browser` (radio-browser.info global radio API).
+
+**Bot integration points:**
+- `tv_stream.py`: `init_rover(config_path)`, `fetch_rover_stream(source_id)`, `fetch_rover_radio(country)`.
+- `main.py`: `ROVER_CONFIG` env var; `client.tv_rover_source` state field; `/tv channel <source>` command; `/tv radio [country]` command; `_tv_restart` auto-fetches fresh URL from rover.
+- Install: `pip install -e ~/stream-rover` in discordmusic venv; set `ROVER_CONFIG=/path/to/rover.toml`.
+
+**Key rules:** TV module is voluntary (`TV_ENABLED=true`). Stream Rover is a separate repo. `docs/superpowers/` is gitignored — AI plans stay local only. Rover handles all stream URL complexity; bot only passes URLs to FFmpeg.
+
 ## 2026-05-07 Voice Client State Notes
 - Treat `guild.voice_client` as the live Discord voice connection and `client.current_voice_channel` as local tracking that can go stale after `/adminjoin`, external voice moves, failed reconnects, or restart-adjacent recovery. Voice-sensitive checks should call `active_voice_client(guild)` before deciding the bot is not connected or before comparing a user against the bot's channel.
 - Keep future playback controls, vote logic, volume commands, pause/resume, queued playback, and now-playing reaction handlers from reading `client.current_voice_channel` directly for decisions. Direct assignment is fine immediately after connect, move, or disconnect.

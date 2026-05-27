@@ -152,13 +152,17 @@ requires `WEBUI_ENABLED=true`, `WEBUI_SECRET_KEY=<key>`, and `WEBUI_PUBLIC_URL=<
 
 ## tv
 
-requires `TV_ENABLED=true` in `.env`. admin-only.
+requires `TV_ENABLED=true` in `.env`. admin-only. the TV module is voluntary — not needed for normal music playback.
 
 | command | purpose |
 | --- | --- |
 | `/tv start [url]` | start a live stream in your voice channel. supports HLS (`.m3u8`), generic HTTP audio/video streams, RTMP, and YouTube livestreams. defaults to `TV_STREAM_URL` in `.env` if no url is given. |
+| `/tv channel <source>` | start a registered TV channel by source ID (e.g. `mtv3`, `nelonen`, `sub`, `tv5`, `jim`). requires `ROVER_CONFIG` in `.env` pointing to a `rover.toml` registry. fetches a fresh URL from Stream Rover automatically, including on reconnect. |
+| `/tv radio [country]` | start a random live radio station via radio-browser.info. optional two-letter country code filter (e.g. `FI`). requires `ROVER_CONFIG`. |
 | `/tv stop` | stop the live stream and disconnect from voice. |
 | `/tv update <url>` | swap in a new stream URL while the stream is live — no reconnect needed. useful for refreshing an expired tvkaista auth token. |
+
+**stream rover setup:** `/tv channel` and `/tv radio` require the `stream-rover` package installed in the bot's venv and `ROVER_CONFIG=/path/to/rover.toml` in `.env`. install with `pip install -e ~/stream-rover`. copy `rover.toml.example` → `rover.toml` and set the sources you want.
 
 ## spotify
 
