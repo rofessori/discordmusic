@@ -112,10 +112,65 @@ PLAYLIST_PREDOWNLOAD_ENABLED = (
     env_flag("PLAYLIST_PREDOWNLOAD_ENABLED")
 )
 YTDLP_NO_CHECK_CERTIFICATE = env_flag("YTDLP_NO_CHECK_CERTIFICATE", False)
-SPOTIFY_ENABLED = env_flag("SPOTIFY_ENABLED", False)
-WEBUI_ENABLED = env_flag("WEBUI_ENABLED", False)
+SPOTIFY_ENABLED = env_flag("SPOTIFY_ENABLED", True)   # default on — no API keys needed
+WEBUI_ENABLED   = env_flag("WEBUI_ENABLED",   True)   # default on — auto-setup handles everything
 WEBUI_PUBLIC_URL = os.getenv("WEBUI_PUBLIC_URL", "").rstrip("/")
 TV_ENABLED = env_flag("TV_ENABLED", False)
+
+# ---------------------------------------------------------------------------
+# Bot singleton: kill any existing instance before starting
+# ---------------------------------------------------------------------------
+
+def _write_pid_file():
+    pid_path = os.path.join(BASE_DIR, "discordmusic.pid")
+    try:
+        with open(pid_path, "w") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
+def _check_and_assimilate_old_instance():
+    """Kill an existing bot instance recorded in discordmusic.pid."""
+    pid_path = os.path.join(BASE_DIR, "discordmusic.pid")
+    if not os.path.isfile(pid_path):
+        return
+    try:
+        with open(pid_path) as f:
+            old_pid = int(f.read().strip())
+    except (ValueError, IOError):
+        return
+    if old_pid == os.getpid():
+        return
+    try:
+        os.kill(old_pid, 0)  # raises ProcessLookupError if dead
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        logger.warning(f"Found existing bot PID {old_pid} but cannot signal it (permission denied)")
+        return
+    import signal as _signal
+    logger.info(f"Assimilating old bot instance (PID {old_pid})…")
+    try:
+        os.kill(old_pid, _signal.SIGTERM)
+        time.sleep(2)
+        try:
+            os.kill(old_pid, 0)
+            os.kill(old_pid, _signal.SIGKILL)
+            time.sleep(0.5)
+        except ProcessLookupError:
+            pass
+        logger.info(f"Old instance PID {old_pid} terminated")
+    except ProcessLookupError:
+        pass
+    except Exception as exc:
+        logger.warning(f"Could not terminate old instance PID {old_pid}: {exc}")
+
+_check_and_assimilate_old_instance()
+_write_pid_file()
+
+# ---------------------------------------------------------------------------
+# Module loading
+# ---------------------------------------------------------------------------
 
 _webui_module = None
 _WebUISessionStore = None
@@ -123,38 +178,36 @@ if WEBUI_ENABLED:
     try:
         import webui as _webui_module
         from webui.sessions import SessionStore as _WebUISessionStore
-        missing_webui = _webui_module.check_dependencies()
-        if missing_webui:
-            logger.warning(
-                "WEBUI_ENABLED=true but required packages are missing. "
-                f"Run: pip install {' '.join(missing_webui)}"
-            )
-            _webui_module = None
-        else:
-            logger.info("Web UI module loaded.")
+        # Dependencies are auto-installed inside webui.start() — skip pre-check here
+        logger.info("Web UI module loaded.")
     except ImportError as _e:
         logger.warning(f"WEBUI_ENABLED=true but webui module not found: {_e}")
 
 _spotify_module = None
 if SPOTIFY_ENABLED:
     try:
-        import spotify_import as _spotify_module
+        import modules.spotify_import as _spotify_module
         missing_deps = _spotify_module.check_dependencies()
         if missing_deps:
             logger.warning(
-                "SPOTIFY_ENABLED=true but required packages are missing. "
-                f"Run: pip install {' '.join(missing_deps)}"
+                "Spotify module: required packages missing — "
+                f"run: pip install {' '.join(missing_deps)}"
             )
             _spotify_module = None
         else:
-            logger.info("Spotify import module loaded.")
+            logger.info("Spotify import module loaded (hybrid scraper).")
     except ImportError as _e:
-        logger.warning(f"SPOTIFY_ENABLED=true but spotify_import.py not found: {_e}")
+        # Also try root-level for backwards compatibility
+        try:
+            import spotify_import as _spotify_module
+            logger.info("Spotify import module loaded (root fallback).")
+        except ImportError:
+            logger.warning(f"SPOTIFY_ENABLED=true but spotify module not found: {_e}")
 
 _tv_module = None
 if TV_ENABLED:
     try:
-        import tv_stream as _tv_module
+        import modules.tv_stream as _tv_module
         missing_tv = _tv_module.check_dependencies()
         if missing_tv:
             logger.warning(
@@ -164,18 +217,30 @@ if TV_ENABLED:
             _tv_module = None
         else:
             logger.info("TV streaming module loaded.")
-    except ImportError as _e:
-        logger.warning(f"TV_ENABLED=true but tv_stream.py not found: {_e}")
+    except ImportError:
+        try:
+            import tv_stream as _tv_module
+            logger.info("TV streaming module loaded (root fallback).")
+        except ImportError as _e:
+            logger.warning(f"TV_ENABLED=true but tv_stream module not found: {_e}")
 
 QUOTE_GUESSER_ENABLED = env_flag("QUOTE_GUESSER_ENABLED", False)
 _guesser = None
 if QUOTE_GUESSER_ENABLED and WEBUI_ENABLED and _webui_module is not None:
     try:
-        import quote_guesser as _quote_guesser_mod
-        _guesser = _quote_guesser_mod.QuoteGuesser(BASE_DIR)
-        logger.info("Quote guesser module loaded.")
-    except Exception as _e:
-        logger.warning(f"QUOTE_GUESSER_ENABLED=true but guesser init failed: {_e}")
+        import modules.quote_guesser as _quote_guesser_mod
+    except ImportError:
+        try:
+            import quote_guesser as _quote_guesser_mod
+        except ImportError as _e:
+            _quote_guesser_mod = None
+            logger.warning(f"QUOTE_GUESSER_ENABLED=true but guesser module not found: {_e}")
+    if _quote_guesser_mod is not None:
+        try:
+            _guesser = _quote_guesser_mod.QuoteGuesser(BASE_DIR)
+            logger.info("Quote guesser module loaded.")
+        except Exception as _e:
+            logger.warning(f"QUOTE_GUESSER_ENABLED=true but guesser init failed: {_e}")
 
 ALLOW_ADMIN_ROLE_NAME = env_flag("ALLOW_ADMIN_ROLE_NAME", False)
 MAX_PLAYLIST_TRACKS = env_int("MAX_PLAYLIST_TRACKS", 100)
@@ -7713,20 +7778,21 @@ async def webui_command(ctx):
         return
 
     webui_url = WEBUI_PUBLIC_URL or (
-        _webui_module.cloudflared_tunnel_url if _webui_module else None
+        getattr(_webui_module, "cloudflared_tunnel_url", None) if _webui_module else None
     )
     if not webui_url:
-        if _webui_module and getattr(_webui_module, "WEBUI_CLOUDFLARED_AUTO", False):
+        # cloudflared is starting up — tunnel URL not ready yet
+        if _webui_module and getattr(_webui_module, "WEBUI_CLOUDFLARED_AUTO", True):
             await ctx.response.send_message(
-                "The web UI is starting up — cloudflared tunnel URL not ready yet. "
-                "Wait a few seconds and try again.",
+                "The web UI is warming up — the Cloudflare tunnel URL is not ready yet. "
+                "This usually takes 5–15 seconds. Try `/webui` again in a moment.",
                 ephemeral=True,
             )
         else:
             await ctx.response.send_message(
-                "The web UI is running but `WEBUI_PUBLIC_URL` is not configured. "
-                "Set it in `.env` to the URL where the web UI is reachable, then restart.\n"
-                "Or set `WEBUI_CLOUDFLARED_AUTO=true` to have the bot start cloudflared automatically.",
+                "The web UI is running but no public URL is configured. "
+                "Set `WEBUI_PUBLIC_URL` in `.env`, or ensure cloudflared is installed and "
+                "`WEBUI_CLOUDFLARED_AUTO` is not set to false.",
                 ephemeral=True,
             )
         return

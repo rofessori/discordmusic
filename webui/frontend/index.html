@@ -323,6 +323,46 @@
     .guesser-result.ok  { background:rgba(74,222,128,.07); border:1px solid rgba(74,222,128,.22); color:var(--success); }
     .guesser-result.fail { background:rgba(255,77,109,.07); border:1px solid rgba(255,77,109,.22); color:var(--text-dim); }
     .guesser-leaderboard { background:var(--surface); border:1px solid var(--border); border-radius:var(--r); overflow:hidden; }
+
+    /* ── Unlimited guesser button ── */
+    .btn-unlimited {
+      width:30px; height:30px; border-radius:50%; border:1.5px solid var(--border);
+      background:transparent; color:var(--accent); font-size:15px; cursor:pointer;
+      display:flex; align-items:center; justify-content:center; transition:all .15s;
+      margin-right:4px; flex-shrink:0; font-weight:700;
+    }
+    .btn-unlimited:hover { background:var(--accent-dim); border-color:var(--accent); }
+
+    /* ── Unlimited guesser modal ── */
+    .unlimited-overlay {
+      position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:4000;
+      display:flex; align-items:center; justify-content:center;
+      backdrop-filter:blur(4px);
+    }
+    .unlimited-modal {
+      background:var(--panel); border:1px solid var(--border); border-radius:var(--rl);
+      width:min(480px,92vw); padding:24px; display:flex; flex-direction:column; gap:16px;
+      box-shadow:0 20px 60px rgba(0,0,0,.5);
+    }
+    .unlimited-header { display:flex; align-items:center; justify-content:space-between; }
+    .unlimited-title { font-family:var(--font-d); font-weight:700; font-size:15px; color:var(--text); }
+    .unlimited-badge { font-size:11px; background:var(--accent-dim); color:var(--accent); border:1px solid rgba(124,92,252,.3); border-radius:4px; padding:2px 7px; margin-left:8px; }
+    .unlimited-quote { background:var(--surface); border:1px solid var(--border); border-radius:var(--r); padding:20px; font-size:14px; line-height:1.7; color:var(--text); font-style:italic; position:relative; }
+    .unlimited-quote::before { content:'\201C'; position:absolute; top:-10px; left:8px; font-size:70px; color:var(--accent-dim); font-family:Georgia,serif; line-height:1; pointer-events:none; }
+    .unlimited-choices { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    .unlimited-choice { padding:10px 12px; background:var(--surface); border:1.5px solid var(--border); border-radius:var(--r); cursor:pointer; font-size:13px; font-weight:500; transition:all .15s; text-align:left; color:var(--text); }
+    .unlimited-choice:hover:not(:disabled) { border-color:var(--accent); background:var(--accent-dim); }
+    .unlimited-choice:disabled { cursor:not-allowed; opacity:.5; }
+    .unlimited-choice.correct { border-color:var(--success)!important; background:rgba(74,222,128,.1)!important; color:var(--success)!important; opacity:1!important; }
+    .unlimited-choice.wrong   { border-color:var(--danger)!important;  background:rgba(255,77,109,.06)!important; color:var(--danger)!important; text-decoration:line-through; opacity:1!important; }
+    .unlimited-result { padding:12px; border-radius:var(--r); text-align:center; font-size:13px; font-weight:600; }
+    .unlimited-result.ok   { background:rgba(74,222,128,.07); border:1px solid rgba(74,222,128,.22); color:var(--success); }
+    .unlimited-result.fail { background:rgba(255,77,109,.07); border:1px solid rgba(255,77,109,.22); color:var(--text-dim); }
+    .unlimited-actions { display:flex; gap:8px; justify-content:flex-end; }
+    .unlimited-tries-dots { display:flex; gap:5px; }
+    .unlimited-dot { width:9px; height:9px; border-radius:50%; background:var(--border); border:1.5px solid var(--border-h); transition:background .15s; }
+    .unlimited-dot.used { background:var(--accent); border-color:var(--accent); }
+    .unlimited-dot.wrong { background:var(--danger); border-color:var(--danger); }
     .lb-row { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid rgba(37,37,50,.6); font-size:13px; }
     .lb-row:last-child { border-bottom:none; }
     .lb-rank { font-family:var(--font-m); font-size:11px; color:var(--muted); min-width:24px; }
@@ -458,9 +498,11 @@ function makeApi(token) {
     status:           ()          => req("GET",    "/api/status"),
     logs:             (level, src) => req("GET",   `/api/logs?level=${level}${src ? `&source=${encodeURIComponent(src)}` : ""}`),
     // Quote guesser
-    guesserToday:     ()          => req("GET",    "/api/guesser/today"),
-    guesserGuess:     choice      => req("POST",   "/api/guesser/guess", { choice }),
-    guesserLeaderboard: ()        => req("GET",    "/api/guesser/leaderboard"),
+    guesserToday:       ()                      => req("GET",  "/api/guesser/today"),
+    guesserGuess:       choice                  => req("POST", "/api/guesser/guess", { choice }),
+    guesserLeaderboard: ()                      => req("GET",  "/api/guesser/leaderboard"),
+    guesserUnlimitedStart: ()                   => req("POST", "/api/guesser/unlimited/start"),
+    guesserUnlimitedGuess: (session_id, choice) => req("POST", "/api/guesser/unlimited/guess", { session_id, choice }),
     // Admin extras
     adminConfig:      ()          => req("GET",    "/api/admin/config"),
     adminAudit:       ()          => req("GET",    "/api/admin/audit"),
@@ -1789,8 +1831,9 @@ function App() {
   const [playlists, setPlaylists] = useState([]);
   const [selected, setSelected] = useState(null);
   const [np, setNp]             = useState(null);   // now-playing
-  const [showNewPl, setShowNewPl] = useState(false);
-  const [toasts, addToast]      = useToasts();
+  const [showNewPl, setShowNewPl]         = useState(false);
+  const [showUnlimited, setShowUnlimited] = useState(false);
+  const [toasts, addToast]               = useToasts();
 
   const api = useMemo(() => makeApi(token), [token]);
 
@@ -1926,6 +1969,13 @@ function App() {
 
         <div className="topbar-right">
           {me?.username && <span className="topbar-user">{me.username}</span>}
+          {isAdmin && (
+            <button
+              className="btn-unlimited"
+              title="Unlimited Quote Mode (admin)"
+              onClick={() => setShowUnlimited(true)}
+            >∞</button>
+          )}
           <button className="btn-logout" onClick={() => {
             sessionStorage.removeItem("mbtoken"); setToken(""); setAuthState("none");
           }}>
@@ -2091,7 +2141,120 @@ function App() {
           toast={addToast}
         />
       )}
+      {showUnlimited && (
+        <UnlimitedGuesserModal api={safe} toast={addToast} onClose={() => setShowUnlimited(false)} />
+      )}
 
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// UnlimitedGuesserModal — admin-only random quote challenge
+// ---------------------------------------------------------------------------
+function UnlimitedGuesserModal({ api, toast, onClose }) {
+  const [challenge, setChallenge] = useState(null);
+  const [wrongGuesses, setWrong]  = useState([]);
+  const [result, setResult]       = useState(null);   // null | {correct, correct_author, done}
+  const [loading, setLoading]     = useState(false);
+
+  async function startRound() {
+    setLoading(true);
+    setResult(null);
+    setWrong([]);
+    try {
+      const ch = await api.guesserUnlimitedStart();
+      setChallenge(ch);
+    } catch (e) {
+      toast("error", e?.detail || "Could not start unlimited round");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function doGuess(choice) {
+    if (!challenge || result?.done) return;
+    try {
+      const r = await api.guesserUnlimitedGuess(challenge.session_id, choice);
+      if (!r.correct) setWrong(w => [...w, choice]);
+      if (r.done) setResult(r);
+    } catch (e) {
+      toast("error", e?.detail || "Could not submit guess");
+    }
+  }
+
+  // Auto-start on open
+  React.useEffect(() => { startRound(); }, []);
+
+  const done = result?.done;
+
+  return (
+    <div className="unlimited-overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="unlimited-modal">
+        <div className="unlimited-header">
+          <div style={{display:"flex",alignItems:"center",gap:8}}>
+            <span className="unlimited-title">Unlimited Mode</span>
+            <span className="unlimited-badge">Admin only</span>
+          </div>
+          <button className="btn-icon" onClick={onClose} title="Close" style={{color:"var(--muted)",fontSize:18,background:"none",border:"none",cursor:"pointer",lineHeight:1}}>✕</button>
+        </div>
+
+        {loading && <div style={{color:"var(--muted)",fontSize:13,textAlign:"center",padding:"20px 0"}}>Loading…</div>}
+
+        {!loading && challenge && (
+          <>
+            <div className="unlimited-quote">{challenge.text}</div>
+
+            {done && result.correct_author && (
+              <div style={{fontSize:12,color:"var(--text-dim)",textAlign:"center",marginTop:-8}}>
+                — {result.correct_author}
+              </div>
+            )}
+
+            <div className="unlimited-choices">
+              {challenge.choices.map(c => {
+                const isWrong   = wrongGuesses.includes(c);
+                const isCorrect = done && c === result.correct_author;
+                return (
+                  <button
+                    key={c}
+                    className={`unlimited-choice${isCorrect ? " correct" : isWrong ? " wrong" : ""}`}
+                    onClick={() => doGuess(c)}
+                    disabled={done || isWrong}
+                  >{c}</button>
+                );
+              })}
+            </div>
+
+            {/* Attempt dots */}
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              <div className="unlimited-tries-dots">
+                {[0,1,2].map(i => (
+                  <div key={i} className={
+                    `unlimited-dot${i < wrongGuesses.length ? " wrong" : (done && result.correct && i === wrongGuesses.length ? " used" : "")}`
+                  } />
+                ))}
+              </div>
+              {done && (
+                <div className={`unlimited-result ${result.correct ? "ok" : "fail"}`} style={{flex:1,marginLeft:12,padding:"6px 12px"}}>
+                  {result.correct ? "Correct! 🎉" : `Answer: ${result.correct_author}`}
+                </div>
+              )}
+            </div>
+
+            <div className="unlimited-actions">
+              <button className="btn-secondary" onClick={startRound} disabled={loading}>New Round</button>
+              <button className="btn-secondary" onClick={onClose}>Close</button>
+            </div>
+          </>
+        )}
+
+        {!loading && !challenge && (
+          <div style={{color:"var(--muted)",fontSize:13,textAlign:"center",padding:"12px 0"}}>
+            No attributed quotes available.
+          </div>
+        )}
+      </div>
     </div>
   );
 }
