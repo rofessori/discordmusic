@@ -103,6 +103,44 @@ class BotState:
         except Exception:
             return None
 
+    @property
+    def volume_percent(self) -> int:
+        try:
+            return int(round(float(getattr(self._client, "volume", 0.5)) * 100))
+        except Exception:
+            return 0
+
+    @property
+    def is_repeat(self) -> bool:
+        return bool(getattr(self._client, "repeat", False))
+
+    @property
+    def queue_length(self) -> int:
+        return len(self._queue)
+
+    @property
+    def session_count(self) -> int:
+        """Active WebUI sessions (requires a store reference; 0 if unavailable)."""
+        store = getattr(self._client, "webui_session_store", None)
+        if store is None:
+            return 0
+        try:
+            return store.active_count()
+        except Exception:
+            return 0
+
+    def get_config_snapshot(self) -> dict:
+        """Read-only runtime settings for admin status display."""
+        return {
+            "volume_percent":  self.volume_percent,
+            "is_repeat":       self.is_repeat,
+            "is_playing":      self.is_playing,
+            "is_paused":       self.is_paused,
+            "queue_length":    self.queue_length,
+            "uptime_seconds":  round(self.uptime_seconds, 1),
+            "session_count":   self.session_count,
+        }
+
     def disk_usage(self, base_dir: str) -> dict:
         result = {}
         for name in ("cache", "playlists"):
@@ -146,10 +184,13 @@ class BotState:
         self._queue.append(track)
 
 
-async def start(*, playlists_dir: str, bot_state: "BotState", sessions):
+async def start(*, playlists_dir: str, bot_state: "BotState", sessions,
+                guesser=None):
     """
     Start the FastAPI server as a background asyncio task.
     Returns immediately; the server runs concurrently with the bot.
+
+    guesser: optional QuoteGuesser instance (from quote_guesser.py)
     """
     missing = check_dependencies()
     if missing:
@@ -178,6 +219,7 @@ async def start(*, playlists_dir: str, bot_state: "BotState", sessions):
         bot_state=bot_state,
         secret_key=WEBUI_SECRET_KEY,
         sessions=sessions,
+        guesser=guesser,
     )
 
     config = uvicorn.Config(

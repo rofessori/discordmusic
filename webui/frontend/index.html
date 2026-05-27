@@ -303,6 +303,49 @@
     .sp-check { flex-shrink:0; accent-color:var(--accent); width:14px; height:14px; cursor:pointer; }
     .sp-progress { padding:20px; text-align:center; color:var(--muted); }
 
+    /* ── Quote guesser ── */
+    .guesser-wrap { display:flex; flex-direction:column; gap:20px; padding:20px; overflow-y:auto; height:100%; }
+    .guesser-quote-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--rl); padding:28px; position:relative; overflow:hidden; }
+    .guesser-quote-card::before { content:'\201C'; position:absolute; top:-12px; left:10px; font-size:100px; color:var(--accent-dim); font-family:Georgia,serif; line-height:1; pointer-events:none; }
+    .guesser-quote-text { font-size:15px; line-height:1.7; color:var(--text); position:relative; }
+    .guesser-reveal { margin-top:14px; font-size:13px; color:var(--text-dim); font-style:italic; border-top:1px solid var(--border); padding-top:10px; }
+    .guesser-choices { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .guesser-choice { padding:12px 14px; background:var(--surface); border:1.5px solid var(--border); border-radius:var(--r); cursor:pointer; font-size:13px; font-weight:500; transition:all .15s; text-align:left; color:var(--text); }
+    .guesser-choice:hover:not(:disabled) { border-color:var(--accent); background:var(--accent-dim); color:var(--text); }
+    .guesser-choice:disabled { cursor:not-allowed; opacity:.55; }
+    .guesser-choice.correct { border-color:var(--success) !important; background:rgba(74,222,128,.1) !important; color:var(--success) !important; opacity:1 !important; }
+    .guesser-choice.wrong { border-color:var(--danger) !important; background:rgba(255,77,109,.06) !important; color:var(--danger) !important; text-decoration:line-through; opacity:1 !important; }
+    .guesser-tries { display:flex; align-items:center; gap:8px; }
+    .try-dot { width:11px; height:11px; border-radius:50%; border:1.5px solid var(--border); flex-shrink:0; transition:all .2s; }
+    .try-dot.wrong  { background:var(--danger); border-color:var(--danger); box-shadow:0 0 6px rgba(255,77,109,.4); }
+    .try-dot.correct { background:var(--success); border-color:var(--success); box-shadow:0 0 6px rgba(74,222,128,.4); }
+    .guesser-result { padding:16px; border-radius:var(--r); text-align:center; font-size:14px; font-weight:600; }
+    .guesser-result.ok  { background:rgba(74,222,128,.07); border:1px solid rgba(74,222,128,.22); color:var(--success); }
+    .guesser-result.fail { background:rgba(255,77,109,.07); border:1px solid rgba(255,77,109,.22); color:var(--text-dim); }
+    .guesser-leaderboard { background:var(--surface); border:1px solid var(--border); border-radius:var(--r); overflow:hidden; }
+    .lb-row { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid rgba(37,37,50,.6); font-size:13px; }
+    .lb-row:last-child { border-bottom:none; }
+    .lb-rank { font-family:var(--font-m); font-size:11px; color:var(--muted); min-width:24px; }
+    .lb-name { flex:1; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .lb-score { font-family:var(--font-m); font-size:13px; color:var(--accent); font-weight:700; min-width:52px; text-align:right; }
+    .lb-games { font-size:11px; color:var(--muted); min-width:44px; text-align:right; }
+
+    /* ── Admin audit / users panels ── */
+    .audit-list { flex:1; overflow-y:auto; font-family:var(--font-m); font-size:11px; padding:10px 16px; }
+    .audit-row { padding:5px 0; border-bottom:1px solid rgba(37,37,50,.5); display:flex; gap:10px; align-items:baseline; }
+    .audit-ts { color:var(--muted); flex-shrink:0; min-width:80px; }
+    .audit-action { color:var(--accent); flex-shrink:0; min-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .audit-actor { color:var(--text-dim); flex-shrink:0; min-width:80px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .audit-detail { color:var(--muted); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .users-list { flex:1; overflow-y:auto; padding:10px 16px; }
+    .user-row { display:flex; align-items:center; gap:10px; padding:9px 0; border-bottom:1px solid rgba(37,37,50,.5); font-size:13px; }
+    .user-row:last-child { border-bottom:none; }
+    .user-name { flex:1; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .user-id { font-family:var(--font-m); font-size:10px; color:var(--muted); flex-shrink:0; }
+    .user-groups { display:flex; gap:4px; flex-wrap:wrap; flex-shrink:0; max-width:220px; justify-content:flex-end; }
+    .restriction-pill { font-size:10px; font-family:var(--font-m); background:rgba(255,77,109,.08); border:1px solid rgba(255,77,109,.18); color:var(--danger); padding:1px 6px; border-radius:4px; }
+    .config-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px; padding:18px; }
+
     /* ── Gate screens ── */
     .gate-wrap { display:flex; align-items:center; justify-content:center; height:100%; background:radial-gradient(ellipse 60% 40% at 50% -5%,rgba(124,92,252,.1) 0%,transparent 70%),var(--bg); }
     .gate-card { background:var(--panel); border:1px solid var(--border); border-radius:var(--rl); padding:44px 36px; width:380px; display:flex; flex-direction:column; gap:20px; position:relative; overflow:hidden; text-align:center; }
@@ -394,7 +437,16 @@ function makeApi(token) {
     favAddToPlaylist: (pid, idxs) => req("POST",   `/api/favorites/add-to-playlist/${pid}`, { indices: idxs }),
     spotifySearch:    url         => req("POST",   "/api/spotify/search", { url }),
     status:           ()          => req("GET",    "/api/status"),
-    logs:             level       => req("GET",    `/api/logs?level=${level}`),
+    logs:             (level, src) => req("GET",   `/api/logs?level=${level}${src ? `&source=${encodeURIComponent(src)}` : ""}`),
+    // Quote guesser
+    guesserToday:     ()          => req("GET",    "/api/guesser/today"),
+    guesserGuess:     choice      => req("POST",   "/api/guesser/guess", { choice }),
+    guesserLeaderboard: ()        => req("GET",    "/api/guesser/leaderboard"),
+    // Admin extras
+    adminConfig:      ()          => req("GET",    "/api/admin/config"),
+    adminAudit:       ()          => req("GET",    "/api/admin/audit"),
+    adminUsers:       ()          => req("GET",    "/api/admin/users"),
+    adminCacheClear:  ()          => req("POST",   "/api/admin/cache/clear"),
   };
 }
 
@@ -840,14 +892,19 @@ function QueuePanel({ api, toast }) {
   const [queue, setQueue] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try { setQueue(await api.queue()); }
     catch (ex) { toast(`Queue load failed: ${ex.message}`, "err"); }
     finally { setLoading(false); }
-  };
+  }, []);
 
-  useEffect(() => { load(); }, []);
+  // Auto-refresh queue every 8 seconds so additions from Discord show up
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 8000);
+    return () => clearInterval(id);
+  }, [load]);
 
   const addToQueue = async url => {
     try {
@@ -987,16 +1044,30 @@ function FavoritesPanel({ api, toast, playlists }) {
 // ── Admin: Status panel ───────────────────────────────────────────────────────
 function StatusPanel({ api, toast }) {
   const [data, setData] = useState(null);
+  const [cfg, setCfg] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [clearing, setClearing] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
-    try { setData(await api.status()); }
-    catch (ex) { toast(`Status load failed: ${ex.message}`, "err"); }
+    try {
+      const [s, c] = await Promise.all([api.status(), api.adminConfig()]);
+      setData(s); setCfg(c);
+    } catch (ex) { toast(`Status load failed: ${ex.message}`, "err"); }
     finally { setLoading(false); }
-  };
+  }, []);
 
-  useEffect(() => { load(); const id = setInterval(load, 15000); return () => clearInterval(id); }, []);
+  useEffect(() => { load(); const id = setInterval(load, 15000); return () => clearInterval(id); }, [load]);
+
+  const clearCache = async () => {
+    setClearing(true);
+    try {
+      const r = await api.adminCacheClear();
+      toast(`Cache sweep done: ${r.removed} zero-byte file(s) removed.`, "ok");
+      await load();
+    } catch (ex) { toast(`Cache clear failed: ${ex.message}`, "err"); }
+    finally { setClearing(false); }
+  };
 
   const fmtUptime = s => {
     if (!s) return "—";
@@ -1021,8 +1092,14 @@ function StatusPanel({ api, toast }) {
     <>
       <div className="panel-header">
         <div className="panel-title">Bot Status</div>
+        {loading && <span className="spinner" />}
         <button className="btn btn-sm" onClick={load}>↻</button>
+        <button className="btn btn-sm btn-danger" onClick={clearCache} disabled={clearing} title="Remove zero-byte files from cache">
+          {clearing ? <span className="spinner" /> : "🗑 Cache sweep"}
+        </button>
       </div>
+
+      <div style={{padding:"8px 18px 0",fontSize:11,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".07em"}}>Playback</div>
       <div className="status-grid">
         <div className="stat-card">
           <div className="stat-label">Status</div>
@@ -1040,6 +1117,24 @@ function StatusPanel({ api, toast }) {
           <div className="stat-label">Queue</div>
           <div className="stat-value">{data?.queue_length ?? "—"}<span className="stat-unit">tracks</span></div>
         </div>
+        <div className="stat-card">
+          <div className="stat-label">Volume</div>
+          <div className="stat-value">{cfg?.volume_percent ?? "—"}<span className="stat-unit">%</span></div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Repeat</div>
+          <div className="stat-value" style={{fontSize:14,color: cfg?.is_repeat ? "var(--accent)" : "var(--muted)"}}>
+            {cfg?.is_repeat ? "🔂 On" : "Off"}
+          </div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Web Sessions</div>
+          <div className="stat-value">{cfg?.session_count ?? "—"}</div>
+        </div>
+      </div>
+
+      <div style={{padding:"8px 18px 0",fontSize:11,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".07em"}}>System</div>
+      <div className="status-grid">
         <div className="stat-card">
           <div className="stat-label">Uptime</div>
           <div className="stat-value">{fmtUptime(data?.uptime_seconds)}</div>
@@ -1066,29 +1161,46 @@ function StatusPanel({ api, toast }) {
           <div className="stat-value" style={{fontSize:13}}>{fmtBytes(disk.playlists?.bytes)}</div>
           <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>{disk.playlists?.files ?? 0} files</div>
         </div>
+        <div className="stat-card">
+          <div className="stat-label">Guesser</div>
+          <div className="stat-value" style={{fontSize:13,color: cfg?.guesser_enabled ? "var(--success)" : "var(--muted)"}}>
+            {cfg?.guesser_enabled ? "Enabled" : "Disabled"}
+          </div>
+        </div>
       </div>
     </>
   );
 }
 
 // ── Admin: Logs panel ─────────────────────────────────────────────────────────
+const LOG_SOURCES = [
+  { label: "All", value: "" },
+  { label: "Guesser", value: "quote_guesser" },
+  { label: "WebUI", value: "webui" },
+  { label: "Bot", value: "__main__" },
+  { label: "yt-dlp", value: "yt_dlp" },
+];
+
 function LogsPanel({ api, toast }) {
   const [records, setRecords] = useState([]);
   const [level, setLevel] = useState("INFO");
+  const [source, setSource] = useState("");
   const [loading, setLoading] = useState(false);
-  const bottomRef = useRef(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api.logs(level);
+      const data = await api.logs(level, source);
       setRecords(data.records || []);
     } catch (ex) { toast(`Logs load failed: ${ex.message}`, "err"); }
     finally { setLoading(false); }
-  };
+  }, [level, source]);
 
-  useEffect(() => { load(); }, [level]);
-  useEffect(() => { const id = setInterval(load, 5000); return () => clearInterval(id); }, [level]);
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const id = setInterval(load, 5000);
+    return () => clearInterval(id);
+  }, [load]);
 
   const fmtTs = ts => new Date(ts * 1000).toLocaleTimeString();
 
@@ -1096,29 +1208,306 @@ function LogsPanel({ api, toast }) {
     <>
       <div className="panel-header">
         <div className="panel-title">Bot Logs</div>
-        <div className="log-toolbar" style={{padding:0,borderBottom:"none",background:"transparent",flexShrink:0}}>
-          <select className="log-select" value={level} onChange={e => setLevel(e.target.value)}>
+        <div className="log-toolbar" style={{padding:0,borderBottom:"none",background:"transparent",flexShrink:0,gap:6}}>
+          <select className="log-select" value={level} onChange={e => setLevel(e.target.value)}
+            title="Minimum log level">
             {["DEBUG","INFO","WARNING","ERROR","CRITICAL"].map(l => (
               <option key={l} value={l}>{l}</option>
+            ))}
+          </select>
+          <select className="log-select" value={source} onChange={e => setSource(e.target.value)}
+            title="Filter by source module">
+            {LOG_SOURCES.map(s => (
+              <option key={s.value} value={s.value}>{s.label}</option>
             ))}
           </select>
         </div>
         {loading && <span className="spinner" style={{marginLeft:4}} />}
         <button className="btn btn-sm" onClick={load}>↻</button>
+        <span style={{fontSize:11,color:"var(--muted)",marginLeft:"auto"}}>{records.length} records</span>
       </div>
       <div className="logs-wrap">
         {records.length === 0
-          ? <div style={{color:"var(--muted)",fontSize:12,padding:"20px 0"}}>No log records at this level.</div>
+          ? <div style={{color:"var(--muted)",fontSize:12,padding:"20px 0"}}>No log records at this level{source ? ` / source "${source}"` : ""}.</div>
           : records.slice().reverse().map((r, i) => (
             <div key={i} className="log-row">
               <span className="log-ts">{fmtTs(r.ts)}</span>
               <span className={`log-level ${r.level}`}>{r.level}</span>
-              <span className="log-msg">{r.msg}</span>
+              <span className="log-msg" title={r.name}>{r.msg}</span>
             </div>
           ))
         }
-        <div ref={bottomRef} />
       </div>
+    </>
+  );
+}
+
+// ── Quote Guesser panel ───────────────────────────────────────────────────────
+function QuoteGuesserPanel({ api, toast }) {
+  const [challenge, setChallenge] = useState(null);
+  const [lb, setLb] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [guessing, setGuessing] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [ch, board] = await Promise.all([api.guesserToday(), api.guesserLeaderboard()]);
+      setChallenge(ch);
+      setLb(board.entries || []);
+    } catch (ex) {
+      if (!ex.message.startsWith("AUTH")) toast(`Guesser unavailable: ${ex.message}`, "err");
+    } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const submitGuess = async choice => {
+    setGuessing(true);
+    try {
+      const r = await api.guesserGuess(choice);
+      // Reload to get fresh state + choices
+      const [ch, board] = await Promise.all([api.guesserToday(), api.guesserLeaderboard()]);
+      setChallenge(ch); setLb(board.entries || []);
+      if (r.correct) toast(`🎉 Correct! +${r.points_earned} points`, "ok");
+      else if (r.done) toast("No more tries. Better luck tomorrow!", "err");
+      else toast("Wrong — try again!", "err");
+    } catch (ex) {
+      toast(ex.message.startsWith("AUTH") ? "Session expired" : ex.message, "err");
+    } finally { setGuessing(false); }
+  };
+
+  if (loading) return <div className="empty"><span className="spinner" /></div>;
+  if (!challenge) return (
+    <div className="empty">
+      <div className="empty-icon">🎯</div>
+      <div className="empty-text">
+        Quote guesser not available.<br />
+        Set <code>QUOTE_GUESSER_ENABLED=true</code> and make sure quotes.txt has attributed quotes.
+      </div>
+    </div>
+  );
+
+  const state = challenge.state || {};
+  const done = state.done;
+  const solved = state.solved;
+  const triesUsed = state.tries_used || 0;
+  const wrongGuesses = state.wrong_guesses || [];
+  const today = new Date().toLocaleDateString("en-US", { weekday:"long", month:"long", day:"numeric" });
+
+  return (
+    <div className="guesser-wrap">
+      <div className="panel-header" style={{flexShrink:0}}>
+        <div className="panel-title">🎯 Daily Quote</div>
+        <span style={{fontSize:12,color:"var(--muted)"}}>{today}</span>
+        <button className="btn btn-sm" onClick={load} disabled={loading}>↻</button>
+      </div>
+
+      <div className="guesser-quote-card">
+        <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".1em",marginBottom:12}}>
+          Today's Quote
+        </div>
+        <div className="guesser-quote-text">{challenge.text}</div>
+        {done && (
+          <div className="guesser-reveal">— {challenge.correct_author}</div>
+        )}
+      </div>
+
+      {!done && (
+        <>
+          <div style={{fontSize:12,color:"var(--muted)",marginBottom:-8}}>Who said this?</div>
+          <div className="guesser-choices">
+            {(challenge.choices || []).map((c, i) => {
+              const isWrong = wrongGuesses.includes(c);
+              return (
+                <button
+                  key={i}
+                  className={`guesser-choice${isWrong ? " wrong" : ""}`}
+                  disabled={isWrong || guessing || done}
+                  onClick={() => submitGuess(c)}
+                >
+                  {c}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {done && (
+        <div className={`guesser-result ${solved ? "ok" : "fail"}`}>
+          {solved
+            ? <>🎉 Correct on try {triesUsed}! +{state.points_earned} points</>
+            : <>😞 Out of tries. The answer was above.</>
+          }
+        </div>
+      )}
+
+      <div className="guesser-tries">
+        <span style={{fontSize:12,color:"var(--muted)"}}>Tries:</span>
+        {[0,1,2].map(i => {
+          let cls = "try-dot";
+          if (i < triesUsed) {
+            cls += solved && i === triesUsed - 1 ? " correct" : " wrong";
+          }
+          return <div key={i} className={cls} />;
+        })}
+        {!done && (
+          <span style={{fontSize:12,color:"var(--muted)",marginLeft:6}}>
+            {3 - triesUsed} tr{3 - triesUsed === 1 ? "y" : "ies"} left
+          </span>
+        )}
+        {!done && triesUsed < 3 && (
+          <span style={{fontSize:12,color:"var(--accent)",marginLeft:"auto"}}>
+            {[9,6,3][triesUsed]}pts if correct
+          </span>
+        )}
+      </div>
+
+      <div>
+        <div style={{
+          fontSize:12, fontWeight:600, color:"var(--text-dim)",
+          marginBottom:10, display:"flex", alignItems:"center", gap:6
+        }}>
+          🏆 All-time leaderboard
+        </div>
+        {lb.length === 0
+          ? <div style={{fontSize:12,color:"var(--muted)"}}>No scores yet — be first!</div>
+          : <div className="guesser-leaderboard">
+              {lb.map((e, i) => (
+                <div key={e.user_id} className="lb-row">
+                  <span className="lb-rank">{i === 0 ? "👑" : `#${i + 1}`}</span>
+                  <span className="lb-name">{e.username}</span>
+                  <span className="lb-score">{e.total} pts</span>
+                  <span className="lb-games" title={`${e.solved} solved of ${e.games} played`}>
+                    {e.solved}/{e.games}
+                  </span>
+                </div>
+              ))}
+            </div>
+        }
+      </div>
+    </div>
+  );
+}
+
+// ── Admin: Audit log panel ────────────────────────────────────────────────────
+function AuditPanel({ api, toast }) {
+  const [events, setEvents] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.adminAudit();
+      setEvents((data.events || []).slice().reverse());
+      setTotal(data.total || 0);
+    } catch (ex) { toast(`Audit load failed: ${ex.message}`, "err"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); const id = setInterval(load, 30000); return () => clearInterval(id); }, [load]);
+
+  const fmtTs = ts => new Date(ts * 1000).toLocaleString();
+
+  return (
+    <>
+      <div className="panel-header">
+        <div className="panel-title">Audit Log</div>
+        <span className="pill">{events.length} of {total}</span>
+        <button className="btn btn-sm" onClick={load}>↻</button>
+      </div>
+      {loading && events.length === 0
+        ? <div className="empty"><span className="spinner" /></div>
+        : events.length === 0
+          ? <div className="empty"><div className="empty-text">No audit events yet.</div></div>
+          : <div className="audit-list">
+              {events.map((e, i) => (
+                <div key={i} className="audit-row">
+                  <span className="audit-ts">{fmtTs(e.timestamp)}</span>
+                  <span className="audit-action">{e.action}</span>
+                  <span className="audit-actor">{e.actor_discord_name || "—"}</span>
+                  <span className="audit-detail" title={JSON.stringify(e.details)}>
+                    {Object.entries(e.details || {}).slice(0,3).map(([k,v]) => `${k}=${String(v).slice(0,24)}`).join(" ")}
+                  </span>
+                </div>
+              ))}
+            </div>
+      }
+    </>
+  );
+}
+
+// ── Admin: Users panel ────────────────────────────────────────────────────────
+function UsersPanel({ api, toast }) {
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [note, setNote] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.adminUsers();
+      setUsers(data.users || []);
+      setNote(data.note || "");
+    } catch (ex) { toast(`Users load failed: ${ex.message}`, "err"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const withRestrictions = users.filter(u => u.groups?.length > 0);
+  const normal = users.filter(u => !u.groups?.length);
+
+  return (
+    <>
+      <div className="panel-header">
+        <div className="panel-title">User Permissions</div>
+        <span className="pill">{users.length} users</span>
+        <button className="btn btn-sm" onClick={load}>↻</button>
+      </div>
+      {loading
+        ? <div className="empty"><span className="spinner" /></div>
+        : note
+          ? <div className="empty"><div className="empty-text">{note}</div></div>
+          : <div className="users-list">
+              {withRestrictions.length > 0 && (
+                <>
+                  <div style={{fontSize:11,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".07em",marginBottom:8}}>
+                    With restrictions
+                  </div>
+                  {withRestrictions.map(u => (
+                    <div key={u.user_id} className="user-row">
+                      <span className="user-name">{u.username}</span>
+                      <span className="user-id">{u.user_id}</span>
+                      <div className="user-groups">
+                        {u.groups.map(g => <span key={g} className="restriction-pill">{g}</span>)}
+                      </div>
+                    </div>
+                  ))}
+                  <div style={{margin:"12px 0 8px",borderBottom:"1px solid var(--border)"}} />
+                </>
+              )}
+              {normal.length > 0 && (
+                <>
+                  <div style={{fontSize:11,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".07em",marginBottom:8}}>
+                    Normal users
+                  </div>
+                  {normal.map(u => (
+                    <div key={u.user_id} className="user-row">
+                      <span className="user-name">{u.username}</span>
+                      <span className="user-id">{u.user_id}</span>
+                      <span className="pill" style={{fontSize:11}}>no restrictions</span>
+                    </div>
+                  ))}
+                </>
+              )}
+              {users.length === 0 && (
+                <div className="empty"><div className="empty-text">No user permission records found.</div></div>
+              )}
+            </div>
+      }
     </>
   );
 }
@@ -1336,6 +1725,16 @@ function App() {
               <span className="sidebar-name">Queue</span>
             </div>
 
+            <div className="sidebar-divider" />
+            <div className="sidebar-section"><span>Fun</span></div>
+            <div
+              className={`sidebar-item${selected === "guesser" ? " active" : ""}`}
+              onClick={() => setSelected("guesser")}
+            >
+              <span className="sidebar-icon">🎯</span>
+              <span className="sidebar-name">Daily Quote</span>
+            </div>
+
             {isAdmin && <>
               <div className="sidebar-divider" />
               <div className="sidebar-section"><span>Admin</span></div>
@@ -1352,6 +1751,20 @@ function App() {
               >
                 <span className="sidebar-icon">≡</span>
                 <span className="sidebar-name">Logs</span>
+              </div>
+              <div
+                className={`sidebar-item${selected === "audit" ? " active" : ""}`}
+                onClick={() => setSelected("audit")}
+              >
+                <span className="sidebar-icon">📋</span>
+                <span className="sidebar-name">Audit Log</span>
+              </div>
+              <div
+                className={`sidebar-item${selected === "users" ? " active" : ""}`}
+                onClick={() => setSelected("users")}
+              >
+                <span className="sidebar-icon">👥</span>
+                <span className="sidebar-name">Users</span>
               </div>
             </>}
 
@@ -1370,16 +1783,17 @@ function App() {
           {selected === null && (
             <div className="splash">
               <span className="splash-arrow">←</span>
-              <span className="splash-text">Select a playlist to edit it.</span>
+              <span className="splash-text">Select a playlist or section.</span>
             </div>
           )}
-          {selected === "queue" && <QueuePanel api={safe} toast={addToast} />}
-          {selected === "favorites" && (
-            <FavoritesPanel api={safe} toast={addToast} playlists={playlists} />
-          )}
-          {selected === "status" && isAdmin && <StatusPanel api={safe} toast={addToast} />}
-          {selected === "logs"   && isAdmin && <LogsPanel   api={safe} toast={addToast} />}
-          {selected && !["queue","favorites","status","logs"].includes(selected) && (
+          {selected === "queue"    && <QueuePanel api={safe} toast={addToast} />}
+          {selected === "favorites" && <FavoritesPanel api={safe} toast={addToast} playlists={playlists} />}
+          {selected === "guesser"  && <QuoteGuesserPanel api={safe} toast={addToast} me={me} />}
+          {selected === "status"   && isAdmin && <StatusPanel api={safe} toast={addToast} />}
+          {selected === "logs"     && isAdmin && <LogsPanel   api={safe} toast={addToast} />}
+          {selected === "audit"    && isAdmin && <AuditPanel  api={safe} toast={addToast} />}
+          {selected === "users"    && isAdmin && <UsersPanel  api={safe} toast={addToast} />}
+          {selected && !["queue","favorites","guesser","status","logs","audit","users"].includes(selected) && (
             <PlaylistEditor
               key={selected}
               playlistId={selected}

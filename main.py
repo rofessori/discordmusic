@@ -166,6 +166,16 @@ if TV_ENABLED:
     except ImportError as _e:
         logger.warning(f"TV_ENABLED=true but tv_stream.py not found: {_e}")
 
+QUOTE_GUESSER_ENABLED = env_flag("QUOTE_GUESSER_ENABLED", False)
+_guesser = None
+if QUOTE_GUESSER_ENABLED and WEBUI_ENABLED and _webui_module is not None:
+    try:
+        import quote_guesser as _quote_guesser_mod
+        _guesser = _quote_guesser_mod.QuoteGuesser(BASE_DIR)
+        logger.info("Quote guesser module loaded.")
+    except Exception as _e:
+        logger.warning(f"QUOTE_GUESSER_ENABLED=true but guesser init failed: {_e}")
+
 ALLOW_ADMIN_ROLE_NAME = env_flag("ALLOW_ADMIN_ROLE_NAME", False)
 MAX_PLAYLIST_TRACKS = env_int("MAX_PLAYLIST_TRACKS", 100)
 MAX_URLS_PER_MESSAGE = env_int("MAX_URLS_PER_MESSAGE", 10)
@@ -1066,6 +1076,11 @@ def run_startup_diagnostics() -> StartupReport:
     if CLEANED_DOWNLOADS:
         report.notes.append(f"Pruned {CLEANED_DOWNLOADS} expired download(s) on startup.")
 
+    if QUOTE_GUESSER_ENABLED and _guesser is not None:
+        report.notes.append("Quote guesser enabled (daily challenge available in WebUI).")
+    elif QUOTE_GUESSER_ENABLED and _guesser is None:
+        report.warnings.append("QUOTE_GUESSER_ENABLED=true but guesser failed to load.")
+
     return report
 
 def is_user_admin(user) -> bool:
@@ -1233,7 +1248,14 @@ def playlist_cache_modes_order() -> list:
 
 def set_verbose_logging(enabled: bool):
     client.log_verbose = bool(enabled)
-    logger.setLevel(logging.DEBUG if client.log_verbose else logging.INFO)
+    level = logging.DEBUG if client.log_verbose else logging.INFO
+    logger.setLevel(level)
+    # Also update root so webui/guesser/other module DEBUG records are captured
+    logging.getLogger().setLevel(level)
+    logger.debug(
+        f"Verbose logging {'enabled' if enabled else 'disabled'} "
+        f"(root logger level={logging.getLevelName(level)})"
+    )
 
 def config_panel_message() -> str:
     policy = favorites_cache_policy()
@@ -2431,6 +2453,10 @@ async def perform_skip_action() -> str:
         return "TV is playing. Use `/tv stop` first."
     voice = active_voice_client()
     if voice and voice.is_connected() and (voice.is_playing() or voice.is_paused()):
+        logger.debug(
+            f"skip: stopping voice client is_playing={voice.is_playing()} "
+            f"is_paused={voice.is_paused()} queue_len={len(queue)}"
+        )
         voice.stop()
         logger.info("Track skipped.")
         return "Skipped the current track."
@@ -5730,6 +5756,10 @@ async def download_youtube_to_cache(
     playlist: bool = False,
     debug_report: Optional[DebugPlaybackMessage] = None,
 ) -> tuple:
+    logger.debug(
+        f"download_youtube_to_cache: url={video_url[:80]} "
+        f"cache_key={cache_key} playlist={playlist}"
+    )
     prefix = "plst-" if playlist else ""
     temp_token = secrets.token_hex(4)
     cache_bytes_before = cache_total_bytes()
@@ -6450,6 +6480,11 @@ async def enqueue_track_with_playlist_prompt(ctx, track: dict, command_name: str
         title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
         await ctx.followup.send(f"Added to queue: {title} ({track.get('id', '')})")
         logger.info(f"Track enqueued: {track.get('title')} ({track.get('id')})")
+        logger.debug(
+            f"enqueue: queue_len={len(queue)} "
+            f"track_id={track.get('id')} "
+            f"user={getattr(getattr(ctx, 'user', None), 'id', '?')}"
+        )
 
 def youtube_playlist_queue_message(tracks: list, *, action: str) -> str:
     playlist_name = discord.utils.escape_markdown(str(tracks[0].get("playlist_name") or "YouTube playlist"))
@@ -7319,6 +7354,7 @@ async def on_ready():
             playlists_dir=PLAYLISTS_DIR,
             bot_state=bot_state,
             sessions=client.webui_session_store,
+            guesser=_guesser,
         )
 
         async def _webui_session_sweeper():
