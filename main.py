@@ -18,6 +18,7 @@ import shutil
 import sys
 import math
 import importlib.util
+import random
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -165,6 +166,16 @@ if TV_ENABLED:
             logger.info("TV streaming module loaded.")
     except ImportError as _e:
         logger.warning(f"TV_ENABLED=true but tv_stream.py not found: {_e}")
+
+QUOTE_GUESSER_ENABLED = env_flag("QUOTE_GUESSER_ENABLED", False)
+_guesser = None
+if QUOTE_GUESSER_ENABLED and WEBUI_ENABLED and _webui_module is not None:
+    try:
+        import quote_guesser as _quote_guesser_mod
+        _guesser = _quote_guesser_mod.QuoteGuesser(BASE_DIR)
+        logger.info("Quote guesser module loaded.")
+    except Exception as _e:
+        logger.warning(f"QUOTE_GUESSER_ENABLED=true but guesser init failed: {_e}")
 
 ALLOW_ADMIN_ROLE_NAME = env_flag("ALLOW_ADMIN_ROLE_NAME", False)
 MAX_PLAYLIST_TRACKS = env_int("MAX_PLAYLIST_TRACKS", 100)
@@ -1066,6 +1077,11 @@ def run_startup_diagnostics() -> StartupReport:
     if CLEANED_DOWNLOADS:
         report.notes.append(f"Pruned {CLEANED_DOWNLOADS} expired download(s) on startup.")
 
+    if QUOTE_GUESSER_ENABLED and _guesser is not None:
+        report.notes.append("Quote guesser enabled (daily challenge available in WebUI).")
+    elif QUOTE_GUESSER_ENABLED and _guesser is None:
+        report.warnings.append("QUOTE_GUESSER_ENABLED=true but guesser failed to load.")
+
     return report
 
 def is_user_admin(user) -> bool:
@@ -1233,7 +1249,14 @@ def playlist_cache_modes_order() -> list:
 
 def set_verbose_logging(enabled: bool):
     client.log_verbose = bool(enabled)
-    logger.setLevel(logging.DEBUG if client.log_verbose else logging.INFO)
+    level = logging.DEBUG if client.log_verbose else logging.INFO
+    logger.setLevel(level)
+    # Also update root so webui/guesser/other module DEBUG records are captured
+    logging.getLogger().setLevel(level)
+    logger.debug(
+        f"Verbose logging {'enabled' if enabled else 'disabled'} "
+        f"(root logger level={logging.getLevelName(level)})"
+    )
 
 def config_panel_message() -> str:
     policy = favorites_cache_policy()
@@ -2431,6 +2454,10 @@ async def perform_skip_action() -> str:
         return "TV is playing. Use `/tv stop` first."
     voice = active_voice_client()
     if voice and voice.is_connected() and (voice.is_playing() or voice.is_paused()):
+        logger.debug(
+            f"skip: stopping voice client is_playing={voice.is_playing()} "
+            f"is_paused={voice.is_paused()} queue_len={len(queue)}"
+        )
         voice.stop()
         logger.info("Track skipped.")
         return "Skipped the current track."
@@ -3871,9 +3898,13 @@ def favorites_status_message(user) -> str:
 def playlist_to_queue_tracks(playlist: dict, *, block_id: Optional[str] = None) -> list:
     tracks = playlist.get("tracks", [])
     block_id = block_id or generate_playlist_id()
-    total = len(tracks)
+    active_tracks = [t for t in tracks if not t.get("admin_disabled")]
+    skipped = len(tracks) - len(active_tracks)
+    if skipped:
+        logger.debug(f"[playlist_to_queue_tracks] skipped {skipped} admin-disabled track(s) in '{playlist.get('name')}'")
+    total = len(active_tracks)
     queue_tracks = []
-    for index, track in enumerate(tracks, start=1):
+    for index, track in enumerate(active_tracks, start=1):
         normalize_playlist_track_cache_fields(track)
         queue_track = {
             "id": str(track.get("id") or ""),
@@ -5730,6 +5761,10 @@ async def download_youtube_to_cache(
     playlist: bool = False,
     debug_report: Optional[DebugPlaybackMessage] = None,
 ) -> tuple:
+    logger.debug(
+        f"download_youtube_to_cache: url={video_url[:80]} "
+        f"cache_key={cache_key} playlist={playlist}"
+    )
     prefix = "plst-" if playlist else ""
     temp_token = secrets.token_hex(4)
     cache_bytes_before = cache_total_bytes()
@@ -6450,6 +6485,11 @@ async def enqueue_track_with_playlist_prompt(ctx, track: dict, command_name: str
         title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
         await ctx.followup.send(f"Added to queue: {title} ({track.get('id', '')})")
         logger.info(f"Track enqueued: {track.get('title')} ({track.get('id')})")
+        logger.debug(
+            f"enqueue: queue_len={len(queue)} "
+            f"track_id={track.get('id')} "
+            f"user={getattr(getattr(ctx, 'user', None), 'id', '?')}"
+        )
 
 def youtube_playlist_queue_message(tracks: list, *, action: str) -> str:
     playlist_name = discord.utils.escape_markdown(str(tracks[0].get("playlist_name") or "YouTube playlist"))
@@ -6713,6 +6753,10 @@ def schedule_playlist_cache_warmup(ctx, playlist: dict, tracks: list, command_na
     return True
 
 async def play_playlist_now(ctx, playlist: dict, command_name: str):
+    if playlist.get("admin_disabled") and not is_user_admin(ctx.user):
+        await ctx.followup.send("That playlist has been disabled by an admin.", ephemeral=True)
+        logger.info(f"[play_playlist_now] blocked admin-disabled playlist '{playlist.get('name')}' for user {user_display(ctx.user)}")
+        return
     tracks = playlist_to_queue_tracks(playlist)
     for track in tracks:
         track["requested_by_user_id"] = user_id_value(ctx.user)
@@ -7319,6 +7363,7 @@ async def on_ready():
             playlists_dir=PLAYLISTS_DIR,
             bot_state=bot_state,
             sessions=client.webui_session_store,
+            guesser=_guesser,
         )
 
         async def _webui_session_sweeper():
@@ -7667,12 +7712,23 @@ async def webui_command(ctx):
         )
         return
 
-    if not WEBUI_PUBLIC_URL:
-        await ctx.response.send_message(
-            "The web UI is running but `WEBUI_PUBLIC_URL` is not configured. "
-            "Set it in `.env` to the URL where the web UI is reachable, then restart.",
-            ephemeral=True,
-        )
+    webui_url = WEBUI_PUBLIC_URL or (
+        _webui_module.cloudflared_tunnel_url if _webui_module else None
+    )
+    if not webui_url:
+        if _webui_module and getattr(_webui_module, "WEBUI_CLOUDFLARED_AUTO", False):
+            await ctx.response.send_message(
+                "The web UI is starting up — cloudflared tunnel URL not ready yet. "
+                "Wait a few seconds and try again.",
+                ephemeral=True,
+            )
+        else:
+            await ctx.response.send_message(
+                "The web UI is running but `WEBUI_PUBLIC_URL` is not configured. "
+                "Set it in `.env` to the URL where the web UI is reachable, then restart.\n"
+                "Or set `WEBUI_CLOUDFLARED_AUTO=true` to have the bot start cloudflared automatically.",
+                ephemeral=True,
+            )
         return
 
     if client.webui_session_store is None:
@@ -7688,7 +7744,7 @@ async def webui_command(ctx):
         is_admin=is_user_admin(ctx.user),
     )
 
-    link = f"{WEBUI_PUBLIC_URL}/?s={session.token}"
+    link = f"{webui_url}/?s={session.token}"
 
     await ctx.response.send_message(
         f"**Playlist Editor**\n"
@@ -8512,6 +8568,7 @@ async def playlist_list(ctx):
     record_command(ctx)
     pages = playlist_list_pages_for(ctx.user)
     await send_paged_playlist_message(ctx, pages)
+    await _maybe_advertise_webui(ctx)
 
 @app_commands.describe(name="Playlist name", visibility="private, public, current, currentqueue, or jono")
 @app_commands.choices(visibility=[
@@ -8594,6 +8651,7 @@ async def playlist_play(ctx, playlist: str):
         await ctx.followup.send("Playlist not found or not visible to you. Try `/playlist list`.", ephemeral=True)
         return
     await play_playlist_now(ctx, target, "playlist play")
+    await _maybe_advertise_webui(ctx)
 
 @app_commands.describe(
     playlist="Playlist name, id, or playlist:name",
@@ -9815,6 +9873,26 @@ async def backup_teekkari_quotes(ctx):
     await safe_interaction_send(ctx, f"Quotes backup completed ({count} messages scanned).")
     logger.info("Teekkari quotes backed up by command.")
 
+_WEBUI_AD_MESSAGES = [
+    "Did you know? Use `/webui` to get a personal link to the playlist editor and player controls!",
+    "Tip: `/webui` opens a browser panel where you can manage playlists, see the queue, and star favorites.",
+    "Try `/webui` for a web interface with playlist editing, queue view, and daily quote game!",
+    "Manage your playlists from any browser — use `/webui` to get your personal link.",
+]
+
+async def _maybe_advertise_webui(ctx, *, chance: float = 0.22):
+    """Send a WebUI tip as a follow-up ~22% of the time when WebUI is accessible."""
+    if not WEBUI_ENABLED or not WEBUI_PUBLIC_URL:
+        return
+    if random.random() > chance:
+        return
+    msg = random.choice(_WEBUI_AD_MESSAGES)
+    try:
+        await ctx.followup.send(msg, ephemeral=True)
+    except Exception:
+        pass
+
+
 # Random quote command
 @client.tree.command()
 async def random_quote(ctx):
@@ -9823,6 +9901,7 @@ async def random_quote(ctx):
     message = quotes.getRandomQuote()
     await ctx.response.send_message(message)
     logger.info("User requested random teekkari quote.")
+    await _maybe_advertise_webui(ctx)
 
 @client.tree.command(name="whatsnew")
 async def whatsnew(ctx):

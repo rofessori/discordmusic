@@ -303,6 +303,68 @@
     .sp-check { flex-shrink:0; accent-color:var(--accent); width:14px; height:14px; cursor:pointer; }
     .sp-progress { padding:20px; text-align:center; color:var(--muted); }
 
+    /* ── Quote guesser ── */
+    .guesser-wrap { display:flex; flex-direction:column; gap:20px; padding:20px; overflow-y:auto; height:100%; }
+    .guesser-quote-card { background:var(--surface); border:1px solid var(--border); border-radius:var(--rl); padding:28px; position:relative; overflow:hidden; }
+    .guesser-quote-card::before { content:'\201C'; position:absolute; top:-12px; left:10px; font-size:100px; color:var(--accent-dim); font-family:Georgia,serif; line-height:1; pointer-events:none; }
+    .guesser-quote-text { font-size:15px; line-height:1.7; color:var(--text); position:relative; }
+    .guesser-reveal { margin-top:14px; font-size:13px; color:var(--text-dim); font-style:italic; border-top:1px solid var(--border); padding-top:10px; }
+    .guesser-choices { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+    .guesser-choice { padding:12px 14px; background:var(--surface); border:1.5px solid var(--border); border-radius:var(--r); cursor:pointer; font-size:13px; font-weight:500; transition:all .15s; text-align:left; color:var(--text); }
+    .guesser-choice:hover:not(:disabled) { border-color:var(--accent); background:var(--accent-dim); color:var(--text); }
+    .guesser-choice:disabled { cursor:not-allowed; opacity:.55; }
+    .guesser-choice.correct { border-color:var(--success) !important; background:rgba(74,222,128,.1) !important; color:var(--success) !important; opacity:1 !important; }
+    .guesser-choice.wrong { border-color:var(--danger) !important; background:rgba(255,77,109,.06) !important; color:var(--danger) !important; text-decoration:line-through; opacity:1 !important; }
+    .guesser-tries { display:flex; align-items:center; gap:8px; }
+    .try-dot { width:11px; height:11px; border-radius:50%; border:1.5px solid var(--border); flex-shrink:0; transition:all .2s; }
+    .try-dot.wrong  { background:var(--danger); border-color:var(--danger); box-shadow:0 0 6px rgba(255,77,109,.4); }
+    .try-dot.correct { background:var(--success); border-color:var(--success); box-shadow:0 0 6px rgba(74,222,128,.4); }
+    .guesser-result { padding:16px; border-radius:var(--r); text-align:center; font-size:14px; font-weight:600; }
+    .guesser-result.ok  { background:rgba(74,222,128,.07); border:1px solid rgba(74,222,128,.22); color:var(--success); }
+    .guesser-result.fail { background:rgba(255,77,109,.07); border:1px solid rgba(255,77,109,.22); color:var(--text-dim); }
+    .guesser-leaderboard { background:var(--surface); border:1px solid var(--border); border-radius:var(--r); overflow:hidden; }
+    .lb-row { display:flex; align-items:center; gap:10px; padding:10px 14px; border-bottom:1px solid rgba(37,37,50,.6); font-size:13px; }
+    .lb-row:last-child { border-bottom:none; }
+    .lb-rank { font-family:var(--font-m); font-size:11px; color:var(--muted); min-width:24px; }
+    .lb-name { flex:1; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .lb-score { font-family:var(--font-m); font-size:13px; color:var(--accent); font-weight:700; min-width:52px; text-align:right; }
+    .lb-games { font-size:11px; color:var(--muted); min-width:44px; text-align:right; }
+
+    /* ── Admin audit / users panels ── */
+    .audit-list { flex:1; overflow-y:auto; font-family:var(--font-m); font-size:11px; padding:10px 16px; }
+    .audit-row { padding:5px 0; border-bottom:1px solid rgba(37,37,50,.5); display:flex; gap:10px; align-items:baseline; }
+    .audit-ts { color:var(--muted); flex-shrink:0; min-width:80px; }
+    .audit-action { color:var(--accent); flex-shrink:0; min-width:160px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .audit-actor { color:var(--text-dim); flex-shrink:0; min-width:80px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .audit-detail { color:var(--muted); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .users-list { flex:1; overflow-y:auto; padding:10px 16px; }
+    .user-row { display:flex; align-items:center; gap:10px; padding:9px 0; border-bottom:1px solid rgba(37,37,50,.5); font-size:13px; }
+    .user-row:last-child { border-bottom:none; }
+    .user-name { flex:1; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .user-id { font-family:var(--font-m); font-size:10px; color:var(--muted); flex-shrink:0; }
+    .user-groups { display:flex; gap:4px; flex-wrap:wrap; flex-shrink:0; max-width:220px; justify-content:flex-end; }
+    .restriction-pill { font-size:10px; font-family:var(--font-m); background:rgba(255,77,109,.08); border:1px solid rgba(255,77,109,.18); color:var(--danger); padding:1px 6px; border-radius:4px; }
+    .config-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px; padding:18px; }
+    .pill.disabled { background:rgba(255,77,109,.08); color:var(--danger); border-color:rgba(255,77,109,.2); }
+    .track-disabled-badge { font-family:var(--font-m); font-size:10px; background:rgba(255,77,109,.08); border:1px solid rgba(255,77,109,.18); color:var(--danger); padding:1px 6px; border-radius:4px; flex-shrink:0; }
+    .track-item.disabled-track { opacity:.5; }
+    .managers-section { padding:10px 16px 12px; border-top:1px solid var(--border); background:var(--panel); display:flex; flex-direction:column; gap:8px; }
+    .managers-section-title { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.07em; font-family:var(--font-d); font-weight:700; }
+    .manager-row { display:flex; align-items:center; gap:8px; font-size:12px; }
+    .manager-id { font-family:var(--font-m); color:var(--muted); font-size:10px; }
+    /* Admin playlists panel */
+    .admin-pl-list { flex:1; overflow-y:auto; padding:4px 0; }
+    .admin-pl-item { padding:10px 16px; border-bottom:1px solid rgba(37,37,50,.5); display:flex; align-items:center; gap:8px; cursor:pointer; transition:background .1s; }
+    .admin-pl-item:hover { background:var(--surface); }
+    .admin-pl-item.expanded { background:var(--surface); }
+    .admin-pl-name { flex:1; font-weight:500; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .admin-pl-owner { font-size:11px; color:var(--muted); flex-shrink:0; max-width:100px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .admin-pl-tracks { padding:6px 16px 12px 36px; display:flex; flex-direction:column; gap:4px; border-bottom:1px solid rgba(37,37,50,.5); }
+    .admin-track-row { display:flex; align-items:center; gap:8px; padding:5px 8px; border-radius:var(--r); border:1px solid transparent; }
+    .admin-track-row:hover { background:var(--raised); border-color:var(--border); }
+    .admin-track-title { flex:1; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .admin-track-num { font-family:var(--font-m); font-size:10px; color:var(--muted); min-width:22px; text-align:right; flex-shrink:0; }
+
     /* ── Gate screens ── */
     .gate-wrap { display:flex; align-items:center; justify-content:center; height:100%; background:radial-gradient(ellipse 60% 40% at 50% -5%,rgba(124,92,252,.1) 0%,transparent 70%),var(--bg); }
     .gate-card { background:var(--panel); border:1px solid var(--border); border-radius:var(--rl); padding:44px 36px; width:380px; display:flex; flex-direction:column; gap:20px; position:relative; overflow:hidden; text-align:center; }
@@ -394,7 +456,26 @@ function makeApi(token) {
     favAddToPlaylist: (pid, idxs) => req("POST",   `/api/favorites/add-to-playlist/${pid}`, { indices: idxs }),
     spotifySearch:    url         => req("POST",   "/api/spotify/search", { url }),
     status:           ()          => req("GET",    "/api/status"),
-    logs:             level       => req("GET",    `/api/logs?level=${level}`),
+    logs:             (level, src) => req("GET",   `/api/logs?level=${level}${src ? `&source=${encodeURIComponent(src)}` : ""}`),
+    // Quote guesser
+    guesserToday:     ()          => req("GET",    "/api/guesser/today"),
+    guesserGuess:     choice      => req("POST",   "/api/guesser/guess", { choice }),
+    guesserLeaderboard: ()        => req("GET",    "/api/guesser/leaderboard"),
+    // Admin extras
+    adminConfig:      ()          => req("GET",    "/api/admin/config"),
+    adminAudit:       ()          => req("GET",    "/api/admin/audit"),
+    adminUsers:       ()          => req("GET",    "/api/admin/users"),
+    adminCacheClear:  ()          => req("POST",   "/api/admin/cache/clear"),
+    // Manager management
+    getManagers:      id          => req("GET",    `/api/playlists/${id}/managers`),
+    addManager:       (id, uid)   => req("POST",   `/api/playlists/${id}/managers`, { user_id: uid }),
+    removeManager:    (id, uid)   => req("DELETE", `/api/playlists/${id}/managers/${uid}`),
+    // Admin playlist control
+    adminPlaylists:   ()          => req("GET",    "/api/admin/playlists"),
+    adminGetPlaylist: id          => req("GET",    `/api/admin/playlists/${id}`),
+    adminPatchPlaylist: (id, body) => req("PATCH", `/api/admin/playlists/${id}`, body),
+    adminPatchTrack:  (id, i, b)  => req("PATCH",  `/api/admin/playlists/${id}/tracks/${i}`, b),
+    adminRemoveTrack: (id, i)     => req("DELETE", `/api/admin/playlists/${id}/tracks/${i}`),
   };
 }
 
@@ -487,11 +568,12 @@ function DragHandle() {
 function TrackItem({ track, index, onRemove, canEdit, extraActions }) {
   const id = track.id ? `youtu.be/${track.id}` : track.webpage_url;
   return (
-    <li className="track-item">
+    <li className={`track-item${track.admin_disabled ? " disabled-track" : ""}`}>
       {canEdit && <DragHandle />}
       <span className="track-num">{index + 1}</span>
       <span className="track-title" title={track.title}>{track.title}</span>
       {track.needs_refresh && <span className="track-pending" title="Will resolve on first play">pending</span>}
+      {track.admin_disabled && <span className="track-disabled-badge" title="Disabled by admin">disabled by admin</span>}
       <span className="track-id" title={track.webpage_url}>{id}</span>
       {extraActions}
       {canEdit && (
@@ -714,13 +796,16 @@ function SpotifyImportModal({ api, playlists, onClose, toast }) {
 }
 
 // ── Playlist editor ───────────────────────────────────────────────────────────
-function PlaylistEditor({ playlistId, api, toast, playlists }) {
+function PlaylistEditor({ playlistId, api, toast, playlists, me }) {
   const [pl, setPl] = useState(null);
   const [tracks, setTracks] = useState([]);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showSpotify, setShowSpotify] = useState(false);
+  const [showManagers, setShowManagers] = useState(false);
+  const [newManagerId, setNewManagerId] = useState("");
+  const [addingManager, setAddingManager] = useState(false);
   const listRef = useRef(null);
 
   const load = useCallback(async () => {
@@ -758,6 +843,28 @@ function PlaylistEditor({ playlistId, api, toast, playlists }) {
     } catch (ex) { toast(`Failed to add: ${ex.message}`, "err"); }
   };
 
+  const addManager = async e => {
+    e.preventDefault();
+    const uid = newManagerId.trim();
+    if (!uid || isNaN(Number(uid))) { toast("Enter a valid Discord user ID (numbers only).", "err"); return; }
+    setAddingManager(true);
+    try {
+      await api.addManager(playlistId, Number(uid));
+      toast("Moderator added.", "ok");
+      setNewManagerId("");
+      await load();
+    } catch (ex) { toast(`Failed: ${ex.message}`, "err"); }
+    finally { setAddingManager(false); }
+  };
+
+  const removeManager = async uid => {
+    try {
+      await api.removeManager(playlistId, uid);
+      toast("Moderator removed.", "ok");
+      await load();
+    } catch (ex) { toast(`Failed: ${ex.message}`, "err"); }
+  };
+
   if (loading) return <div className="empty"><span className="spinner" /></div>;
   if (!pl) return <div className="empty"><div className="empty-text">Playlist not found.</div></div>;
 
@@ -771,18 +878,26 @@ function PlaylistEditor({ playlistId, api, toast, playlists }) {
     "favorites": "favorites",
   }[cacheMode] || cacheMode;
   const isCached = ["keep_cached", "bounded", "favorites"].includes(cacheMode);
+  const isOwner = me?.is_admin || (me?.user_id && me.user_id === pl.owner_id);
+  const managers = pl.manager_user_ids || [];
 
   return (
     <>
       <div className="panel-header">
         <div className="panel-title">{pl.name}</div>
         <span className={`pill${pl.visibility === "public" ? " pub" : ""}`}>{pl.visibility}</span>
-        {!canEdit && <span className="pill readonly">read-only</span>}
+        {pl.admin_disabled && <span className="pill disabled" title="This playlist has been disabled by an admin">⛔ disabled</span>}
+        {!canEdit && !pl.admin_disabled && <span className="pill readonly">read-only</span>}
         {isCached
           ? <span className="pill cached" title={`Cache mode: ${cacheMode}`}>💾 {cacheLabel}</span>
           : <span className="pill" title={`Cache mode: ${cacheMode}`}>⚡ {cacheLabel}</span>
         }
         <span className="pill">{tracks.length} tracks</span>
+        {isOwner && (
+          <button className="btn btn-sm" onClick={() => setShowManagers(m => !m)} title="Manage moderators">
+            👥 {managers.length > 0 ? managers.length : ""} Mods
+          </button>
+        )}
         {canEdit && (
           <button className="btn btn-sm" onClick={() => setShowSpotify(true)} title="Import from Spotify">
             🎵 Spotify
@@ -791,18 +906,51 @@ function PlaylistEditor({ playlistId, api, toast, playlists }) {
         <button className="btn btn-sm" onClick={load}>↻</button>
       </div>
 
+      {showManagers && isOwner && (
+        <div className="managers-section">
+          <div className="managers-section-title">Moderators (can edit this playlist)</div>
+          {managers.length === 0
+            ? <div style={{fontSize:12,color:"var(--muted)"}}>No moderators yet.</div>
+            : managers.map(uid => (
+                <div key={uid} className="manager-row">
+                  <span className="manager-id">{uid}</span>
+                  <button className="btn btn-sm btn-danger" onClick={() => removeManager(uid)} title="Remove moderator">Remove</button>
+                </div>
+              ))
+          }
+          <form onSubmit={addManager} style={{display:"flex",gap:6,marginTop:4}}>
+            <input
+              className="add-input" style={{flex:1,padding:"6px 10px",fontSize:12}}
+              placeholder="Discord user ID (numbers)"
+              value={newManagerId} onChange={e => setNewManagerId(e.target.value)}
+            />
+            <button type="submit" className="btn btn-primary btn-sm" disabled={addingManager || !newManagerId.trim()}>
+              {addingManager ? <span className="spinner" /> : "Add mod"}
+            </button>
+          </form>
+          <div style={{fontSize:11,color:"var(--muted)"}}>
+            Right-click a user in Discord → Copy User ID to get their ID.
+          </div>
+        </div>
+      )}
+
       <div className="track-scroll">
-        {tracks.length === 0
+        {pl.admin_disabled
           ? <div className="empty">
-              <div className="empty-icon">♪</div>
-              <div className="empty-text">No tracks yet.{canEdit ? " Add one below." : ""}</div>
+              <div className="empty-icon">⛔</div>
+              <div className="empty-text">This playlist has been disabled by an admin.<br />Contact an admin to re-enable it.</div>
             </div>
-          : <ul ref={canEdit ? listRef : null} className="track-list">
-              {tracks.map((t, i) => (
-                <TrackItem key={t.id || `idx-${i}`} track={t} index={i}
-                  onRemove={removeTrack} canEdit={canEdit} />
-              ))}
-            </ul>
+          : tracks.length === 0
+            ? <div className="empty">
+                <div className="empty-icon">♪</div>
+                <div className="empty-text">No tracks yet.{canEdit ? " Add one below." : ""}</div>
+              </div>
+            : <ul ref={canEdit ? listRef : null} className="track-list">
+                {tracks.map((t, i) => (
+                  <TrackItem key={t.id || `idx-${i}`} track={t} index={i}
+                    onRemove={removeTrack} canEdit={canEdit} />
+                ))}
+              </ul>
         }
       </div>
 
@@ -817,7 +965,7 @@ function PlaylistEditor({ playlistId, api, toast, playlists }) {
         </div>
       )}
 
-      {canEdit && (
+      {canEdit && !pl.admin_disabled && (
         <AddTrackBar
           onAdd={addTrack} toast={toast}
           placeholder="Paste a YouTube URL to add a track…"
@@ -840,14 +988,19 @@ function QueuePanel({ api, toast }) {
   const [queue, setQueue] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try { setQueue(await api.queue()); }
     catch (ex) { toast(`Queue load failed: ${ex.message}`, "err"); }
     finally { setLoading(false); }
-  };
+  }, []);
 
-  useEffect(() => { load(); }, []);
+  // Auto-refresh queue every 8 seconds so additions from Discord show up
+  useEffect(() => {
+    load();
+    const id = setInterval(load, 8000);
+    return () => clearInterval(id);
+  }, [load]);
 
   const addToQueue = async url => {
     try {
@@ -987,16 +1140,30 @@ function FavoritesPanel({ api, toast, playlists }) {
 // ── Admin: Status panel ───────────────────────────────────────────────────────
 function StatusPanel({ api, toast }) {
   const [data, setData] = useState(null);
+  const [cfg, setCfg] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [clearing, setClearing] = useState(false);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
-    try { setData(await api.status()); }
-    catch (ex) { toast(`Status load failed: ${ex.message}`, "err"); }
+    try {
+      const [s, c] = await Promise.all([api.status(), api.adminConfig()]);
+      setData(s); setCfg(c);
+    } catch (ex) { toast(`Status load failed: ${ex.message}`, "err"); }
     finally { setLoading(false); }
-  };
+  }, []);
 
-  useEffect(() => { load(); const id = setInterval(load, 15000); return () => clearInterval(id); }, []);
+  useEffect(() => { load(); const id = setInterval(load, 15000); return () => clearInterval(id); }, [load]);
+
+  const clearCache = async () => {
+    setClearing(true);
+    try {
+      const r = await api.adminCacheClear();
+      toast(`Cache sweep done: ${r.removed} zero-byte file(s) removed.`, "ok");
+      await load();
+    } catch (ex) { toast(`Cache clear failed: ${ex.message}`, "err"); }
+    finally { setClearing(false); }
+  };
 
   const fmtUptime = s => {
     if (!s) return "—";
@@ -1021,8 +1188,14 @@ function StatusPanel({ api, toast }) {
     <>
       <div className="panel-header">
         <div className="panel-title">Bot Status</div>
+        {loading && <span className="spinner" />}
         <button className="btn btn-sm" onClick={load}>↻</button>
+        <button className="btn btn-sm btn-danger" onClick={clearCache} disabled={clearing} title="Remove zero-byte files from cache">
+          {clearing ? <span className="spinner" /> : "🗑 Cache sweep"}
+        </button>
       </div>
+
+      <div style={{padding:"8px 18px 0",fontSize:11,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".07em"}}>Playback</div>
       <div className="status-grid">
         <div className="stat-card">
           <div className="stat-label">Status</div>
@@ -1040,6 +1213,24 @@ function StatusPanel({ api, toast }) {
           <div className="stat-label">Queue</div>
           <div className="stat-value">{data?.queue_length ?? "—"}<span className="stat-unit">tracks</span></div>
         </div>
+        <div className="stat-card">
+          <div className="stat-label">Volume</div>
+          <div className="stat-value">{cfg?.volume_percent ?? "—"}<span className="stat-unit">%</span></div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Repeat</div>
+          <div className="stat-value" style={{fontSize:14,color: cfg?.is_repeat ? "var(--accent)" : "var(--muted)"}}>
+            {cfg?.is_repeat ? "🔂 On" : "Off"}
+          </div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">Web Sessions</div>
+          <div className="stat-value">{cfg?.session_count ?? "—"}</div>
+        </div>
+      </div>
+
+      <div style={{padding:"8px 18px 0",fontSize:11,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".07em"}}>System</div>
+      <div className="status-grid">
         <div className="stat-card">
           <div className="stat-label">Uptime</div>
           <div className="stat-value">{fmtUptime(data?.uptime_seconds)}</div>
@@ -1066,29 +1257,46 @@ function StatusPanel({ api, toast }) {
           <div className="stat-value" style={{fontSize:13}}>{fmtBytes(disk.playlists?.bytes)}</div>
           <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>{disk.playlists?.files ?? 0} files</div>
         </div>
+        <div className="stat-card">
+          <div className="stat-label">Guesser</div>
+          <div className="stat-value" style={{fontSize:13,color: cfg?.guesser_enabled ? "var(--success)" : "var(--muted)"}}>
+            {cfg?.guesser_enabled ? "Enabled" : "Disabled"}
+          </div>
+        </div>
       </div>
     </>
   );
 }
 
 // ── Admin: Logs panel ─────────────────────────────────────────────────────────
+const LOG_SOURCES = [
+  { label: "All", value: "" },
+  { label: "Guesser", value: "quote_guesser" },
+  { label: "WebUI", value: "webui" },
+  { label: "Bot", value: "__main__" },
+  { label: "yt-dlp", value: "yt_dlp" },
+];
+
 function LogsPanel({ api, toast }) {
   const [records, setRecords] = useState([]);
   const [level, setLevel] = useState("INFO");
+  const [source, setSource] = useState("");
   const [loading, setLoading] = useState(false);
-  const bottomRef = useRef(null);
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await api.logs(level);
+      const data = await api.logs(level, source);
       setRecords(data.records || []);
     } catch (ex) { toast(`Logs load failed: ${ex.message}`, "err"); }
     finally { setLoading(false); }
-  };
+  }, [level, source]);
 
-  useEffect(() => { load(); }, [level]);
-  useEffect(() => { const id = setInterval(load, 5000); return () => clearInterval(id); }, [level]);
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    const id = setInterval(load, 5000);
+    return () => clearInterval(id);
+  }, [load]);
 
   const fmtTs = ts => new Date(ts * 1000).toLocaleTimeString();
 
@@ -1096,29 +1304,465 @@ function LogsPanel({ api, toast }) {
     <>
       <div className="panel-header">
         <div className="panel-title">Bot Logs</div>
-        <div className="log-toolbar" style={{padding:0,borderBottom:"none",background:"transparent",flexShrink:0}}>
-          <select className="log-select" value={level} onChange={e => setLevel(e.target.value)}>
+        <div className="log-toolbar" style={{padding:0,borderBottom:"none",background:"transparent",flexShrink:0,gap:6}}>
+          <select className="log-select" value={level} onChange={e => setLevel(e.target.value)}
+            title="Minimum log level">
             {["DEBUG","INFO","WARNING","ERROR","CRITICAL"].map(l => (
               <option key={l} value={l}>{l}</option>
+            ))}
+          </select>
+          <select className="log-select" value={source} onChange={e => setSource(e.target.value)}
+            title="Filter by source module">
+            {LOG_SOURCES.map(s => (
+              <option key={s.value} value={s.value}>{s.label}</option>
             ))}
           </select>
         </div>
         {loading && <span className="spinner" style={{marginLeft:4}} />}
         <button className="btn btn-sm" onClick={load}>↻</button>
+        <span style={{fontSize:11,color:"var(--muted)",marginLeft:"auto"}}>{records.length} records</span>
       </div>
       <div className="logs-wrap">
         {records.length === 0
-          ? <div style={{color:"var(--muted)",fontSize:12,padding:"20px 0"}}>No log records at this level.</div>
+          ? <div style={{color:"var(--muted)",fontSize:12,padding:"20px 0"}}>No log records at this level{source ? ` / source "${source}"` : ""}.</div>
           : records.slice().reverse().map((r, i) => (
             <div key={i} className="log-row">
               <span className="log-ts">{fmtTs(r.ts)}</span>
               <span className={`log-level ${r.level}`}>{r.level}</span>
-              <span className="log-msg">{r.msg}</span>
+              <span className="log-msg" title={r.name}>{r.msg}</span>
             </div>
           ))
         }
-        <div ref={bottomRef} />
       </div>
+    </>
+  );
+}
+
+// ── Quote Guesser panel ───────────────────────────────────────────────────────
+function QuoteGuesserPanel({ api, toast }) {
+  const [challenge, setChallenge] = useState(null);
+  const [lb, setLb] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [guessing, setGuessing] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [ch, board] = await Promise.all([api.guesserToday(), api.guesserLeaderboard()]);
+      setChallenge(ch);
+      setLb(board.entries || []);
+    } catch (ex) {
+      if (!ex.message.startsWith("AUTH")) toast(`Guesser unavailable: ${ex.message}`, "err");
+    } finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const submitGuess = async choice => {
+    setGuessing(true);
+    try {
+      const r = await api.guesserGuess(choice);
+      // Reload to get fresh state + choices
+      const [ch, board] = await Promise.all([api.guesserToday(), api.guesserLeaderboard()]);
+      setChallenge(ch); setLb(board.entries || []);
+      if (r.correct) toast(`🎉 Correct! +${r.points_earned} points`, "ok");
+      else if (r.done) toast("No more tries. Better luck tomorrow!", "err");
+      else toast("Wrong — try again!", "err");
+    } catch (ex) {
+      toast(ex.message.startsWith("AUTH") ? "Session expired" : ex.message, "err");
+    } finally { setGuessing(false); }
+  };
+
+  if (loading) return <div className="empty"><span className="spinner" /></div>;
+  if (!challenge) return (
+    <div className="empty">
+      <div className="empty-icon">🎯</div>
+      <div className="empty-text">
+        Quote guesser not available.<br />
+        Set <code>QUOTE_GUESSER_ENABLED=true</code> and make sure quotes.txt has attributed quotes.
+      </div>
+    </div>
+  );
+
+  const state = challenge.state || {};
+  const done = state.done;
+  const solved = state.solved;
+  const triesUsed = state.tries_used || 0;
+  const wrongGuesses = state.wrong_guesses || [];
+  const today = new Date().toLocaleDateString("en-US", { weekday:"long", month:"long", day:"numeric" });
+
+  return (
+    <div className="guesser-wrap">
+      <div className="panel-header" style={{flexShrink:0}}>
+        <div className="panel-title">🎯 Daily Quote</div>
+        <span style={{fontSize:12,color:"var(--muted)"}}>{today}</span>
+        <button className="btn btn-sm" onClick={load} disabled={loading}>↻</button>
+      </div>
+
+      <div className="guesser-quote-card">
+        <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".1em",marginBottom:12}}>
+          Today's Quote
+        </div>
+        <div className="guesser-quote-text">{challenge.text}</div>
+        {done && (
+          <div className="guesser-reveal">— {challenge.correct_author}</div>
+        )}
+      </div>
+
+      {!done && (
+        <>
+          <div style={{fontSize:12,color:"var(--muted)",marginBottom:-8}}>Who said this?</div>
+          <div className="guesser-choices">
+            {(challenge.choices || []).map((c, i) => {
+              const isWrong = wrongGuesses.includes(c);
+              return (
+                <button
+                  key={i}
+                  className={`guesser-choice${isWrong ? " wrong" : ""}`}
+                  disabled={isWrong || guessing || done}
+                  onClick={() => submitGuess(c)}
+                >
+                  {c}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+
+      {done && (
+        <div className={`guesser-result ${solved ? "ok" : "fail"}`}>
+          {solved
+            ? <>🎉 Correct on try {triesUsed}! +{state.points_earned} points</>
+            : <>😞 Out of tries. The answer was above.</>
+          }
+        </div>
+      )}
+
+      <div className="guesser-tries">
+        <span style={{fontSize:12,color:"var(--muted)"}}>Tries:</span>
+        {[0,1,2].map(i => {
+          let cls = "try-dot";
+          if (i < triesUsed) {
+            cls += solved && i === triesUsed - 1 ? " correct" : " wrong";
+          }
+          return <div key={i} className={cls} />;
+        })}
+        {!done && (
+          <span style={{fontSize:12,color:"var(--muted)",marginLeft:6}}>
+            {3 - triesUsed} tr{3 - triesUsed === 1 ? "y" : "ies"} left
+          </span>
+        )}
+        {!done && triesUsed < 3 && (
+          <span style={{fontSize:12,color:"var(--accent)",marginLeft:"auto"}}>
+            {[9,6,3][triesUsed]}pts if correct
+          </span>
+        )}
+      </div>
+
+      <div>
+        <div style={{
+          fontSize:12, fontWeight:600, color:"var(--text-dim)",
+          marginBottom:10, display:"flex", alignItems:"center", gap:6
+        }}>
+          🏆 All-time leaderboard
+        </div>
+        {lb.length === 0
+          ? <div style={{fontSize:12,color:"var(--muted)"}}>No scores yet — be first!</div>
+          : <div className="guesser-leaderboard">
+              {lb.map((e, i) => (
+                <div key={e.user_id} className="lb-row">
+                  <span className="lb-rank">{i === 0 ? "👑" : `#${i + 1}`}</span>
+                  <span className="lb-name">{e.username}</span>
+                  <span className="lb-score">{e.total} pts</span>
+                  <span className="lb-games" title={`${e.solved} solved of ${e.games} played`}>
+                    {e.solved}/{e.games}
+                  </span>
+                </div>
+              ))}
+            </div>
+        }
+      </div>
+    </div>
+  );
+}
+
+// ── Admin: Audit log panel ────────────────────────────────────────────────────
+function AuditPanel({ api, toast }) {
+  const [events, setEvents] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.adminAudit();
+      setEvents((data.events || []).slice().reverse());
+      setTotal(data.total || 0);
+    } catch (ex) { toast(`Audit load failed: ${ex.message}`, "err"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); const id = setInterval(load, 30000); return () => clearInterval(id); }, [load]);
+
+  const fmtTs = ts => new Date(ts * 1000).toLocaleString();
+
+  return (
+    <>
+      <div className="panel-header">
+        <div className="panel-title">Audit Log</div>
+        <span className="pill">{events.length} of {total}</span>
+        <button className="btn btn-sm" onClick={load}>↻</button>
+      </div>
+      {loading && events.length === 0
+        ? <div className="empty"><span className="spinner" /></div>
+        : events.length === 0
+          ? <div className="empty"><div className="empty-text">No audit events yet.</div></div>
+          : <div className="audit-list">
+              {events.map((e, i) => (
+                <div key={i} className="audit-row">
+                  <span className="audit-ts">{fmtTs(e.timestamp)}</span>
+                  <span className="audit-action">{e.action}</span>
+                  <span className="audit-actor">{e.actor_discord_name || "—"}</span>
+                  <span className="audit-detail" title={JSON.stringify(e.details)}>
+                    {Object.entries(e.details || {}).slice(0,3).map(([k,v]) => `${k}=${String(v).slice(0,24)}`).join(" ")}
+                  </span>
+                </div>
+              ))}
+            </div>
+      }
+    </>
+  );
+}
+
+// ── Admin: Users panel ────────────────────────────────────────────────────────
+function UsersPanel({ api, toast }) {
+  const [users, setUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [note, setNote] = useState("");
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await api.adminUsers();
+      setUsers(data.users || []);
+      setNote(data.note || "");
+    } catch (ex) { toast(`Users load failed: ${ex.message}`, "err"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const withRestrictions = users.filter(u => u.groups?.length > 0);
+  const normal = users.filter(u => !u.groups?.length);
+
+  return (
+    <>
+      <div className="panel-header">
+        <div className="panel-title">User Permissions</div>
+        <span className="pill">{users.length} users</span>
+        <button className="btn btn-sm" onClick={load}>↻</button>
+      </div>
+      {loading
+        ? <div className="empty"><span className="spinner" /></div>
+        : note
+          ? <div className="empty"><div className="empty-text">{note}</div></div>
+          : <div className="users-list">
+              {withRestrictions.length > 0 && (
+                <>
+                  <div style={{fontSize:11,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".07em",marginBottom:8}}>
+                    With restrictions
+                  </div>
+                  {withRestrictions.map(u => (
+                    <div key={u.user_id} className="user-row">
+                      <span className="user-name">{u.username}</span>
+                      <span className="user-id">{u.user_id}</span>
+                      <div className="user-groups">
+                        {u.groups.map(g => <span key={g} className="restriction-pill">{g}</span>)}
+                      </div>
+                    </div>
+                  ))}
+                  <div style={{margin:"12px 0 8px",borderBottom:"1px solid var(--border)"}} />
+                </>
+              )}
+              {normal.length > 0 && (
+                <>
+                  <div style={{fontSize:11,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".07em",marginBottom:8}}>
+                    Normal users
+                  </div>
+                  {normal.map(u => (
+                    <div key={u.user_id} className="user-row">
+                      <span className="user-name">{u.username}</span>
+                      <span className="user-id">{u.user_id}</span>
+                      <span className="pill" style={{fontSize:11}}>no restrictions</span>
+                    </div>
+                  ))}
+                </>
+              )}
+              {users.length === 0 && (
+                <div className="empty"><div className="empty-text">No user permission records found.</div></div>
+              )}
+            </div>
+      }
+    </>
+  );
+}
+
+// ── Admin: All Playlists panel ────────────────────────────────────────────────
+function AdminPlaylistsPanel({ api, toast }) {
+  const [playlists, setPlaylists] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState(null);
+  const [expandedTracks, setExpandedTracks] = useState([]);
+  const [loadingTracks, setLoadingTracks] = useState(false);
+  const [toggling, setToggling] = useState({});
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try { setPlaylists(await api.adminPlaylists()); }
+    catch (ex) { toast(`Failed: ${ex.message}`, "err"); }
+    finally { setLoading(false); }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const expandPlaylist = async id => {
+    if (expanded === id) { setExpanded(null); setExpandedTracks([]); return; }
+    setExpanded(id);
+    setLoadingTracks(true);
+    try {
+      const data = await api.adminGetPlaylist(id);
+      setExpandedTracks(data.tracks || []);
+    } catch (ex) { toast(`Failed to load tracks: ${ex.message}`, "err"); }
+    finally { setLoadingTracks(false); }
+  };
+
+  const togglePlaylist = async (id, disabled) => {
+    setToggling(t => ({ ...t, [id]: true }));
+    try {
+      await api.adminPatchPlaylist(id, { admin_disabled: disabled });
+      toast(`Playlist ${disabled ? "disabled" : "re-enabled"}.`, "ok");
+      await load();
+      if (expanded === id) {
+        const data = await api.adminGetPlaylist(id);
+        setExpandedTracks(data.tracks || []);
+      }
+    } catch (ex) { toast(`Failed: ${ex.message}`, "err"); }
+    finally { setToggling(t => ({ ...t, [id]: false })); }
+  };
+
+  const toggleTrack = async (plId, idx, disabled) => {
+    const key = `${plId}-${idx}`;
+    setToggling(t => ({ ...t, [key]: true }));
+    try {
+      await api.adminPatchTrack(plId, idx, { admin_disabled: disabled });
+      toast(`Track ${disabled ? "disabled" : "re-enabled"}.`, "ok");
+      const data = await api.adminGetPlaylist(plId);
+      setExpandedTracks(data.tracks || []);
+    } catch (ex) { toast(`Failed: ${ex.message}`, "err"); }
+    finally { setToggling(t => ({ ...t, [key]: false })); }
+  };
+
+  const removeTrack = async (plId, idx, title) => {
+    if (!confirm(`Remove "${title}" from this playlist?`)) return;
+    const key = `${plId}-rm-${idx}`;
+    setToggling(t => ({ ...t, [key]: true }));
+    try {
+      await api.adminRemoveTrack(plId, idx);
+      toast("Track removed.", "ok");
+      const data = await api.adminGetPlaylist(plId);
+      setExpandedTracks(data.tracks || []);
+      await load();
+    } catch (ex) { toast(`Failed: ${ex.message}`, "err"); }
+    finally { setToggling(t => ({ ...t, [key]: false })); }
+  };
+
+  const disabled = playlists.filter(p => p.admin_disabled);
+  const active = playlists.filter(p => !p.admin_disabled);
+
+  return (
+    <>
+      <div className="panel-header">
+        <div className="panel-title">All Playlists</div>
+        <span className="pill">{playlists.length} total</span>
+        {disabled.length > 0 && <span className="pill disabled">{disabled.length} disabled</span>}
+        <button className="btn btn-sm" onClick={load}>↻</button>
+      </div>
+      {loading
+        ? <div className="empty"><span className="spinner" /></div>
+        : <div className="admin-pl-list">
+            {[...disabled, ...active].map(pl => (
+              <React.Fragment key={pl.id}>
+                <div
+                  className={`admin-pl-item${expanded === pl.id ? " expanded" : ""}`}
+                  onClick={() => expandPlaylist(pl.id)}
+                >
+                  <span style={{fontSize:12,color:pl.admin_disabled ? "var(--danger)" : "var(--muted)",flexShrink:0}}>
+                    {pl.admin_disabled ? "⛔" : pl.visibility === "public" ? "◉" : "◎"}
+                  </span>
+                  <span className="admin-pl-name" title={pl.name}>{pl.name}</span>
+                  <span className="admin-pl-owner" title={pl.owner}>{pl.owner || "—"}</span>
+                  <span style={{fontSize:11,color:"var(--muted)",flexShrink:0}}>{pl.track_count} tracks</span>
+                  <button
+                    className={`btn btn-sm${pl.admin_disabled ? "" : " btn-danger"}`}
+                    style={{flexShrink:0,marginLeft:4}}
+                    disabled={toggling[pl.id]}
+                    onClick={e => { e.stopPropagation(); togglePlaylist(pl.id, !pl.admin_disabled); }}
+                    title={pl.admin_disabled ? "Re-enable playlist" : "Disable playlist"}
+                  >
+                    {toggling[pl.id] ? <span className="spinner" /> : pl.admin_disabled ? "Enable" : "Disable"}
+                  </button>
+                  <span style={{fontSize:11,color:"var(--muted)",flexShrink:0,marginLeft:4}}>
+                    {expanded === pl.id ? "▲" : "▼"}
+                  </span>
+                </div>
+                {expanded === pl.id && (
+                  <div className="admin-pl-tracks">
+                    {loadingTracks
+                      ? <div style={{padding:"8px 0",color:"var(--muted)",fontSize:12}}><span className="spinner" /> Loading…</div>
+                      : expandedTracks.length === 0
+                        ? <div style={{color:"var(--muted)",fontSize:12}}>No tracks.</div>
+                        : expandedTracks.map((t, i) => {
+                            const tkKey = `${pl.id}-${i}`;
+                            const rmKey = `${pl.id}-rm-${i}`;
+                            return (
+                              <div key={i} className="admin-track-row">
+                                <span className="admin-track-num">{i + 1}</span>
+                                <span className="admin-track-title" title={t.title}>
+                                  {t.title}
+                                  {t.admin_disabled && <span className="track-disabled-badge" style={{marginLeft:6}}>disabled</span>}
+                                </span>
+                                <button
+                                  className={`btn btn-sm${t.admin_disabled ? "" : " btn-danger"}`}
+                                  style={{flexShrink:0,fontSize:11,padding:"3px 8px"}}
+                                  disabled={toggling[tkKey]}
+                                  onClick={() => toggleTrack(pl.id, i, !t.admin_disabled)}
+                                  title={t.admin_disabled ? "Re-enable track" : "Disable track"}
+                                >
+                                  {toggling[tkKey] ? <span className="spinner" /> : t.admin_disabled ? "Enable" : "Disable"}
+                                </button>
+                                <button
+                                  className="btn btn-sm btn-danger"
+                                  style={{flexShrink:0,fontSize:11,padding:"3px 8px"}}
+                                  disabled={toggling[rmKey]}
+                                  onClick={() => removeTrack(pl.id, i, t.title)}
+                                  title="Remove track from playlist"
+                                >
+                                  {toggling[rmKey] ? <span className="spinner" /> : "Remove"}
+                                </button>
+                              </div>
+                            );
+                          })
+                    }
+                  </div>
+                )}
+              </React.Fragment>
+            ))}
+            {playlists.length === 0 && (
+              <div className="empty"><div className="empty-text">No playlists found.</div></div>
+            )}
+          </div>
+      }
     </>
   );
 }
@@ -1306,9 +1950,12 @@ function App() {
                 key={p.id}
                 className={`sidebar-item${selected === p.id ? " active" : ""}`}
                 onClick={() => setSelected(p.id)}
+                title={p.admin_disabled ? "Disabled by admin" : p.name}
               >
-                <span className="sidebar-icon">{p.visibility === "public" ? "◉" : "◎"}</span>
-                <span className="sidebar-name" title={p.name}>{p.name}</span>
+                <span className="sidebar-icon" style={p.admin_disabled ? {color:"var(--danger)"} : {}}>
+                  {p.admin_disabled ? "⛔" : p.visibility === "public" ? "◉" : "◎"}
+                </span>
+                <span className="sidebar-name" style={p.admin_disabled ? {color:"var(--danger)",opacity:.7} : {}} title={p.name}>{p.name}</span>
                 <span className="sidebar-count">{p.track_count}</span>
               </div>
             ))}
@@ -1336,6 +1983,16 @@ function App() {
               <span className="sidebar-name">Queue</span>
             </div>
 
+            <div className="sidebar-divider" />
+            <div className="sidebar-section"><span>Fun</span></div>
+            <div
+              className={`sidebar-item${selected === "guesser" ? " active" : ""}`}
+              onClick={() => setSelected("guesser")}
+            >
+              <span className="sidebar-icon">🎯</span>
+              <span className="sidebar-name">Daily Quote</span>
+            </div>
+
             {isAdmin && <>
               <div className="sidebar-divider" />
               <div className="sidebar-section"><span>Admin</span></div>
@@ -1352,6 +2009,27 @@ function App() {
               >
                 <span className="sidebar-icon">≡</span>
                 <span className="sidebar-name">Logs</span>
+              </div>
+              <div
+                className={`sidebar-item${selected === "audit" ? " active" : ""}`}
+                onClick={() => setSelected("audit")}
+              >
+                <span className="sidebar-icon">📋</span>
+                <span className="sidebar-name">Audit Log</span>
+              </div>
+              <div
+                className={`sidebar-item${selected === "users" ? " active" : ""}`}
+                onClick={() => setSelected("users")}
+              >
+                <span className="sidebar-icon">👥</span>
+                <span className="sidebar-name">Users</span>
+              </div>
+              <div
+                className={`sidebar-item${selected === "admin-playlists" ? " active" : ""}`}
+                onClick={() => setSelected("admin-playlists")}
+              >
+                <span className="sidebar-icon">📁</span>
+                <span className="sidebar-name">All Playlists</span>
               </div>
             </>}
 
@@ -1370,22 +2048,25 @@ function App() {
           {selected === null && (
             <div className="splash">
               <span className="splash-arrow">←</span>
-              <span className="splash-text">Select a playlist to edit it.</span>
+              <span className="splash-text">Select a playlist or section.</span>
             </div>
           )}
-          {selected === "queue" && <QueuePanel api={safe} toast={addToast} />}
-          {selected === "favorites" && (
-            <FavoritesPanel api={safe} toast={addToast} playlists={playlists} />
-          )}
-          {selected === "status" && isAdmin && <StatusPanel api={safe} toast={addToast} />}
-          {selected === "logs"   && isAdmin && <LogsPanel   api={safe} toast={addToast} />}
-          {selected && !["queue","favorites","status","logs"].includes(selected) && (
+          {selected === "queue"    && <QueuePanel api={safe} toast={addToast} />}
+          {selected === "favorites" && <FavoritesPanel api={safe} toast={addToast} playlists={playlists} />}
+          {selected === "guesser"  && <QuoteGuesserPanel api={safe} toast={addToast} me={me} />}
+          {selected === "status"   && isAdmin && <StatusPanel api={safe} toast={addToast} />}
+          {selected === "logs"     && isAdmin && <LogsPanel   api={safe} toast={addToast} />}
+          {selected === "audit"    && isAdmin && <AuditPanel  api={safe} toast={addToast} />}
+          {selected === "users"    && isAdmin && <UsersPanel  api={safe} toast={addToast} />}
+          {selected === "admin-playlists" && isAdmin && <AdminPlaylistsPanel api={safe} toast={addToast} />}
+          {selected && !["queue","favorites","guesser","status","logs","audit","users","admin-playlists"].includes(selected) && (
             <PlaylistEditor
               key={selected}
               playlistId={selected}
               api={safe}
               toast={addToast}
               playlists={playlists}
+              me={me}
             />
           )}
         </div>

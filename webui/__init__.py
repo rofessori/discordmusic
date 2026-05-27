@@ -27,14 +27,20 @@ import asyncio
 import logging
 import os
 import platform
+import re
+import shutil
 import time
 
 logger = logging.getLogger(__name__)
 
-WEBUI_PORT       = int(os.getenv("WEBUI_PORT", "8765"))
-WEBUI_BIND_HOST  = os.getenv("WEBUI_BIND_HOST", "127.0.0.1")
-WEBUI_SECRET_KEY = os.getenv("WEBUI_SECRET_KEY", "")
-WEBUI_PUBLIC_URL = os.getenv("WEBUI_PUBLIC_URL", "")
+WEBUI_PORT              = int(os.getenv("WEBUI_PORT", "8765"))
+WEBUI_BIND_HOST         = os.getenv("WEBUI_BIND_HOST", "127.0.0.1")
+WEBUI_SECRET_KEY        = os.getenv("WEBUI_SECRET_KEY", "")
+WEBUI_PUBLIC_URL        = os.getenv("WEBUI_PUBLIC_URL", "")
+WEBUI_CLOUDFLARED_AUTO  = os.getenv("WEBUI_CLOUDFLARED_AUTO", "false").lower() in ("1", "true", "yes")
+
+# Set by _run_cloudflared() once the tunnel is up; checked by /webui in main.py.
+cloudflared_tunnel_url: str | None = None
 
 
 def check_dependencies() -> list:
@@ -103,6 +109,44 @@ class BotState:
         except Exception:
             return None
 
+    @property
+    def volume_percent(self) -> int:
+        try:
+            return int(round(float(getattr(self._client, "volume", 0.5)) * 100))
+        except Exception:
+            return 0
+
+    @property
+    def is_repeat(self) -> bool:
+        return bool(getattr(self._client, "repeat", False))
+
+    @property
+    def queue_length(self) -> int:
+        return len(self._queue)
+
+    @property
+    def session_count(self) -> int:
+        """Active WebUI sessions (requires a store reference; 0 if unavailable)."""
+        store = getattr(self._client, "webui_session_store", None)
+        if store is None:
+            return 0
+        try:
+            return store.active_count()
+        except Exception:
+            return 0
+
+    def get_config_snapshot(self) -> dict:
+        """Read-only runtime settings for admin status display."""
+        return {
+            "volume_percent":  self.volume_percent,
+            "is_repeat":       self.is_repeat,
+            "is_playing":      self.is_playing,
+            "is_paused":       self.is_paused,
+            "queue_length":    self.queue_length,
+            "uptime_seconds":  round(self.uptime_seconds, 1),
+            "session_count":   self.session_count,
+        }
+
     def disk_usage(self, base_dir: str) -> dict:
         result = {}
         for name in ("cache", "playlists"):
@@ -146,10 +190,48 @@ class BotState:
         self._queue.append(track)
 
 
-async def start(*, playlists_dir: str, bot_state: "BotState", sessions):
+_CF_URL_RE = re.compile(r'https://\S+\.trycloudflare\.com')
+
+async def _run_cloudflared(port: int) -> None:
+    """Launch a cloudflared quick tunnel and capture the public URL into cloudflared_tunnel_url."""
+    global cloudflared_tunnel_url
+
+    if not shutil.which("cloudflared"):
+        logger.info("WEBUI_CLOUDFLARED_AUTO=true but cloudflared binary not found; skipping")
+        return
+
+    logger.info(f"Starting cloudflared quick tunnel for port {port}")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "cloudflared", "tunnel", "--url", f"http://127.0.0.1:{port}",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to launch cloudflared: {exc}")
+        return
+
+    async def _drain(stream):
+        global cloudflared_tunnel_url
+        async for raw in stream:
+            line = raw.decode(errors="replace").strip()
+            if not cloudflared_tunnel_url:
+                m = _CF_URL_RE.search(line)
+                if m:
+                    cloudflared_tunnel_url = m.group(0).rstrip("/")
+                    logger.info(f"Cloudflare tunnel URL: {cloudflared_tunnel_url}")
+
+    asyncio.create_task(_drain(proc.stdout))
+    asyncio.create_task(_drain(proc.stderr))
+
+
+async def start(*, playlists_dir: str, bot_state: "BotState", sessions,
+                guesser=None):
     """
     Start the FastAPI server as a background asyncio task.
     Returns immediately; the server runs concurrently with the bot.
+
+    guesser: optional QuoteGuesser instance (from quote_guesser.py)
     """
     missing = check_dependencies()
     if missing:
@@ -165,7 +247,7 @@ async def start(*, playlists_dir: str, bot_state: "BotState", sessions):
             "Set a strong key before network exposure."
         )
 
-    if not WEBUI_PUBLIC_URL:
+    if not WEBUI_PUBLIC_URL and not WEBUI_CLOUDFLARED_AUTO:
         logger.warning(
             "WEBUI_PUBLIC_URL is not set. The /webui command cannot produce links."
         )
@@ -178,6 +260,7 @@ async def start(*, playlists_dir: str, bot_state: "BotState", sessions):
         bot_state=bot_state,
         secret_key=WEBUI_SECRET_KEY,
         sessions=sessions,
+        guesser=guesser,
     )
 
     config = uvicorn.Config(
@@ -202,7 +285,15 @@ async def start(*, playlists_dir: str, bot_state: "BotState", sessions):
     async def _serve():
         try:
             await server.serve()
+        except SystemExit:
+            logger.error(
+                f"Web UI failed to start: port {WEBUI_PORT} is already in use. "
+                "Kill the old process or change WEBUI_PORT in .env."
+            )
         except Exception as exc:
             logger.error(f"Web UI server stopped unexpectedly: {exc}", exc_info=True)
 
     asyncio.create_task(_serve())
+
+    if WEBUI_CLOUDFLARED_AUTO and not WEBUI_PUBLIC_URL:
+        asyncio.create_task(_run_cloudflared(WEBUI_PORT))
