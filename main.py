@@ -242,6 +242,16 @@ if QUOTE_GUESSER_ENABLED and WEBUI_ENABLED and _webui_module is not None:
         except Exception as _e:
             logger.warning(f"QUOTE_GUESSER_ENABLED=true but guesser init failed: {_e}")
 
+QUOTE_GUESSER_ENABLED = env_flag("QUOTE_GUESSER_ENABLED", False)
+_guesser = None
+if QUOTE_GUESSER_ENABLED and WEBUI_ENABLED and _webui_module is not None:
+    try:
+        import quote_guesser as _quote_guesser_mod
+        _guesser = _quote_guesser_mod.QuoteGuesser(BASE_DIR)
+        logger.info("Quote guesser module loaded.")
+    except Exception as _e:
+        logger.warning(f"QUOTE_GUESSER_ENABLED=true but guesser init failed: {_e}")
+
 ALLOW_ADMIN_ROLE_NAME = env_flag("ALLOW_ADMIN_ROLE_NAME", False)
 MAX_PLAYLIST_TRACKS = env_int("MAX_PLAYLIST_TRACKS", 100)
 MAX_URLS_PER_MESSAGE = env_int("MAX_URLS_PER_MESSAGE", 10)
