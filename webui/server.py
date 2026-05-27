@@ -1137,6 +1137,47 @@ try:
         logger.debug(f"[guesser/leaderboard] user={ctx.discord_user_id}")
         return {"entries": _guesser.get_leaderboard(limit=15)}
 
+    @app.post("/api/guesser/unlimited/start")
+    async def guesser_unlimited_start(ctx: _SessionContext = _admin_auth):
+        """Admin only: start a new unlimited-mode round with a random quote."""
+        _require_guesser()
+        challenge = _guesser.get_unlimited_challenge(ctx.discord_user_id)
+        if challenge is None:
+            raise HTTPException(
+                status_code=503,
+                detail="No attributed quotes available.",
+            )
+        logger.debug(
+            f"[guesser/unlimited/start] admin={ctx.discord_user_id} "
+            f"session={challenge.get('session_id')}"
+        )
+        return challenge
+
+    @app.post("/api/guesser/unlimited/guess")
+    async def guesser_unlimited_guess(request: Request, ctx: _SessionContext = _admin_auth):
+        """Admin only: submit a guess for an unlimited-mode session."""
+        _require_guesser()
+        body       = await request.json()
+        session_id = str(body.get("session_id") or "").strip()
+        choice     = str(body.get("choice") or "").strip()
+        if not session_id:
+            raise HTTPException(status_code=422, detail="session_id is required")
+        if not choice:
+            raise HTTPException(status_code=422, detail="choice is required")
+        logger.debug(
+            f"[guesser/unlimited/guess] admin={ctx.discord_user_id} "
+            f"session={session_id} choice='{choice[:60]}'"
+        )
+        result = _guesser.submit_unlimited_guess(
+            session_id,
+            ctx.discord_user_id,
+            ctx.discord_username or f"user-{ctx.discord_user_id}",
+            choice,
+        )
+        if "error" in result:
+            raise HTTPException(status_code=409, detail=result["error"])
+        return result
+
     # -----------------------------------------------------------------------
     # Serve frontend (must be last)
     # -----------------------------------------------------------------------

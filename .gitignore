@@ -51,3 +51,9 @@ venv
 
 # Local-only browser extension (personal setup, not part of the project)
 /chrome-extension/
+
+# Auto-managed runtime files
+discordmusic.pid
+cloudflare_tunnel_url.json
+bin/cloudflared
+bin/cloudflared.exe
