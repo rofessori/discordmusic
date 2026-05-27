@@ -7712,12 +7712,23 @@ async def webui_command(ctx):
         )
         return
 
-    if not WEBUI_PUBLIC_URL:
-        await ctx.response.send_message(
-            "The web UI is running but `WEBUI_PUBLIC_URL` is not configured. "
-            "Set it in `.env` to the URL where the web UI is reachable, then restart.",
-            ephemeral=True,
-        )
+    webui_url = WEBUI_PUBLIC_URL or (
+        _webui_module.cloudflared_tunnel_url if _webui_module else None
+    )
+    if not webui_url:
+        if _webui_module and getattr(_webui_module, "WEBUI_CLOUDFLARED_AUTO", False):
+            await ctx.response.send_message(
+                "The web UI is starting up — cloudflared tunnel URL not ready yet. "
+                "Wait a few seconds and try again.",
+                ephemeral=True,
+            )
+        else:
+            await ctx.response.send_message(
+                "The web UI is running but `WEBUI_PUBLIC_URL` is not configured. "
+                "Set it in `.env` to the URL where the web UI is reachable, then restart.\n"
+                "Or set `WEBUI_CLOUDFLARED_AUTO=true` to have the bot start cloudflared automatically.",
+                ephemeral=True,
+            )
         return
 
     if client.webui_session_store is None:
@@ -7733,7 +7744,7 @@ async def webui_command(ctx):
         is_admin=is_user_admin(ctx.user),
     )
 
-    link = f"{WEBUI_PUBLIC_URL}/?s={session.token}"
+    link = f"{webui_url}/?s={session.token}"
 
     await ctx.response.send_message(
         f"**Playlist Editor**\n"
