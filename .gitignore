@@ -44,6 +44,9 @@ venv
 
 .tool-versions
 
+# AI planning docs — local only, never commit
+docs/superpowers/
+
 # Web UI build artifacts (source is committed, builds are not)
 /webui/frontend/node_modules/
 /webui/frontend/dist/

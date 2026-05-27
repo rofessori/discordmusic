@@ -134,6 +134,65 @@ def build_ffmpeg_before_options(resolved_url: str) -> str:
     return reconnect
 
 
+_rover_instance = None
+
+
+def init_rover(config_path: str) -> None:
+    """Initialize the Stream Rover instance from a rover.toml config path.
+
+    Call once at bot startup when ROVER_CONFIG is set.
+    """
+    global _rover_instance
+    from rover import Rover
+    _rover_instance = Rover(config_path)
+
+
+async def fetch_rover_stream(source_id: str) -> str:
+    """Resolve a source ID to a stream URL via the local Stream Rover instance.
+
+    Raises RuntimeError with a user-friendly message on any failure.
+    """
+    if _rover_instance is None:
+        raise RuntimeError(
+            "Stream Rover is not initialized. "
+            "Set ROVER_CONFIG=/path/to/rover.toml in .env and ensure stream-rover is installed."
+        )
+    try:
+        stream = await _rover_instance.get(source_id)
+        return stream.url
+    except KeyError as exc:
+        raise RuntimeError(str(exc)) from exc
+    except Exception as exc:
+        raise RuntimeError(f"Rover failed to resolve {source_id!r}: {exc}") from exc
+
+
+async def fetch_rover_radio(country: str = None) -> tuple[str, str]:
+    """Resolve a random radio station via Stream Rover.
+
+    Returns (url, station_name) tuple.
+    Raises RuntimeError on failure.
+    """
+    if _rover_instance is None:
+        raise RuntimeError(
+            "Stream Rover is not initialized. "
+            "Set ROVER_CONFIG=/path/to/rover.toml in .env."
+        )
+    try:
+        stream = await _rover_instance.get_random_radio(country=country)
+        name = stream.source_id.removeprefix("radio:random").strip() or stream.source_id
+        return stream.url, name
+    except Exception as exc:
+        raise RuntimeError(f"Could not fetch radio stream: {exc}") from exc
+
+
+def check_rover_dependencies() -> list:
+    try:
+        import rover  # noqa: F401
+        return []
+    except ImportError:
+        return ["stream-rover (run: pip install -e ~/stream-rover)"]
+
+
 async def start_webhook_server(on_url_received, secret: str, port: int):
     """Start a tiny HTTP endpoint the Chrome extension can POST fresh URLs to.
 

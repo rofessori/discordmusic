@@ -163,6 +163,19 @@ if TV_ENABLED:
             _tv_module = None
         else:
             logger.info("TV streaming module loaded.")
+            if ROVER_CONFIG:
+                rover_missing = _tv_module.check_rover_dependencies()
+                if rover_missing:
+                    logger.warning(
+                        "ROVER_CONFIG set but stream-rover package not installed. "
+                        f"Run: pip install -e ~/stream-rover"
+                    )
+                else:
+                    try:
+                        _tv_module.init_rover(ROVER_CONFIG)
+                        logger.info(f"Stream Rover initialized from {ROVER_CONFIG}")
+                    except Exception as _rover_exc:
+                        logger.warning(f"Stream Rover init failed: {_rover_exc}")
     except ImportError as _e:
         logger.warning(f"TV_ENABLED=true but tv_stream.py not found: {_e}")
 
@@ -499,6 +512,7 @@ TV_MAX_RESTARTS = env_int("TV_MAX_RESTARTS", 3, 1)
 TV_RESTART_WINDOW_SECONDS = env_int("TV_RESTART_WINDOW_SECONDS", 60, 10)
 TV_WEBHOOK_SECRET = get_env_value("TV_WEBHOOK_SECRET", required=False)
 TV_WEBHOOK_PORT = env_int("TV_WEBHOOK_PORT", 8766, 1024)
+ROVER_CONFIG = get_env_value("ROVER_CONFIG", required=False)
 
 USER_RESTRICTION_GROUPS = {
     "nodownload",
@@ -1672,6 +1686,7 @@ class Client(discord.Client):
         self.tv_stream_url = None
         self.tv_notify_channel = None
         self.tv_restart_count = 0
+        self.tv_rover_source = None        # rover source_id when started via /tv channel or /tv radio
         # Web UI per-user session store (populated at on_ready if WEBUI is enabled)
         self.webui_session_store = _WebUISessionStore() if _WebUISessionStore else None
         self.tv_restart_window_start = None
@@ -2498,7 +2513,15 @@ async def _tv_restart(channel):
         return
     logger.info(f"Restarting TV stream (attempt {client.tv_restart_count}/{TV_MAX_RESTARTS})")
     await asyncio.sleep(2)
-    await _start_tv_stream(channel, client.tv_stream_url)
+    url = client.tv_stream_url
+    if client.tv_rover_source and ROVER_CONFIG and _tv_module:
+        try:
+            url = await _tv_module.fetch_rover_stream(client.tv_rover_source)
+            client.tv_stream_url = url
+            logger.info(f"TV restart: fetched fresh URL from rover for {client.tv_rover_source!r}")
+        except RuntimeError as exc:
+            logger.warning(f"TV restart: rover fetch failed ({exc}), reusing cached URL")
+    await _start_tv_stream(channel, url)
 
 async def _start_tv_stream(channel, url):
     """Connect FFmpeg to the TV stream URL and hand it to the voice client."""
@@ -10072,6 +10095,7 @@ if _tv_module is not None:
         client.tv_mode_active = False
         client.tv_stream_url = None
         client.tv_notify_channel = None
+        client.tv_rover_source = None
         voice = active_voice_client()
         if voice:
             try:
@@ -10115,6 +10139,113 @@ if _tv_module is not None:
                 await ctx.followup.send("URL saved. Use `/tv start` to begin streaming.")
         else:
             await ctx.response.send_message("URL saved. Use `/tv start` to begin streaming.", ephemeral=True)
+
+    @app_commands.describe(source="Source ID from rover.toml (e.g. mtv3, nelonen, sub, tv5, jim)")
+    @tv_group.command(name="channel", description="Start a registered TV channel via Stream Rover.")
+    async def tv_channel_cmd(ctx, source: str):
+        record_command(ctx)
+        if not is_user_admin(ctx.user):
+            await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+        if not ROVER_CONFIG:
+            await ctx.response.send_message(
+                "Stream Rover not configured. Set `ROVER_CONFIG=/path/to/rover.toml` in `.env`.",
+                ephemeral=True,
+            )
+            return
+        if not ctx.user.voice or not ctx.user.voice.channel:
+            await ctx.response.send_message("You must be in a voice channel.", ephemeral=True)
+            return
+        if client.currently_playing and not client.tv_mode_active:
+            await ctx.response.send_message(
+                "Music is currently playing. Use `/stop` first.", ephemeral=True
+            )
+            return
+        await ctx.response.defer()
+        try:
+            stream_url = await _tv_module.fetch_rover_stream(source)
+        except RuntimeError as exc:
+            await ctx.followup.send(f"Rover error: {exc}", ephemeral=True)
+            return
+        target_channel = ctx.user.voice.channel
+        voice = active_voice_client(ctx.guild)
+        try:
+            if voice and voice.is_connected():
+                if getattr(voice, "channel", None) != target_channel:
+                    await voice.move_to(target_channel)
+                    apply_channel_volume_default(target_channel, "tv channel move")
+            else:
+                voice = await target_channel.connect()
+                client.current_voice_channel = voice
+                apply_channel_volume_default(target_channel, "tv channel join")
+        except Exception as exc:
+            logger.error(f"TV channel: voice join error: {exc}")
+            await ctx.followup.send("Could not join the voice channel.", ephemeral=True)
+            return
+        if client.tv_mode_active and voice.is_playing():
+            client.tv_mode_active = False
+            voice.stop()
+            await asyncio.sleep(0.1)
+        client.tv_restart_count = 0
+        client.tv_restart_window_start = None
+        client.tv_rover_source = source
+        await _start_tv_stream(ctx.channel, stream_url)
+        await ctx.followup.send(f"TV channel **{source}** started in **{target_channel.name}**.")
+
+    @app_commands.describe(country="Two-letter country code filter (e.g. FI). Leave blank for worldwide.")
+    @tv_group.command(name="radio", description="Play a random live radio station via Stream Rover.")
+    async def tv_radio_cmd(ctx, country: Optional[str] = None):
+        record_command(ctx)
+        if not is_user_admin(ctx.user):
+            await ctx.response.send_message("You do not have permission to use this command.", ephemeral=True)
+            return
+        if not ROVER_CONFIG:
+            await ctx.response.send_message(
+                "Stream Rover not configured. Set `ROVER_CONFIG=/path/to/rover.toml` in `.env`.",
+                ephemeral=True,
+            )
+            return
+        if not ctx.user.voice or not ctx.user.voice.channel:
+            await ctx.response.send_message("You must be in a voice channel.", ephemeral=True)
+            return
+        if client.currently_playing and not client.tv_mode_active:
+            await ctx.response.send_message(
+                "Music is currently playing. Use `/stop` first.", ephemeral=True
+            )
+            return
+        await ctx.response.defer()
+        try:
+            stream_url, station_name = await _tv_module.fetch_rover_radio(country=country)
+        except RuntimeError as exc:
+            await ctx.followup.send(f"Radio error: {exc}", ephemeral=True)
+            return
+        target_channel = ctx.user.voice.channel
+        voice = active_voice_client(ctx.guild)
+        try:
+            if voice and voice.is_connected():
+                if getattr(voice, "channel", None) != target_channel:
+                    await voice.move_to(target_channel)
+                    apply_channel_volume_default(target_channel, "tv radio move")
+            else:
+                voice = await target_channel.connect()
+                client.current_voice_channel = voice
+                apply_channel_volume_default(target_channel, "tv radio join")
+        except Exception as exc:
+            logger.error(f"TV radio: voice join error: {exc}")
+            await ctx.followup.send("Could not join the voice channel.", ephemeral=True)
+            return
+        if client.tv_mode_active and voice.is_playing():
+            client.tv_mode_active = False
+            voice.stop()
+            await asyncio.sleep(0.1)
+        client.tv_restart_count = 0
+        client.tv_restart_window_start = None
+        client.tv_rover_source = None
+        await _start_tv_stream(ctx.channel, stream_url)
+        label = f"**{station_name}**" if station_name else "a radio station"
+        if country:
+            label += f" ({country.upper()})"
+        await ctx.followup.send(f"Radio {label} started in **{target_channel.name}**.")
 
     client.tree.add_command(tv_group)
 
