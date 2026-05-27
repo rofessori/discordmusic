@@ -1,13 +1,13 @@
 """
 Web UI module for the Discord music bot.
 
-Provides a browser-based interface for managing playlists and viewing the queue.
-Runs as a FastAPI server on the same asyncio event loop as the bot.
+Provides a browser-based interface for managing playlists, queue, favorites,
+and admin tools. Runs as a FastAPI server on the same asyncio event loop.
 
 Activation:
     Set WEBUI_ENABLED=true and WEBUI_SECRET_KEY=<strong-secret> in .env, then restart.
 
-Required packages (uncomment in requirements.txt):
+Required packages:
     uvicorn>=0.30.0,<1.0
     fastapi>=0.111.0,<1.0
 
@@ -15,23 +15,19 @@ Environment variables:
     WEBUI_ENABLED       – set to true/1/yes to activate
     WEBUI_PORT          – port to bind (default: 8765)
     WEBUI_BIND_HOST     – host to bind (default: 127.0.0.1)
-                          set to 0.0.0.0 for LAN/homelab access
-    WEBUI_SECRET_KEY    – admin bearer token; also used for the legacy login screen
-    WEBUI_PUBLIC_URL    – the URL users will open in their browser, e.g.
-                          https://music.yoursite.com or the cloudflared tunnel URL.
-                          Required for /webui command to produce clickable links.
+    WEBUI_SECRET_KEY    – admin bearer token
+    WEBUI_PUBLIC_URL    – public URL for /webui command links
 
 Networking:
-    For public access, use Cloudflare Tunnel:
-        cloudflared tunnel --url http://127.0.0.1:WEBUI_PORT
-    For homelab: point your ingress at WEBUI_BIND_HOST:WEBUI_PORT.
-    Behind a reverse proxy? Set WEBUI_BIND_HOST=0.0.0.0 and ensure your proxy
-    forwards X-Forwarded-For so per-user IP locking uses the real client IP.
+    Cloudflare Tunnel:  cloudflared tunnel --url http://127.0.0.1:WEBUI_PORT
+    Homelab:            point nginx/Caddy at WEBUI_BIND_HOST:WEBUI_PORT
 """
 
 import asyncio
 import logging
 import os
+import platform
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -57,12 +53,17 @@ def check_dependencies() -> list:
 
 class BotState:
     """
-    Live read-only view of bot state passed to the web server.
-    Holds references — not snapshots — so values are always current.
+    Live view of bot state exposed to the web server.
+    Holds references (not snapshots) so values are always current.
+    Also exposes control methods (skip, pause, resume) that are safe
+    to call from the asyncio web-request context.
     """
     def __init__(self, client_ref, queue_ref):
         self._client = client_ref
         self._queue  = queue_ref
+        self._start_time = time.time()
+
+    # ── Read-only state ───────────────────────────────────────────────────────
 
     @property
     def queue(self) -> list:
@@ -72,16 +73,83 @@ class BotState:
     def current_track_info(self):
         return getattr(self._client, "current_track_info", None)
 
+    @property
+    def _voice_client(self):
+        vcs = getattr(self._client, "voice_clients", [])
+        return vcs[0] if vcs else None
+
+    @property
+    def is_playing(self) -> bool:
+        vc = self._voice_client
+        return bool(vc and vc.is_playing())
+
+    @property
+    def is_paused(self) -> bool:
+        vc = self._voice_client
+        return bool(vc and vc.is_paused())
+
+    @property
+    def uptime_seconds(self) -> float:
+        return time.time() - self._start_time
+
+    @property
+    def process_memory_mb(self) -> float | None:
+        try:
+            import resource
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            if platform.system() == "Darwin":
+                return usage.ru_maxrss / (1024 * 1024)
+            return usage.ru_maxrss / 1024
+        except Exception:
+            return None
+
+    def disk_usage(self, base_dir: str) -> dict:
+        result = {}
+        for name in ("cache", "playlists"):
+            path = os.path.join(base_dir, name)
+            total, count = 0, 0
+            if os.path.isdir(path):
+                for dp, _, files in os.walk(path):
+                    for f in files:
+                        try:
+                            total += os.path.getsize(os.path.join(dp, f))
+                            count += 1
+                        except OSError:
+                            pass
+            result[name] = {"bytes": total, "files": count}
+        return result
+
+    # ── Playback control ──────────────────────────────────────────────────────
+
+    def skip(self) -> bool:
+        vc = self._voice_client
+        if vc and (vc.is_playing() or vc.is_paused()):
+            vc.stop()
+            return True
+        return False
+
+    def pause(self) -> bool:
+        vc = self._voice_client
+        if vc and vc.is_playing():
+            vc.pause()
+            return True
+        return False
+
+    def resume(self) -> bool:
+        vc = self._voice_client
+        if vc and vc.is_paused():
+            vc.resume()
+            return True
+        return False
+
+    def add_to_queue(self, track: dict):
+        self._queue.append(track)
+
 
 async def start(*, playlists_dir: str, bot_state: "BotState", sessions):
     """
-    Start the web UI FastAPI server as a background asyncio task.
+    Start the FastAPI server as a background asyncio task.
     Returns immediately; the server runs concurrently with the bot.
-
-    Args:
-        playlists_dir: Absolute path to the playlists/ directory.
-        bot_state:     BotState instance wrapping the live bot client.
-        sessions:      webui.sessions.SessionStore instance from the bot Client.
     """
     missing = check_dependencies()
     if missing:
@@ -94,15 +162,12 @@ async def start(*, playlists_dir: str, bot_state: "BotState", sessions):
     if not WEBUI_SECRET_KEY:
         logger.warning(
             "WEBUI_ENABLED=true but WEBUI_SECRET_KEY is not set. "
-            "The web UI requires either WEBUI_SECRET_KEY (admin bypass) or "
-            "per-user sessions via /webui. Set a strong key before network exposure."
+            "Set a strong key before network exposure."
         )
 
     if not WEBUI_PUBLIC_URL:
         logger.warning(
-            "WEBUI_PUBLIC_URL is not set. The /webui Discord command will not be able "
-            "to produce links. Set WEBUI_PUBLIC_URL to the URL where the web UI is "
-            "reachable (e.g. https://music.yoursite.com or a cloudflared URL)."
+            "WEBUI_PUBLIC_URL is not set. The /webui command cannot produce links."
         )
 
     import uvicorn
@@ -122,11 +187,22 @@ async def start(*, playlists_dir: str, bot_state: "BotState", sessions):
         log_level="warning",
         loop="asyncio",
         access_log=False,
-        # Trust X-Forwarded-For so IP locking uses the real client IP
-        # when the server is behind a reverse proxy or Cloudflare Tunnel.
         proxy_headers=True,
         forwarded_allow_ips="*",
     )
-    server = uvicorn.Server(config)
+
+    class _EmbeddedServer(uvicorn.Server):
+        """Uvicorn that doesn't overwrite discord.py's signal handlers."""
+        def install_signal_handlers(self) -> None:
+            pass
+
+    server = _EmbeddedServer(config)
     logger.info(f"Web UI starting on http://{WEBUI_BIND_HOST}:{WEBUI_PORT}")
-    asyncio.create_task(server.serve())
+
+    async def _serve():
+        try:
+            await server.serve()
+        except Exception as exc:
+            logger.error(f"Web UI server stopped unexpectedly: {exc}", exc_info=True)
+
+    asyncio.create_task(_serve())
