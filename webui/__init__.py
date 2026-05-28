@@ -552,15 +552,17 @@ async def _run_cloudflared(port: int) -> None:
 
     async def _drain(stream):
         global cloudflared_tunnel_url
+        url_captured = False
         async for raw in stream:
             line = raw.decode(errors="replace").strip()
-            if not cloudflared_tunnel_url or "trycloudflare.com" not in cloudflared_tunnel_url:
+            if not url_captured:
                 m = _CF_URL_RE.search(line)
                 if m:
                     new_url = m.group(0).rstrip("/")
                     cloudflared_tunnel_url = new_url
                     _save_tunnel_url(new_url)
                     logger.info(f"[webui] Cloudflare tunnel URL: {new_url}")
+                    url_captured = True
 
     asyncio.create_task(_drain(proc.stdout))
     asyncio.create_task(_drain(proc.stderr))
@@ -651,10 +653,13 @@ async def start(*, playlists_dir: str, bot_state: "BotState", sessions,
 
     asyncio.create_task(_serve())
 
-    # 4. Start cloudflared if no manual public URL
-    if WEBUI_CLOUDFLARED_AUTO and not WEBUI_PUBLIC_URL:
+    # 4. Start cloudflared tunnel unless explicitly disabled.
+    # WEBUI_PUBLIC_URL is honoured for permanent static domains but does NOT
+    # suppress cloudflared — quick-tunnel URLs are ephemeral and go stale on
+    # restart.  Set WEBUI_CLOUDFLARED_AUTO=false to opt out entirely.
+    if WEBUI_CLOUDFLARED_AUTO:
         asyncio.create_task(_run_cloudflared(port))
-    elif not WEBUI_PUBLIC_URL and not WEBUI_CLOUDFLARED_AUTO:
+    elif not WEBUI_PUBLIC_URL:
         logger.info(
             "[webui] WEBUI_CLOUDFLARED_AUTO=false and WEBUI_PUBLIC_URL not set. "
             "The /webui command will only work with a manually configured URL."
