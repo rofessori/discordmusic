@@ -1044,7 +1044,9 @@ def run_startup_diagnostics() -> StartupReport:
         except Exception:
             pass
         if importlib.util.find_spec("yt_dlp_ejs") is None:
-            report.errors.append(
+            # Downgraded to warning — bot functions without it, just with reduced
+            # YouTube JS challenge coverage.
+            report.warnings.append(
                 "yt-dlp-ejs is missing. Run `pip install --upgrade -r requirements.txt` "
                 "to install YouTube JavaScript challenge support."
             )
