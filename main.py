@@ -189,8 +189,19 @@ if SPOTIFY_ENABLED:
         import modules.spotify_import as _spotify_module
         missing_deps = _spotify_module.check_dependencies()
         if missing_deps:
+            logger.info(f"[spotify] Auto-installing missing packages: {missing_deps}")
+            try:
+                import subprocess as _sp
+                _sp.run(
+                    [sys.executable, "-m", "pip", "install", "--quiet", *missing_deps],
+                    check=True,
+                )
+                missing_deps = _spotify_module.check_dependencies()
+            except Exception as _install_exc:
+                logger.warning(f"[spotify] Auto-install failed: {_install_exc}")
+        if missing_deps:
             logger.warning(
-                "Spotify module: required packages missing — "
+                "Spotify module: required packages still missing — "
                 f"run: pip install {' '.join(missing_deps)}"
             )
             _spotify_module = None
