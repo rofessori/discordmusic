@@ -74,10 +74,12 @@ IMPORT_TTL_SECONDS = 600
 # ---------------------------------------------------------------------------
 
 def check_dependencies() -> list:
-    """Return list of missing package specs (ytmusicapi is the only hard requirement)."""
+    """Return list of missing package specs needed to run Spotify import."""
     missing = []
     for pkg, spec in (
         ("ytmusicapi", "ytmusicapi>=1.8.0,<2.0"),
+        ("rapidfuzz",  "rapidfuzz>=3.0.0,<4.0"),
+        ("spotipy",    "spotipy>=2.24.0,<3.0"),
     ):
         try:
             __import__(pkg)
