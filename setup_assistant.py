@@ -60,6 +60,8 @@ ENV_FIELDS = [
 ]
 SECRET_FIELDS = {"BOT_TOKEN", "WEBUI_SECRET_KEY", "TV_WEBHOOK_SECRET", "SPOTIFY_CLIENT_SECRET"}
 
+_SENSITIVE_MARKERS = {"SECRET", "TOKEN", "PASSWORD", "PASS", "API_KEY", "WEBHOOK_SECRET"}
+
 
 # ── Exceptions ─────────────────────────────────────────────────────────────────
 
@@ -203,7 +205,8 @@ def normalize_optional_snowflake(value: str) -> str:
 def mask_value(key: str, value: str) -> str:
     if not value:
         return dim("(not set)")
-    if key in SECRET_FIELDS:
+    upper = key.upper()
+    if key in SECRET_FIELDS or any(m in upper for m in _SENSITIVE_MARKERS):
         return dim("***set***")
     return value
 
@@ -568,8 +571,15 @@ class SetupAssistant:
         for line in textwrap.wrap(text, 74):
             print(f"  {dim(line)}")
 
+    def _redact_sensitive(self, text: str) -> str:
+        for key in SECRET_FIELDS:
+            val = self.values.get(key, "")
+            if val and val in text:
+                text = text.replace(val, "***")
+        return text
+
     def info(self, text: str) -> None:
-        print(f"  {cyan('·')}  {text}")
+        print(f"  {cyan('·')}  {self._redact_sensitive(text)}")
 
     def ok(self, text: str) -> None:
         print(f"  {green('✓')}  {text}")
@@ -940,8 +950,9 @@ class SetupAssistant:
         workdir = Path(workdir_text).expanduser().resolve()
         service_content = render_systemd_service(service_user, workdir)
         print()
-        self.info(f"User: {service_user}")
-        self.info(f"WorkingDirectory: {workdir}")
+        masked_user = "***" if service_user else "(empty)"
+        print(f"  {cyan('·')}  User: {masked_user}")
+        print(f"  {cyan('·')}  WorkingDirectory: {workdir}")
         print()
         if self.ask_yes_no("Install and start the systemd service now?", default=False):
             temp_service = write_private_temp_service(service_content)
@@ -989,10 +1000,59 @@ class SetupAssistant:
             self.note("No .env changes were written.")
             self.save()
             return
+        self._auto_configure_webui_and_spotify()
         self.dependency_setup()
         self.screen_setup()
         self.systemd_setup()
         self.finish()
+
+    def _auto_configure_webui_and_spotify(self) -> None:
+        """
+        Auto-write WEBUI_ENABLED, WEBUI_SECRET_KEY, WEBUI_CLOUDFLARED_AUTO,
+        and SPOTIFY_ENABLED after the Discord setup completes.
+        The user is shown what was written but no interaction is required.
+        """
+        self.header("auto-configure web UI & Spotify")
+        self.note(
+            "The bot now sets up the web UI and Spotify import automatically. "
+            "These defaults are being written to .env for you:"
+        )
+        print()
+
+        env = read_env(ENV_PATH)
+        updates: dict[str, str] = {}
+
+        # Only set if not already explicitly configured
+        if env.get("WEBUI_ENABLED", "").strip() == "":
+            updates["WEBUI_ENABLED"] = "true"
+            print(f"  {green('✓')} WEBUI_ENABLED=true")
+
+        if not env.get("WEBUI_SECRET_KEY", "").strip():
+            import secrets as _s
+            key = _s.token_urlsafe(32)
+            updates["WEBUI_SECRET_KEY"] = key
+            print(f"  {green('✓')} WEBUI_SECRET_KEY=<generated>  (saved to .env — keep private)")
+
+        if env.get("WEBUI_CLOUDFLARED_AUTO", "").strip() == "":
+            updates["WEBUI_CLOUDFLARED_AUTO"] = "true"
+            print(f"  {green('✓')} WEBUI_CLOUDFLARED_AUTO=true  (tunnel starts automatically)")
+
+        if env.get("SPOTIFY_ENABLED", "").strip() == "":
+            updates["SPOTIFY_ENABLED"] = "true"
+            print(f"  {green('✓')} SPOTIFY_ENABLED=true  (no API keys needed — uses page scraping)")
+
+        if updates:
+            update_env_keys(updates)
+            print()
+            self.ok(f"Wrote {len(updates)} value(s) to .env")
+        else:
+            self.ok("All values already configured — nothing changed.")
+
+        print()
+        self.note("Use /webui in Discord to get your personal web UI link.")
+        self.note("Use /spotify import <url> to import a public Spotify playlist.")
+        print()
+        self.wait_continue()
 
     # ── Web UI section ─────────────────────────────────────────────────────────
 
@@ -1002,8 +1062,15 @@ class SetupAssistant:
 
         self.header(
             "web ui configuration",
-            "Playlist editor · per-user sessions · Cloudflare Tunnel support",
+            "Playlist editor · per-user sessions · auto cloudflare tunnel",
         )
+        self.note(
+            "The web UI now sets itself up automatically: "
+            "secret key is auto-generated, packages auto-installed, "
+            "and cloudflared is auto-downloaded + started on bot launch. "
+            "Just enable it — everything else is handled."
+        )
+        print()
 
         # ── Enable/disable ──
         current_enabled = env.get("WEBUI_ENABLED", "").lower() in {"true", "1", "yes"}

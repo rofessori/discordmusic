@@ -18,6 +18,7 @@ import shutil
 import sys
 import math
 import importlib.util
+import random
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -111,10 +112,65 @@ PLAYLIST_PREDOWNLOAD_ENABLED = (
     env_flag("PLAYLIST_PREDOWNLOAD_ENABLED")
 )
 YTDLP_NO_CHECK_CERTIFICATE = env_flag("YTDLP_NO_CHECK_CERTIFICATE", False)
-SPOTIFY_ENABLED = env_flag("SPOTIFY_ENABLED", False)
-WEBUI_ENABLED = env_flag("WEBUI_ENABLED", False)
+SPOTIFY_ENABLED = env_flag("SPOTIFY_ENABLED", True)   # default on — no API keys needed
+WEBUI_ENABLED   = env_flag("WEBUI_ENABLED",   True)   # default on — auto-setup handles everything
 WEBUI_PUBLIC_URL = os.getenv("WEBUI_PUBLIC_URL", "").rstrip("/")
 TV_ENABLED = env_flag("TV_ENABLED", False)
+
+# ---------------------------------------------------------------------------
+# Bot singleton: kill any existing instance before starting
+# ---------------------------------------------------------------------------
+
+def _write_pid_file():
+    pid_path = os.path.join(BASE_DIR, "discordmusic.pid")
+    try:
+        with open(pid_path, "w") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
+def _check_and_assimilate_old_instance():
+    """Kill an existing bot instance recorded in discordmusic.pid."""
+    pid_path = os.path.join(BASE_DIR, "discordmusic.pid")
+    if not os.path.isfile(pid_path):
+        return
+    try:
+        with open(pid_path) as f:
+            old_pid = int(f.read().strip())
+    except (ValueError, IOError):
+        return
+    if old_pid == os.getpid():
+        return
+    try:
+        os.kill(old_pid, 0)  # raises ProcessLookupError if dead
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        logger.warning(f"Found existing bot PID {old_pid} but cannot signal it (permission denied)")
+        return
+    import signal as _signal
+    logger.info(f"Assimilating old bot instance (PID {old_pid})…")
+    try:
+        os.kill(old_pid, _signal.SIGTERM)
+        time.sleep(2)
+        try:
+            os.kill(old_pid, 0)
+            os.kill(old_pid, _signal.SIGKILL)
+            time.sleep(0.5)
+        except ProcessLookupError:
+            pass
+        logger.info(f"Old instance PID {old_pid} terminated")
+    except ProcessLookupError:
+        pass
+    except Exception as exc:
+        logger.warning(f"Could not terminate old instance PID {old_pid}: {exc}")
+
+_check_and_assimilate_old_instance()
+_write_pid_file()
+
+# ---------------------------------------------------------------------------
+# Module loading
+# ---------------------------------------------------------------------------
 
 _webui_module = None
 _WebUISessionStore = None
@@ -122,38 +178,47 @@ if WEBUI_ENABLED:
     try:
         import webui as _webui_module
         from webui.sessions import SessionStore as _WebUISessionStore
-        missing_webui = _webui_module.check_dependencies()
-        if missing_webui:
-            logger.warning(
-                "WEBUI_ENABLED=true but required packages are missing. "
-                f"Run: pip install {' '.join(missing_webui)}"
-            )
-            _webui_module = None
-        else:
-            logger.info("Web UI module loaded.")
+        # Dependencies are auto-installed inside webui.start() — skip pre-check here
+        logger.info("Web UI module loaded.")
     except ImportError as _e:
         logger.warning(f"WEBUI_ENABLED=true but webui module not found: {_e}")
 
 _spotify_module = None
 if SPOTIFY_ENABLED:
     try:
-        import spotify_import as _spotify_module
+        import modules.spotify_import as _spotify_module
         missing_deps = _spotify_module.check_dependencies()
         if missing_deps:
+            logger.info(f"[spotify] Auto-installing missing packages: {missing_deps}")
+            try:
+                import subprocess as _sp
+                _sp.run(
+                    [sys.executable, "-m", "pip", "install", "--quiet", *missing_deps],
+                    check=True,
+                )
+                missing_deps = _spotify_module.check_dependencies()
+            except Exception as _install_exc:
+                logger.warning(f"[spotify] Auto-install failed: {_install_exc}")
+        if missing_deps:
             logger.warning(
-                "SPOTIFY_ENABLED=true but required packages are missing. "
-                f"Run: pip install {' '.join(missing_deps)}"
+                "Spotify module: required packages still missing — "
+                f"run: pip install {' '.join(missing_deps)}"
             )
             _spotify_module = None
         else:
-            logger.info("Spotify import module loaded.")
+            logger.info("Spotify import module loaded (hybrid scraper).")
     except ImportError as _e:
-        logger.warning(f"SPOTIFY_ENABLED=true but spotify_import.py not found: {_e}")
+        # Also try root-level for backwards compatibility
+        try:
+            import spotify_import as _spotify_module
+            logger.info("Spotify import module loaded (root fallback).")
+        except ImportError:
+            logger.warning(f"SPOTIFY_ENABLED=true but spotify module not found: {_e}")
 
 _tv_module = None
 if TV_ENABLED:
     try:
-        import tv_stream as _tv_module
+        import modules.tv_stream as _tv_module
         missing_tv = _tv_module.check_dependencies()
         if missing_tv:
             logger.warning(
@@ -163,8 +228,40 @@ if TV_ENABLED:
             _tv_module = None
         else:
             logger.info("TV streaming module loaded.")
-    except ImportError as _e:
-        logger.warning(f"TV_ENABLED=true but tv_stream.py not found: {_e}")
+    except ImportError:
+        try:
+            import tv_stream as _tv_module
+            logger.info("TV streaming module loaded (root fallback).")
+        except ImportError as _e:
+            logger.warning(f"TV_ENABLED=true but tv_stream module not found: {_e}")
+
+QUOTE_GUESSER_ENABLED = env_flag("QUOTE_GUESSER_ENABLED", False)
+_guesser = None
+if QUOTE_GUESSER_ENABLED and WEBUI_ENABLED and _webui_module is not None:
+    try:
+        import modules.quote_guesser as _quote_guesser_mod
+    except ImportError:
+        try:
+            import quote_guesser as _quote_guesser_mod
+        except ImportError as _e:
+            _quote_guesser_mod = None
+            logger.warning(f"QUOTE_GUESSER_ENABLED=true but guesser module not found: {_e}")
+    if _quote_guesser_mod is not None:
+        try:
+            _guesser = _quote_guesser_mod.QuoteGuesser(BASE_DIR)
+            logger.info("Quote guesser module loaded.")
+        except Exception as _e:
+            logger.warning(f"QUOTE_GUESSER_ENABLED=true but guesser init failed: {_e}")
+
+QUOTE_GUESSER_ENABLED = env_flag("QUOTE_GUESSER_ENABLED", False)
+_guesser = None
+if QUOTE_GUESSER_ENABLED and WEBUI_ENABLED and _webui_module is not None:
+    try:
+        import quote_guesser as _quote_guesser_mod
+        _guesser = _quote_guesser_mod.QuoteGuesser(BASE_DIR)
+        logger.info("Quote guesser module loaded.")
+    except Exception as _e:
+        logger.warning(f"QUOTE_GUESSER_ENABLED=true but guesser init failed: {_e}")
 
 ALLOW_ADMIN_ROLE_NAME = env_flag("ALLOW_ADMIN_ROLE_NAME", False)
 MAX_PLAYLIST_TRACKS = env_int("MAX_PLAYLIST_TRACKS", 100)
@@ -940,10 +1037,21 @@ def run_startup_diagnostics() -> StartupReport:
         report.notes.append(f"yt-dlp {ytdlp_version} available.")
 
     if importlib.util.find_spec("yt_dlp_ejs") is None:
-        report.errors.append(
-            "yt-dlp-ejs is missing. Run `pip install --upgrade -r requirements.txt` "
-            "to install YouTube JavaScript challenge support."
-        )
+        try:
+            import subprocess as _sp
+            _sp.run([sys.executable, "-m", "pip", "install", "--quiet", "yt-dlp-ejs==0.8.0"], check=True)
+            importlib.invalidate_caches()
+        except Exception:
+            pass
+        if importlib.util.find_spec("yt_dlp_ejs") is None:
+            # Downgraded to warning — bot functions without it, just with reduced
+            # YouTube JS challenge coverage.
+            report.warnings.append(
+                "yt-dlp-ejs is missing. Run `pip install --upgrade -r requirements.txt` "
+                "to install YouTube JavaScript challenge support."
+            )
+        else:
+            report.notes.append("yt-dlp-ejs auto-installed.")
     else:
         report.notes.append("yt-dlp-ejs available.")
 
@@ -1065,6 +1173,11 @@ def run_startup_diagnostics() -> StartupReport:
 
     if CLEANED_DOWNLOADS:
         report.notes.append(f"Pruned {CLEANED_DOWNLOADS} expired download(s) on startup.")
+
+    if QUOTE_GUESSER_ENABLED and _guesser is not None:
+        report.notes.append("Quote guesser enabled (daily challenge available in WebUI).")
+    elif QUOTE_GUESSER_ENABLED and _guesser is None:
+        report.warnings.append("QUOTE_GUESSER_ENABLED=true but guesser failed to load.")
 
     return report
 
@@ -1233,7 +1346,14 @@ def playlist_cache_modes_order() -> list:
 
 def set_verbose_logging(enabled: bool):
     client.log_verbose = bool(enabled)
-    logger.setLevel(logging.DEBUG if client.log_verbose else logging.INFO)
+    level = logging.DEBUG if client.log_verbose else logging.INFO
+    logger.setLevel(level)
+    # Also update root so webui/guesser/other module DEBUG records are captured
+    logging.getLogger().setLevel(level)
+    logger.debug(
+        f"Verbose logging {'enabled' if enabled else 'disabled'} "
+        f"(root logger level={logging.getLevelName(level)})"
+    )
 
 def config_panel_message() -> str:
     policy = favorites_cache_policy()
@@ -2431,6 +2551,10 @@ async def perform_skip_action() -> str:
         return "TV is playing. Use `/tv stop` first."
     voice = active_voice_client()
     if voice and voice.is_connected() and (voice.is_playing() or voice.is_paused()):
+        logger.debug(
+            f"skip: stopping voice client is_playing={voice.is_playing()} "
+            f"is_paused={voice.is_paused()} queue_len={len(queue)}"
+        )
         voice.stop()
         logger.info("Track skipped.")
         return "Skipped the current track."
@@ -3871,9 +3995,13 @@ def favorites_status_message(user) -> str:
 def playlist_to_queue_tracks(playlist: dict, *, block_id: Optional[str] = None) -> list:
     tracks = playlist.get("tracks", [])
     block_id = block_id or generate_playlist_id()
-    total = len(tracks)
+    active_tracks = [t for t in tracks if not t.get("admin_disabled")]
+    skipped = len(tracks) - len(active_tracks)
+    if skipped:
+        logger.debug(f"[playlist_to_queue_tracks] skipped {skipped} admin-disabled track(s) in '{playlist.get('name')}'")
+    total = len(active_tracks)
     queue_tracks = []
-    for index, track in enumerate(tracks, start=1):
+    for index, track in enumerate(active_tracks, start=1):
         normalize_playlist_track_cache_fields(track)
         queue_track = {
             "id": str(track.get("id") or ""),
@@ -5730,6 +5858,10 @@ async def download_youtube_to_cache(
     playlist: bool = False,
     debug_report: Optional[DebugPlaybackMessage] = None,
 ) -> tuple:
+    logger.debug(
+        f"download_youtube_to_cache: url={video_url[:80]} "
+        f"cache_key={cache_key} playlist={playlist}"
+    )
     prefix = "plst-" if playlist else ""
     temp_token = secrets.token_hex(4)
     cache_bytes_before = cache_total_bytes()
@@ -6450,6 +6582,11 @@ async def enqueue_track_with_playlist_prompt(ctx, track: dict, command_name: str
         title = discord.utils.escape_markdown(str(track.get('title') or 'Unknown title'))
         await ctx.followup.send(f"Added to queue: {title} ({track.get('id', '')})")
         logger.info(f"Track enqueued: {track.get('title')} ({track.get('id')})")
+        logger.debug(
+            f"enqueue: queue_len={len(queue)} "
+            f"track_id={track.get('id')} "
+            f"user={getattr(getattr(ctx, 'user', None), 'id', '?')}"
+        )
 
 def youtube_playlist_queue_message(tracks: list, *, action: str) -> str:
     playlist_name = discord.utils.escape_markdown(str(tracks[0].get("playlist_name") or "YouTube playlist"))
@@ -6713,6 +6850,10 @@ def schedule_playlist_cache_warmup(ctx, playlist: dict, tracks: list, command_na
     return True
 
 async def play_playlist_now(ctx, playlist: dict, command_name: str):
+    if playlist.get("admin_disabled") and not is_user_admin(ctx.user):
+        await ctx.followup.send("That playlist has been disabled by an admin.", ephemeral=True)
+        logger.info(f"[play_playlist_now] blocked admin-disabled playlist '{playlist.get('name')}' for user {user_display(ctx.user)}")
+        return
     tracks = playlist_to_queue_tracks(playlist)
     for track in tracks:
         track["requested_by_user_id"] = user_id_value(ctx.user)
@@ -7319,6 +7460,7 @@ async def on_ready():
             playlists_dir=PLAYLISTS_DIR,
             bot_state=bot_state,
             sessions=client.webui_session_store,
+            guesser=_guesser,
         )
 
         async def _webui_session_sweeper():
@@ -7667,12 +7809,26 @@ async def webui_command(ctx):
         )
         return
 
-    if not WEBUI_PUBLIC_URL:
-        await ctx.response.send_message(
-            "The web UI is running but `WEBUI_PUBLIC_URL` is not configured. "
-            "Set it in `.env` to the URL where the web UI is reachable, then restart.",
-            ephemeral=True,
-        )
+    # Prefer the live cloudflared URL (refreshed on every restart) over the
+    # static env-var value, which goes stale when quick-tunnel hostnames rotate.
+    webui_url = (
+        getattr(_webui_module, "cloudflared_tunnel_url", None) if _webui_module else None
+    ) or WEBUI_PUBLIC_URL
+    if not webui_url:
+        # cloudflared is starting up — tunnel URL not ready yet
+        if _webui_module and getattr(_webui_module, "WEBUI_CLOUDFLARED_AUTO", True):
+            await ctx.response.send_message(
+                "The web UI is warming up — the Cloudflare tunnel URL is not ready yet. "
+                "This usually takes 5–15 seconds. Try `/webui` again in a moment.",
+                ephemeral=True,
+            )
+        else:
+            await ctx.response.send_message(
+                "The web UI is running but no public URL is configured. "
+                "Set `WEBUI_PUBLIC_URL` in `.env`, or ensure cloudflared is installed and "
+                "`WEBUI_CLOUDFLARED_AUTO` is not set to false.",
+                ephemeral=True,
+            )
         return
 
     if client.webui_session_store is None:
@@ -7688,7 +7844,7 @@ async def webui_command(ctx):
         is_admin=is_user_admin(ctx.user),
     )
 
-    link = f"{WEBUI_PUBLIC_URL}/?s={session.token}"
+    link = f"{webui_url}/?s={session.token}"
 
     await ctx.response.send_message(
         f"**Playlist Editor**\n"
@@ -8512,6 +8668,7 @@ async def playlist_list(ctx):
     record_command(ctx)
     pages = playlist_list_pages_for(ctx.user)
     await send_paged_playlist_message(ctx, pages)
+    await _maybe_advertise_webui(ctx)
 
 @app_commands.describe(name="Playlist name", visibility="private, public, current, currentqueue, or jono")
 @app_commands.choices(visibility=[
@@ -8594,6 +8751,7 @@ async def playlist_play(ctx, playlist: str):
         await ctx.followup.send("Playlist not found or not visible to you. Try `/playlist list`.", ephemeral=True)
         return
     await play_playlist_now(ctx, target, "playlist play")
+    await _maybe_advertise_webui(ctx)
 
 @app_commands.describe(
     playlist="Playlist name, id, or playlist:name",
@@ -9738,7 +9896,7 @@ async def reboot(ctx):
         except Exception as e:
             logger.error(f"Error disconnecting voice client on reboot: {e}")
         await client.close()
-        os._exit(0)
+        os._exit(1)  # non-zero so systemd Restart=on-failure triggers
     else:
         await ctx.followup.send("Reboot cancelled.")
         logger.info("Reboot cancelled by admin.")
@@ -9815,6 +9973,26 @@ async def backup_teekkari_quotes(ctx):
     await safe_interaction_send(ctx, f"Quotes backup completed ({count} messages scanned).")
     logger.info("Teekkari quotes backed up by command.")
 
+_WEBUI_AD_MESSAGES = [
+    "Did you know? Use `/webui` to get a personal link to the playlist editor and player controls!",
+    "Tip: `/webui` opens a browser panel where you can manage playlists, see the queue, and star favorites.",
+    "Try `/webui` for a web interface with playlist editing, queue view, and daily quote game!",
+    "Manage your playlists from any browser — use `/webui` to get your personal link.",
+]
+
+async def _maybe_advertise_webui(ctx, *, chance: float = 0.22):
+    """Send a WebUI tip as a follow-up ~22% of the time when WebUI is accessible."""
+    if not WEBUI_ENABLED or not WEBUI_PUBLIC_URL:
+        return
+    if random.random() > chance:
+        return
+    msg = random.choice(_WEBUI_AD_MESSAGES)
+    try:
+        await ctx.followup.send(msg, ephemeral=True)
+    except Exception:
+        pass
+
+
 # Random quote command
 @client.tree.command()
 async def random_quote(ctx):
@@ -9823,6 +10001,7 @@ async def random_quote(ctx):
     message = quotes.getRandomQuote()
     await ctx.response.send_message(message)
     logger.info("User requested random teekkari quote.")
+    await _maybe_advertise_webui(ctx)
 
 @client.tree.command(name="whatsnew")
 async def whatsnew(ctx):

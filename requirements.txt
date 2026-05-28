@@ -5,7 +5,7 @@ attrs==25.3.0
 discord.py[voice]==2.7.1
 davey==0.1.5
 frozenlist==1.7.0
-idna==3.10
+idna==3.15
 multidict==6.6.3
 propcache==0.3.2
 python-dotenv>=1.2.2,<2.0
@@ -16,13 +16,13 @@ yt-dlp-ejs==0.8.0
 PyNaCl>=1.5.0,<1.6
 
 # Optional: Spotify playlist import (SPOTIFY_ENABLED=true in .env)
-# spotipy>=2.24.0,<3.0
-# ytmusicapi>=1.8.0,<2.0
-# rapidfuzz>=3.0.0,<4.0
+spotipy>=2.24.0,<3.0
+ytmusicapi>=1.8.0,<2.0
+rapidfuzz>=3.0.0,<4.0
 
 # Optional: Web UI (WEBUI_ENABLED=true in .env)
-# uvicorn>=0.30.0,<1.0
-# fastapi>=0.111.0,<1.0
+uvicorn>=0.30.0,<1.0
+fastapi>=0.111.0,<1.0
 
 # Optional: Live TV streaming (TV_ENABLED=true in .env)
 # No additional packages required — uses only stdlib shlex and discord.FFmpegPCMAudio.
