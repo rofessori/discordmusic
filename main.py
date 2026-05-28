@@ -7787,9 +7787,11 @@ async def webui_command(ctx):
         )
         return
 
-    webui_url = WEBUI_PUBLIC_URL or (
+    # Prefer the live cloudflared URL (refreshed on every restart) over the
+    # static env-var value, which goes stale when quick-tunnel hostnames rotate.
+    webui_url = (
         getattr(_webui_module, "cloudflared_tunnel_url", None) if _webui_module else None
-    )
+    ) or WEBUI_PUBLIC_URL
     if not webui_url:
         # cloudflared is starting up — tunnel URL not ready yet
         if _webui_module and getattr(_webui_module, "WEBUI_CLOUDFLARED_AUTO", True):
@@ -9872,7 +9874,7 @@ async def reboot(ctx):
         except Exception as e:
             logger.error(f"Error disconnecting voice client on reboot: {e}")
         await client.close()
-        os._exit(0)
+        os._exit(1)  # non-zero so systemd Restart=on-failure triggers
     else:
         await ctx.followup.send("Reboot cancelled.")
         logger.info("Reboot cancelled by admin.")
