@@ -1037,10 +1037,19 @@ def run_startup_diagnostics() -> StartupReport:
         report.notes.append(f"yt-dlp {ytdlp_version} available.")
 
     if importlib.util.find_spec("yt_dlp_ejs") is None:
-        report.errors.append(
-            "yt-dlp-ejs is missing. Run `pip install --upgrade -r requirements.txt` "
-            "to install YouTube JavaScript challenge support."
-        )
+        try:
+            import subprocess as _sp
+            _sp.run([sys.executable, "-m", "pip", "install", "--quiet", "yt-dlp-ejs==0.8.0"], check=True)
+            importlib.invalidate_caches()
+        except Exception:
+            pass
+        if importlib.util.find_spec("yt_dlp_ejs") is None:
+            report.errors.append(
+                "yt-dlp-ejs is missing. Run `pip install --upgrade -r requirements.txt` "
+                "to install YouTube JavaScript challenge support."
+            )
+        else:
+            report.notes.append("yt-dlp-ejs auto-installed.")
     else:
         report.notes.append("yt-dlp-ejs available.")
 
