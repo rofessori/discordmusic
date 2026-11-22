@@ -110,6 +110,15 @@ def check_dependencies() -> list:
     return missing
 
 
+# asyncio only keeps weak references to tasks; hold them here so the server,
+# tunnel and log-drain tasks cannot be garbage-collected mid-flight.
+_background_tasks: set = set()
+
+def _keep_task(task):
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
 def _auto_install_deps(missing: list) -> bool:
     """
     Run pip install for missing packages.
@@ -330,10 +339,33 @@ class BotState:
     Live view of bot state exposed to the web server.
     Holds references (not snapshots) so values are always current.
     """
-    def __init__(self, client_ref, queue_ref):
+    def __init__(self, client_ref, queue_ref, has_group=None, max_queue_length=None):
         self._client     = client_ref
         self._queue      = queue_ref
         self._start_time = time.time()
+        self._has_group  = has_group
+        self.max_queue_length = max_queue_length
+
+    def user_has_group(self, user_id, group: str) -> bool:
+        """True when the Discord user is in a runtime restriction group."""
+        if self._has_group is None or not user_id:
+            return False
+        try:
+            return bool(self._has_group(user_id, group))
+        except Exception:
+            return False
+
+    def user_in_voice(self, user_id) -> bool:
+        """True when the Discord user is in the bot's current voice channel."""
+        vc = self._voice_client
+        channel = getattr(vc, "channel", None)
+        if channel is None or not user_id:
+            return False
+        return any(getattr(m, "id", None) == user_id for m in getattr(channel, "members", []))
+
+    @property
+    def voice_votes_enabled(self) -> bool:
+        return bool(getattr(self._client, "voice_votes_enabled", True))
 
     @property
     def queue(self) -> list:
@@ -564,8 +596,8 @@ async def _run_cloudflared(port: int) -> None:
                     logger.info(f"[webui] Cloudflare tunnel URL: {new_url}")
                     url_captured = True
 
-    asyncio.create_task(_drain(proc.stdout))
-    asyncio.create_task(_drain(proc.stderr))
+    _keep_task(asyncio.create_task(_drain(proc.stdout)))
+    _keep_task(asyncio.create_task(_drain(proc.stderr)))
 
 # ---------------------------------------------------------------------------
 # Start
@@ -586,7 +618,7 @@ async def start(*, playlists_dir: str, bot_state: "BotState", sessions,
         logger.info(
             f"[webui] Missing packages: {missing} — attempting auto-install"
         )
-        if not _auto_install_deps(missing):
+        if not await asyncio.to_thread(_auto_install_deps, missing):  # pip must not block the event loop
             logger.warning(
                 "[webui] Auto-install failed. "
                 f"Run manually: pip install {' '.join(missing)}"
@@ -625,7 +657,9 @@ async def start(*, playlists_dir: str, bot_state: "BotState", sessions,
         loop="asyncio",
         access_log=False,
         proxy_headers=True,
-        forwarded_allow_ips="*",
+        # Only trust X-Forwarded-For from known proxies; "*" lets any client
+        # spoof the address that sessions are IP-locked to.
+        forwarded_allow_ips=os.getenv("WEBUI_FORWARDED_ALLOW_IPS", "127.0.0.1"),
     )
 
     class _EmbeddedServer(uvicorn.Server):
@@ -651,14 +685,14 @@ async def start(*, playlists_dir: str, bot_state: "BotState", sessions,
         except Exception as exc:
             logger.error(f"[webui] Server stopped unexpectedly: {exc}", exc_info=True)
 
-    asyncio.create_task(_serve())
+    _keep_task(asyncio.create_task(_serve()))
 
     # 4. Start cloudflared tunnel unless explicitly disabled.
     # WEBUI_PUBLIC_URL is honoured for permanent static domains but does NOT
     # suppress cloudflared — quick-tunnel URLs are ephemeral and go stale on
     # restart.  Set WEBUI_CLOUDFLARED_AUTO=false to opt out entirely.
     if WEBUI_CLOUDFLARED_AUTO:
-        asyncio.create_task(_run_cloudflared(port))
+        _keep_task(asyncio.create_task(_run_cloudflared(port)))
     elif not WEBUI_PUBLIC_URL:
         logger.info(
             "[webui] WEBUI_CLOUDFLARED_AUTO=false and WEBUI_PUBLIC_URL not set. "

@@ -144,7 +144,7 @@ the bot's Discord presence is also playback-aware: idle shows `/play (yt-link)`,
 
 ## web ui
 
-requires `WEBUI_ENABLED=true`, `WEBUI_SECRET_KEY=<key>`, and `WEBUI_PUBLIC_URL=<url>` in `.env`.
+enabled by default; set `WEBUI_ENABLED=false` in `.env` to disable. the secret key and public tunnel url are set up automatically (see features).
 
 | command | purpose |
 | --- | --- |
@@ -162,7 +162,7 @@ requires `TV_ENABLED=true` in `.env`. admin-only.
 
 ## spotify
 
-requires `SPOTIFY_ENABLED=true` in `.env` and the optional spotify dependencies installed. users in `noplaylistcreate` cannot use these commands.
+enabled by default (`SPOTIFY_ENABLED=false` disables it); no spotify credentials required. users in `noplaylistcreate` cannot use these commands.
 
 | command | purpose |
 | --- | --- |

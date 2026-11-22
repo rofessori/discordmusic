@@ -154,9 +154,9 @@ restores are time-limited to avoid bringing back stale queues long after the lis
 
 ## spotify import
 
-activate by setting `SPOTIFY_ENABLED=true` in `.env` and installing the optional dependencies (`spotipy`, `ytmusicapi`, `rapidfuzz`; uncomment the lines in `requirements.txt`). you also need a spotify developer app for the client credentials flow: `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` in `.env`. users in `noplaylistcreate` cannot use import commands.
+enabled by default (`SPOTIFY_ENABLED=true`); set it to `false` in `.env` to turn it off. the dependencies (`spotipy`, `ytmusicapi`, `rapidfuzz`) are listed in `requirements.txt` and are auto-installed at startup when missing. no spotify credentials are needed: the bot reads the public `open.spotify.com` playlist page. if `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` are set, the official web api is used as a fallback when scraping fails. users in `noplaylistcreate` cannot use import commands.
 
-`/spotify import <url>` takes a spotify playlist url, uri (`spotify:playlist:...`), or bare id. it reads the spotify playlist through the web api, then searches youtube music for each track. each match gets a confidence score from four components: title similarity (40%), artist similarity (30%), duration match (20%), and youtube result type — official audio, music video, or user upload (10%). scores are computed with fuzzy string matching after normalizing text to remove accents, featured-artist annotations, official/lyrics suffixes, and extra whitespace.
+`/spotify import <url>` takes a spotify playlist url, uri (`spotify:playlist:...`), or bare id. it reads the spotify playlist, then searches youtube music for each track. each match gets a confidence score from four components: title similarity (40%), artist similarity (30%), duration match (20%), and youtube result type — official audio, music video, or user upload (10%). scores are computed with fuzzy string matching after normalizing text to remove accents, featured-artist annotations, official/lyrics suffixes, and extra whitespace.
 
 tracks above 0.82 confidence are accepted automatically. tracks between 0.50 and 0.82 go to manual review. tracks below 0.30 are dropped. if `auto:true` is passed, only the auto-threshold applies and no review message is posted.
 
@@ -177,7 +177,7 @@ only the user who ran `/spotify import` can interact with the review. the sessio
 
 ## web ui
 
-activate by setting `WEBUI_ENABLED=true`, `WEBUI_SECRET_KEY=<strong-random-key>`, and `WEBUI_PUBLIC_URL=<your-url>` in `.env`, then install the optional dependencies (`uvicorn`, `fastapi`; uncomment the lines in `requirements.txt`). the server starts inside the bot's asyncio event loop — no separate process needed.
+enabled by default (`WEBUI_ENABLED=true`); set `WEBUI_ENABLED=false` in `.env` to turn it off. on first start the bot generates `WEBUI_SECRET_KEY` and writes it to `.env`, auto-installs `uvicorn`/`fastapi` when missing, and — unless `WEBUI_CLOUDFLARED_AUTO=false` — downloads `cloudflared` and opens a public Cloudflare quick tunnel so `/webui` links work from anywhere. **this means a default install is reachable from the internet through that tunnel**; access still requires a `/webui` session link or the secret key. set `WEBUI_CLOUDFLARED_AUTO=false` to keep the web ui local-only. the server starts inside the bot's asyncio event loop — no separate process needed.
 
 **per-user sessions:** each user runs `/webui` in Discord and receives an ephemeral link (visible only to them). the link contains a one-time session token issued by the bot. the first HTTP request from the browser binds the session to that IP address. any subsequent request from a different IP is rejected. sessions expire automatically after 2 minutes of inactivity — the browser tab's now-playing poll (every 10s) keeps the session alive as long as the tab is open. when a session expires, the browser shows a clear message telling the user to use `/webui` to get a new link.
 
@@ -187,20 +187,20 @@ activate by setting `WEBUI_ENABLED=true`, `WEBUI_SECRET_KEY=<strong-random-key>`
 
 **networking:**
 
-- default: `127.0.0.1:8765` — local only. set `WEBUI_BIND_HOST=0.0.0.0` for LAN/homelab.
-- for public access: `cloudflared tunnel --url http://127.0.0.1:8765` gives a public https url. set `WEBUI_PUBLIC_URL` to that url so `/webui` produces correct links.
-- for homelab reverse proxy: set `WEBUI_BIND_HOST` to your internal ip, point your ingress at that host:port, and set `WEBUI_PUBLIC_URL` to the externally reachable url. the server passes `proxy_headers=True` so `X-Forwarded-For` is respected for IP locking.
+- default: binds `127.0.0.1:8765` and is published through the automatic cloudflared quick tunnel. behind the tunnel, sessions are IP-locked to Cloudflare's `CF-Connecting-IP`. set `WEBUI_BIND_HOST=0.0.0.0` for LAN/homelab.
+- with `WEBUI_CLOUDFLARED_AUTO=false`, set `WEBUI_PUBLIC_URL` yourself if you publish the port another way.
+- for homelab reverse proxy: set `WEBUI_BIND_HOST` to your internal ip, point your ingress at that host:port, and set `WEBUI_PUBLIC_URL` to the externally reachable url. `X-Forwarded-For` is only trusted from the addresses in `WEBUI_FORWARDED_ALLOW_IPS` (default `127.0.0.1`); set it to your reverse proxy's address, otherwise every user appears to come from the proxy.
 
 **what it does:**
 
 - browse playlists you can access in a sidebar (scoped to your ownership/manager permissions).
 - open any editable playlist, reorder tracks by dragging, remove tracks, add tracks by youtube url.
 - read-only view for playlists you can see but not edit.
-- read-only live queue view with manual refresh.
+- live queue view with manual refresh, add-to-queue by youtube url, and skip/pause controls. these follow the Discord rules: non-admins must be in the bot's voice channel, the queue length cap applies, `noskip` blocks skipping, and while voice votes are enabled non-admin skips must go through `/skip` in Discord. web-queued tracks pass the same duration/size checks as `/play` when they reach playback.
 - now-playing in the top bar, polled every 10 seconds.
 - session expiry and IP mismatch surface clear messages in the ui, not generic errors.
 
-**what it does not do** (by design): create, delete, or rename playlists; edit favorites; reorder the live queue.
+**what it does not do** (by design): delete or rename playlists; edit favorites; reorder the live queue. playlist creation honours `noplaylistcreate` and rejects duplicate names.
 
 ## live tv / stream
 

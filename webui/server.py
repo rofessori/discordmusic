@@ -106,6 +106,14 @@ try:
     # -----------------------------------------------------------------------
 
     def _get_client_ip(request: Request) -> str:
+        # Behind the bundled cloudflared tunnel every request arrives from
+        # loopback; Cloudflare sets CF-Connecting-IP itself and overwrites any
+        # client-supplied value, so it is the only trustworthy client address.
+        # Only honour it when the server is not directly reachable.
+        if os.getenv("WEBUI_BIND_HOST", "127.0.0.1") in ("127.0.0.1", "localhost", "::1"):
+            cf_ip = request.headers.get("cf-connecting-ip", "").strip()
+            if cf_ip:
+                return cf_ip
         if request.client and request.client.host:
             return request.client.host
         return "unknown"
@@ -139,7 +147,7 @@ try:
             if token in _sessions._sessions:
                 raise HTTPException(status_code=401, detail="inactive")
 
-        if _secret_key and hmac.compare_digest(token, _secret_key):
+        if _secret_key and hmac.compare_digest(token.encode("utf-8"), _secret_key.encode("utf-8")):
             return _SessionContext(discord_user_id=0, is_admin=True, token=token,
                                    discord_username="admin")
 
@@ -391,10 +399,23 @@ try:
             "thumbnail": f"https://img.youtube.com/vi/{vid}/mqdefault.jpg" if vid else None,
         }
 
+    def _require_player_control(ctx: _SessionContext) -> None:
+        """Same rule as Discord: non-admins must share the bot's voice channel."""
+        if ctx.is_admin or _bot_state is None:
+            return
+        if not _bot_state.user_in_voice(ctx.discord_user_id):
+            raise HTTPException(status_code=403, detail="Join the bot's voice channel to control playback")
+
     @app.post("/api/player/skip")
     async def player_skip(ctx: _SessionContext = _auth):
         if _bot_state is None:
             raise HTTPException(status_code=503, detail="Bot state unavailable")
+        _require_player_control(ctx)
+        if not ctx.is_admin:
+            if _bot_state.user_has_group(ctx.discord_user_id, "noskip"):
+                raise HTTPException(status_code=403, detail="Your account is in the noskip group")
+            if _bot_state.voice_votes_enabled:
+                raise HTTPException(status_code=403, detail="Skipping needs a vote - use /skip in Discord")
         ok = _bot_state.skip()
         logger.info(f"[player/skip] user={ctx.discord_user_id} ({ctx.discord_username}) result={ok}")
         return {"ok": ok, "msg": "Skipped" if ok else "Nothing to skip"}
@@ -403,6 +424,7 @@ try:
     async def player_pause(ctx: _SessionContext = _auth):
         if _bot_state is None:
             raise HTTPException(status_code=503, detail="Bot state unavailable")
+        _require_player_control(ctx)
         if _bot_state.is_paused:
             ok = _bot_state.resume()
             logger.info(f"[player/pause] user={ctx.discord_user_id} action=resume result={ok}")
@@ -484,15 +506,23 @@ try:
         if not video_id:
             raise HTTPException(status_code=422, detail="Could not extract a YouTube video ID")
         canonical = _canonical_youtube_url(video_id)
-        title = await _fetch_youtube_title(canonical) or f"youtu.be/{video_id}"
         if _bot_state is None:
             raise HTTPException(status_code=503, detail="Bot state unavailable")
+        _require_player_control(ctx)
+        max_len = _bot_state.max_queue_length
+        if not ctx.is_admin and max_len and len(_bot_state.queue) >= max_len:
+            raise HTTPException(status_code=409, detail=f"Queue is full ({max_len} songs)")
+        title = await _fetch_youtube_title(canonical) or f"youtu.be/{video_id}"
+        # needs_refresh routes the entry through fetch_track() at playback, so
+        # the normal duration/size limits and per-user rules still apply.
         _bot_state.add_to_queue({
             "id":            video_id,
             "title":         title,
             "webpage_url":   canonical,
-            "needs_refresh": False,
+            "needs_refresh": True,
             "added_via":     "webui",
+            "requested_by_user_id": ctx.discord_user_id or None,
+            "requested_by":  ctx.discord_username or "webui",
         })
         logger.info(
             f"[queue/add] user={ctx.discord_user_id} ({ctx.discord_username}) "
@@ -538,9 +568,19 @@ try:
         if not ctx.discord_user_id:
             raise HTTPException(status_code=403, detail="Cannot create playlist without a Discord user session")
         body = await request.json()
+        if _bot_state is not None and _bot_state.user_has_group(ctx.discord_user_id, "noplaylistcreate"):
+            raise HTTPException(status_code=403, detail="Your account is in the noplaylistcreate group")
         name = str(body.get("name") or "").strip()
         if not name:
             raise HTTPException(status_code=422, detail="name is required")
+        for other_path in _playlist_metadata_files():
+            try:
+                other = _load_playlist(other_path)
+            except Exception:
+                continue
+            if (not other.get("deleted") and other.get("type") != "favorites"
+                    and str(other.get("name") or "").strip().lower() == name.lower()):
+                raise HTTPException(status_code=409, detail="A playlist with that name already exists")
         if len(name) > 80:
             raise HTTPException(status_code=422, detail="name is too long (max 80 characters)")
         visibility = str(body.get("visibility") or "private").lower()
@@ -591,19 +631,32 @@ try:
             incoming = body["tracks"]
             if not isinstance(incoming, list):
                 raise HTTPException(status_code=422, detail="tracks must be a list")
+            # Reorder/remove must not rewrite tracks: keep every server-owned
+            # field (admin_disabled, added_at, cache_*) of tracks that already
+            # exist, and only build fresh entries for genuinely new YouTube ids.
+            existing = {}
+            for old in pl.get("tracks", []):
+                if isinstance(old, dict) and old.get("id"):
+                    existing.setdefault(str(old["id"]), old)
             valid = []
-            for t in incoming:
+            for t in incoming[:500]:
                 if not isinstance(t, dict):
                     continue
                 vid = str(t.get("id") or "")
                 url = str(t.get("webpage_url") or "")
-                if not vid and not url:
+                if vid in existing:
+                    valid.append(existing[vid])
+                    continue
+                if not vid and url and _is_youtube_url(url):
+                    vid = _extract_video_id(url) or ""
+                if not re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
                     continue
                 valid.append({
                     "id":            vid,
-                    "title":         str(t.get("title") or url or "Unknown")[:500],
-                    "webpage_url":   url,
-                    "needs_refresh": bool(t.get("needs_refresh", True)),
+                    "title":         str(t.get("title") or "Unknown")[:500],
+                    "webpage_url":   _canonical_youtube_url(vid),
+                    "needs_refresh": True,
+                    "added_at":      time.time(),
                     "cache_key":     None,
                     "cache_path":    None,
                     "cache_mode":    "streaming",
@@ -649,6 +702,11 @@ try:
             raise HTTPException(status_code=422, detail="Could not extract a YouTube video ID")
         canonical = _canonical_youtube_url(video_id)
         title = await _fetch_youtube_title(canonical) or f"youtu.be/{video_id}"
+        # Re-read after the network await so an edit made meanwhile (Discord or
+        # another tab) is not overwritten with the copy loaded above.
+        path, pl = _find_playlist_by_id(playlist_id)
+        if pl is None or not _can_edit(pl, ctx):
+            raise HTTPException(status_code=404, detail="Playlist not found")
         tracks = pl.setdefault("tracks", [])
         for t in tracks:
             if str(t.get("id") or "") == video_id:
@@ -910,7 +968,7 @@ try:
         Requires SPOTIFY_ENABLED=true and spotify dependencies installed.
         """
         try:
-            import spotify_import as _sp
+            import modules.spotify_import as _sp
         except ImportError:
             raise HTTPException(status_code=503,
                 detail="Spotify module not available. Set SPOTIFY_ENABLED=true and install dependencies.")
@@ -925,7 +983,8 @@ try:
             raise HTTPException(status_code=422, detail="url is required")
 
         try:
-            spotify_tracks = await _sp.fetch_spotify_tracks(url)
+            # fetch_spotify_tracks returns (playlist_name, tracks)
+            _playlist_name, spotify_tracks = await _sp.fetch_spotify_tracks(url)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"Spotify fetch failed: {exc}")
 
