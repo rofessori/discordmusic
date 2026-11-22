@@ -1,5 +1,7 @@
 # discord music bot x)
 
+**version 26.2.0** — versions are `year.release.hotfix`; the running version is logged at startup.
+
 a discord music bot for playing audio from any youtube video in your server’s voice channel. to use it, you need a bot token and invite url—see the [discord developer quick-start bullshittery on their devsite](https://discord.com/developers/docs/quick-start/getting-started).
 
 also has commands for handling, saving, and displaying quotes from a specific channel.
@@ -58,6 +60,11 @@ DOWNLOAD_DELETE_DELAY_SECONDS=600
 YTDLP_NO_CHECK_CERTIFICATE=false
 MAX_PLAYLIST_TRACKS=100
 MAX_URLS_PER_MESSAGE=10
+
+# web ui (on by default, opens a public cloudflare quick tunnel)
+WEBUI_ENABLED=true
+WEBUI_CLOUDFLARED_AUTO=true          # false = local-only web ui
+WEBUI_FORWARDED_ALLOW_IPS=127.0.0.1  # reverse proxies trusted for X-Forwarded-For
 ```
 
 Keep `YTDLP_NO_CHECK_CERTIFICATE=false` in production so yt-dlp verifies TLS certificates. Set it to `true` only as a temporary debug override. Guided `/playlist new` accepts up to `MAX_URLS_PER_MESSAGE` YouTube links per message and stores up to `MAX_PLAYLIST_TRACKS` tracks per playlist creation session. The bot starts at 20% volume unless a voice-channel default has been saved by an admin.

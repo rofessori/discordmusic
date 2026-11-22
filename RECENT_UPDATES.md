@@ -2,6 +2,30 @@
 
 Source: local git history and maintainer notes.
 
+## 26.2.0 — 2026-11-22
+
+Second release of 2026. Versions are now `year.release.hotfix`.
+
+### Playback
+- A track that cannot be played (removed, private, region-blocked) no longer strands the rest of the queue: the bot says which song it skipped and moves on, stopping only after five failures in a row.
+- `/stop` now answers its slash command instead of showing "The application did not respond".
+- `/join` no longer reports a failure when the voice handshake is slow.
+- `/getqueue` works in long sessions (it used to fail past roughly 25 songs) and shows queued songs as queued even if they were played earlier.
+- Admins confirming a large download with 👍 now actually get the download instead of a silent stream fallback.
+- `/reboot` queue backups are always written next to the bot, wherever it was started from.
+
+### Web UI
+- Spotify search in the Web UI works again (it crashed on every request).
+- Web skip/pause/add-to-queue now follow the Discord rules: same voice channel, queue cap, `noskip`, and votes via `/skip`. Web-queued songs get the same duration/size checks as `/play`.
+- Reordering a playlist in the Web UI no longer re-enables admin-disabled tracks or drops cache metadata.
+- Playlist creation in the Web UI honours `noplaylistcreate` and rejects duplicate names.
+- Session IP locking can no longer be bypassed with a forged `X-Forwarded-For` header. Reverse-proxy setups must set `WEBUI_FORWARDED_ALLOW_IPS`.
+
+### Stability and safety
+- A stale `discordmusic.pid` can no longer make the bot kill an unrelated process at startup.
+- The quote guesser is loaded once, from `modules/`, instead of being replaced by an outdated copy.
+- systemd template runs Python unbuffered so crash logs are not lost.
+
 ## 2026-05-28
 
 ### WebUI — fully automatic, always works
